@@ -1,0 +1,19 @@
+# Core dependencies
+fitz>=0.0.1
+Pillow>=9.0.0
+opencv-python>=4.6.0
+numpy>=1.21.0
+
+# OCR
+easyocr>=1.6.0
+
+# VLM
+anthropic>=0.7.0
+
+# Segmentation
+segment-anything>=1.0
+torch>=2.0.0
+torchvision>=0.15.0
+
+# Optional but recommended
+tqdm>=4.65.0  # Progress bars

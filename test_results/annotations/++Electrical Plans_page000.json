@@ -1,0 +1,948 @@
+{
+  "image_file": "++Electrical Plans_page000.png",
+  "image_size": {
+    "width": 7200,
+    "height": 5400
+  },
+  "rooms": [
+    {
+      "room_number": "",
+      "room_name": "ELECTRICAL GENERAL NOTES",
+      "category": "unknown",
+      "bbox": [
+        260,
+        164,
+        632,
+        48
+      ],
+      "confidence": 0.7638320205577791
+    },
+    {
+      "room_number": "",
+      "room_name": "ELECTRICAL SYMBOL LIST",
+      "category": "unknown",
+      "bbox": [
+        3179,
+        164,
+        554,
+        48
+      ],
+      "confidence": 0.8796773979030549
+    },
+    {
+      "room_number": "",
+      "room_name": "DISTRIBUTION EQUIPMENT (CONT:)",
+      "category": "unknown",
+      "bbox": [
+        4221,
+        233,
+        433,
+        40
+      ],
+      "confidence": 0.8552801626611408
+    },
+    {
+      "room_number": "",
+      "room_name": "REQUIREMENTS OF THE FOL",
+      "category": "unknown",
+      "bbox": [
+        358,
+        284,
+        262,
+        27
+      ],
+      "confidence": 0.9350753770633271
+    },
+    {
+      "room_number": "",
+      "room_name": "FDNY REQUIREMENTS",
+      "category": "unknown",
+      "bbox": [
+        757,
+        403,
+        212,
+        26
+      ],
+      "confidence": 0.9996698770608881
+    },
+    {
+      "room_number": "",
+      "room_name": "DIMENS",
+      "category": "unknown",
+      "bbox": [
+        2394,
+        403,
+        77,
+        26
+      ],
+      "confidence": 0.999966468318459
+    },
+    {
+      "room_number": "",
+      "room_name": "STANDARDS AND REQUIREMENTS",
+      "category": "unknown",
+      "bbox": [
+        584,
+        454,
+        311,
+        19
+      ],
+      "confidence": 0.955448342462902
+    },
+    {
+      "room_number": "",
+      "room_name": "JURISDICTION DIRECTIVES AND REQUIREMENTS",
+      "category": "unknown",
+      "bbox": [
+        527,
+        550,
+        435,
+        19
+      ],
+      "confidence": 0.7958325024990227
+    },
+    {
+      "room_number": "",
+      "room_name": "JIPMENT",
+      "category": "unknown",
+      "bbox": [
+        571,
+        616,
+        77,
+        27
+      ],
+      "confidence": 0.9985994506884797
+    },
+    {
+      "room_number": "",
+      "room_name": "BUILDING MANAGEMENT SYSTEM",
+      "category": "unknown",
+      "bbox": [
+        5521,
+        712,
+        308,
+        26
+      ],
+      "confidence": 0.7308810738099657
+    },
+    {
+      "room_number": "",
+      "room_name": "ROOMS",
+      "category": "unknown",
+      "bbox": [
+        1832,
+        764,
+        75,
+        18
+      ],
+      "confidence": 0.9716206757066204
+    },
+    {
+      "room_number": "",
+      "room_name": "IIPMENT",
+      "category": "unknown",
+      "bbox": [
+        2642,
+        786,
+        75,
+        19
+      ],
+      "confidence": 0.5802203328337265
+    },
+    {
+      "room_number": "",
+      "room_name": "DOCUMENTS",
+      "category": "unknown",
+      "bbox": [
+        359,
+        814,
+        125,
+        19
+      ],
+      "confidence": 0.9697316008222124
+    },
+    {
+      "room_number": "",
+      "room_name": "R ELECTRICAL",
+      "category": "unknown",
+      "bbox": [
+        2872,
+        808,
+        133,
+        26
+      ],
+      "confidence": 0.9886691400669605
+    },
+    {
+      "room_number": "",
+      "room_name": "EQUIPMEN",
+      "category": "unknown",
+      "bbox": [
+        1388,
+        859,
+        103,
+        19
+      ],
+      "confidence": 0.9999668302023542
+    },
+    {
+      "room_number": "",
+      "room_name": "EQUIPMENT AND CONDUIT FROM BUILDING STRUCTURE",
+      "category": "unknown",
+      "bbox": [
+        1567,
+        903,
+        516,
+        27
+      ],
+      "confidence": 0.7341029330189921
+    },
+    {
+      "room_number": "",
+      "room_name": "OR EQUIPMEN",
+      "category": "unknown",
+      "bbox": [
+        1748,
+        955,
+        137,
+        19
+      ],
+      "confidence": 0.7745686831527656
+    },
+    {
+      "room_number": "",
+      "room_name": "EMEN",
+      "category": "unknown",
+      "bbox": [
+        1562,
+        1000,
+        47,
+        19
+      ],
+      "confidence": 0.7771106362342834
+    },
+    {
+      "room_number": "",
+      "room_name": "ADDITIONAL SUPPLEMEN",
+      "category": "unknown",
+      "bbox": [
+        1365,
+        1073,
+        233,
+        19
+      ],
+      "confidence": 0.9992636211332964
+    },
+    {
+      "room_number": "",
+      "room_name": "THE EQUIPMENT",
+      "category": "unknown",
+      "bbox": [
+        1911,
+        1073,
+        160,
+        19
+      ],
+      "confidence": 0.9876527234293262
+    },
+    {
+      "room_number": "",
+      "room_name": "EQUIPMENT SHOWN ON",
+      "category": "unknown",
+      "bbox": [
+        2800,
+        1073,
+        221,
+        19
+      ],
+      "confidence": 0.8921072753014606
+    },
+    {
+      "room_number": "",
+      "room_name": "JIREMENT",
+      "category": "unknown",
+      "bbox": [
+        617,
+        1095,
+        92,
+        19
+      ],
+      "confidence": 0.5985516222503914
+    },
+    {
+      "room_number": "",
+      "room_name": "UIPMEN",
+      "category": "unknown",
+      "bbox": [
+        2479,
+        1146,
+        70,
+        19
+      ],
+      "confidence": 0.987058636220893
+    },
+    {
+      "room_number": "",
+      "room_name": "RMINAL BOXES, AND OTHER EQUIPMENT",
+      "category": "unknown",
+      "bbox": [
+        2585,
+        1139,
+        375,
+        27
+      ],
+      "confidence": 0.6658783994187762
+    },
+    {
+      "room_number": "",
+      "room_name": "BEFORE COMMENCING WORK",
+      "category": "unknown",
+      "bbox": [
+        358,
+        1162,
+        279,
+        26
+      ],
+      "confidence": 0.856919807510123
+    },
+    {
+      "room_number": "",
+      "room_name": "ELECTRICAL DEVICES OR ELECTRIC",
+      "category": "unknown",
+      "bbox": [
+        1320,
+        1191,
+        323,
+        19
+      ],
+      "confidence": 0.9764314046146875
+    },
+    {
+      "room_number": "",
+      "room_name": "EQUIPMENT",
+      "category": "unknown",
+      "bbox": [
+        1669,
+        1191,
+        109,
+        19
+      ],
+      "confidence": 0.9999337185366896
+    },
+    {
+      "room_number": "",
+      "room_name": "GOVERNMENTAL AGENCIES",
+      "category": "unknown",
+      "bbox": [
+        639,
+        1213,
+        257,
+        26
+      ],
+      "confidence": 0.9037868377502741
+    },
+    {
+      "room_number": "",
+      "room_name": "ELEVATOR",
+      "category": "unknown",
+      "bbox": [
+        5522,
+        1281,
+        98,
+        19
+      ],
+      "confidence": 0.9999445762580125
+    },
+    {
+      "room_number": "",
+      "room_name": "JIPMENT",
+      "category": "unknown",
+      "bbox": [
+        3891,
+        1298,
+        75,
+        19
+      ],
+      "confidence": 0.6053833665596876
+    },
+    {
+      "room_number": "",
+      "room_name": "DIMENSIONS IN",
+      "category": "unknown",
+      "bbox": [
+        959,
+        1331,
+        151,
+        26
+      ],
+      "confidence": 0.6828084746820173
+    },
+    {
+      "room_number": "",
+      "room_name": "JILDING MANAGEMENT SYSTEM",
+      "category": "unknown",
+      "bbox": [
+        3721,
+        1387,
+        291,
+        26
+      ],
+      "confidence": 0.9722979108019644
+    },
+    {
+      "room_number": "",
+      "room_name": "ELECTRICAL DRAWINGS",
+      "category": "unknown",
+      "bbox": [
+        359,
+        1405,
+        221,
+        19
+      ],
+      "confidence": 0.9990012877019766
+    },
+    {
+      "room_number": "",
+      "room_name": "EQUIPMENT",
+      "category": "unknown",
+      "bbox": [
+        1011,
+        1405,
+        109,
+        19
+      ],
+      "confidence": 0.9996052264178098
+    },
+    {
+      "room_number": "",
+      "room_name": "EQUIPMENT",
+      "category": "unknown",
+      "bbox": [
+        5521,
+        1466,
+        117,
+        26
+      ],
+      "confidence": 0.9993761202075915
+    },
+    {
+      "room_number": "",
+      "room_name": "EQUIPMENT MUST",
+      "category": "unknown",
+      "bbox": [
+        2692,
+        1471,
+        167,
+        27
+      ],
+      "confidence": 0.7824786089051959
+    },
+    {
+      "room_number": "",
+      "room_name": "NECESSARY, EQUIPMEN",
+      "category": "unknown",
+      "bbox": [
+        2280,
+        1492,
+        225,
+        32
+      ],
+      "confidence": 0.8940125706444709
+    },
+    {
+      "room_number": "",
+      "room_name": "BROADWAY SUITE 910",
+      "category": "unknown",
+      "bbox": [
+        6546,
+        1500,
+        188,
+        19
+      ],
+      "confidence": 0.8071601114704037
+    },
+    {
+      "room_number": "",
+      "room_name": "EQUIPMENT MAY BE MOVED",
+      "category": "unknown",
+      "bbox": [
+        2281,
+        1567,
+        263,
+        26
+      ],
+      "confidence": 0.7370790421135823
+    },
+    {
+      "room_number": "",
+      "room_name": "NEW YORK OFFICE",
+      "category": "unknown",
+      "bbox": [
+        6743,
+        1652,
+        148,
+        19
+      ],
+      "confidence": 0.9466048056358884
+    },
+    {
+      "room_number": "",
+      "room_name": "SUITE 203",
+      "category": "unknown",
+      "bbox": [
+        6692,
+        1675,
+        87,
+        19
+      ],
+      "confidence": 0.8383511794111996
+    },
+    {
+      "room_number": "",
+      "room_name": "COORDINATED WITH BUILDING MANAGEMENT, DISPOSAL WORK SHAL",
+      "category": "unknown",
+      "bbox": [
+        358,
+        1708,
+        639,
+        26
+      ],
+      "confidence": 0.5789678172194263
+    },
+    {
+      "room_number": "",
+      "room_name": "ELECTRICAL DRAWINGS INDICATE CIRCUIT NUMBERS",
+      "category": "unknown",
+      "bbox": [
+        1319,
+        1708,
+        488,
+        26
+      ],
+      "confidence": 0.752545120725783
+    },
+    {
+      "room_number": "",
+      "room_name": "UIPMENT",
+      "category": "unknown",
+      "bbox": [
+        1647,
+        1737,
+        86,
+        19
+      ],
+      "confidence": 0.9993461295267914
+    },
+    {
+      "room_number": "",
+      "room_name": "EQUIPMENT INCLUDING BUT NOT",
+      "category": "unknown",
+      "bbox": [
+        746,
+        1803,
+        307,
+        27
+      ],
+      "confidence": 0.8002645964874474
+    },
+    {
+      "room_number": "",
+      "room_name": "NEW EQUIPMENT INCLUDING",
+      "category": "unknown",
+      "bbox": [
+        1787,
+        1973,
+        272,
+        19
+      ],
+      "confidence": 0.9710122135709685
+    },
+    {
+      "room_number": "",
+      "room_name": "DISTRIBUTION EQUIPMENT",
+      "category": "unknown",
+      "bbox": [
+        3198,
+        1961,
+        325,
+        26
+      ],
+      "confidence": 0.8265897215844125
+    },
+    {
+      "room_number": "",
+      "room_name": "ELECTRICAL DEVICES/EQUIPMENT ARE TO BE INSTALLED,",
+      "category": "unknown",
+      "bbox": [
+        2281,
+        1994,
+        527,
+        27
+      ],
+      "confidence": 0.5194850317085634
+    },
+    {
+      "room_number": "",
+      "room_name": "DWIDF",
+      "category": "unknown",
+      "bbox": [
+        6557,
+        2024,
+        59,
+        18
+      ],
+      "confidence": 0.9459792455893088
+    },
+    {
+      "room_number": "",
+      "room_name": "ELECTRICAL EQUIPMENT",
+      "category": "unknown",
+      "bbox": [
+        2534,
+        2039,
+        229,
+        27
+      ],
+      "confidence": 0.9994776528612076
+    },
+    {
+      "room_number": "",
+      "room_name": "JIPMENT W",
+      "category": "unknown",
+      "bbox": [
+        1725,
+        2069,
+        98,
+        18
+      ],
+      "confidence": 0.6116054595632648
+    },
+    {
+      "room_number": "",
+      "room_name": "IE REQUIREMENTS OF THE ELECTRICAL",
+      "category": "unknown",
+      "bbox": [
+        718,
+        2090,
+        364,
+        27
+      ],
+      "confidence": 0.6339455379832185
+    },
+    {
+      "room_number": "",
+      "room_name": "DROOM",
+      "category": "unknown",
+      "bbox": [
+        633,
+        2113,
+        77,
+        26
+      ],
+      "confidence": 0.9999268555996703
+    },
+    {
+      "room_number": "",
+      "room_name": "MECHANICAL",
+      "category": "unknown",
+      "bbox": [
+        1803,
+        2113,
+        128,
+        26
+      ],
+      "confidence": 0.7334777528006069
+    },
+    {
+      "room_number": "",
+      "room_name": "UIPMENT",
+      "category": "unknown",
+      "bbox": [
+        1955,
+        2113,
+        83,
+        26
+      ],
+      "confidence": 0.9998865897658984
+    },
+    {
+      "room_number": "",
+      "room_name": "REQUIREMENTS",
+      "category": "unknown",
+      "bbox": [
+        357,
+        2205,
+        157,
+        32
+      ],
+      "confidence": 0.9334560432362775
+    },
+    {
+      "room_number": "",
+      "room_name": "MECHANICAL",
+      "category": "unknown",
+      "bbox": [
+        6507,
+        2260,
+        109,
+        19
+      ],
+      "confidence": 0.9999520483823976
+    },
+    {
+      "room_number": "",
+      "room_name": "NATIONAL ELECTRICAL",
+      "category": "unknown",
+      "bbox": [
+        5521,
+        2287,
+        207,
+        26
+      ],
+      "confidence": 0.9267529079303446
+    },
+    {
+      "room_number": "",
+      "room_name": "CONNECTION(SI TO ALL EQUIPMEN",
+      "category": "unknown",
+      "bbox": [
+        2282,
+        2305,
+        317,
+        19
+      ],
+      "confidence": 0.5737298860174529
+    },
+    {
+      "room_number": "",
+      "room_name": "REQUIREMENTS WITH",
+      "category": "unknown",
+      "bbox": [
+        4655,
+        2304,
+        207,
+        26
+      ],
+      "confidence": 0.8447742898959442
+    },
+    {
+      "room_number": "",
+      "room_name": "EQUIPMEN",
+      "category": "unknown",
+      "bbox": [
+        4914,
+        2304,
+        105,
+        26
+      ],
+      "confidence": 0.7334544257657215
+    },
+    {
+      "room_number": "",
+      "room_name": "JIPMENT . ROUGHING",
+      "category": "unknown",
+      "bbox": [
+        2321,
+        2349,
+        189,
+        26
+      ],
+      "confidence": 0.5781311914197705
+    },
+    {
+      "room_number": "",
+      "room_name": "MECHANICAL",
+      "category": "unknown",
+      "bbox": [
+        358,
+        2422,
+        127,
+        26
+      ],
+      "confidence": 0.7219065816475997
+    },
+    {
+      "room_number": "",
+      "room_name": "HALL ANY OF THIS ELEMENTS",
+      "category": "unknown",
+      "bbox": [
+        830,
+        2422,
+        268,
+        26
+      ],
+      "confidence": 0.7261678095989711
+    },
+    {
+      "room_number": "",
+      "room_name": "DOCUMENTS",
+      "category": "unknown",
+      "bbox": [
+        359,
+        2474,
+        125,
+        18
+      ],
+      "confidence": 0.9935478009448743
+    },
+    {
+      "room_number": "",
+      "room_name": "IPMENT AND MATERIALS AS REQUIRED",
+      "category": "unknown",
+      "bbox": [
+        599,
+        2776,
+        353,
+        27
+      ],
+      "confidence": 0.9257880791860598
+    },
+    {
+      "room_number": "",
+      "room_name": "DEBRIS AND REMOVED ELECTRICAL EQUIPMENT ANDIOR",
+      "category": "unknown",
+      "bbox": [
+        2399,
+        2776,
+        528,
+        27
+      ],
+      "confidence": 0.7153399368283954
+    },
+    {
+      "room_number": "",
+      "room_name": "UIPMENT SHOWN",
+      "category": "unknown",
+      "bbox": [
+        937,
+        2799,
+        161,
+        26
+      ],
+      "confidence": 0.9900821413133627
+    },
+    {
+      "room_number": "",
+      "room_name": "ROOM",
+      "category": "unknown",
+      "bbox": [
+        5521,
+        2844,
+        66,
+        26
+      ],
+      "confidence": 0.9925722923912901
+    },
+    {
+      "room_number": "",
+      "room_name": "TO BE FURNISHED BY THE MECHANICAL",
+      "category": "unknown",
+      "bbox": [
+        3447,
+        2940,
+        362,
+        19
+      ],
+      "confidence": 0.9484977772665576
+    },
+    {
+      "room_number": "",
+      "room_name": "IDFD HFRFIN",
+      "category": "unknown",
+      "bbox": [
+        814,
+        2969,
+        120,
+        18
+      ],
+      "confidence": 0.9653940993040279
+    },
+    {
+      "room_number": "",
+      "room_name": "REQUIREMENTS",
+      "category": "unknown",
+      "bbox": [
+        1360,
+        3233,
+        154,
+        19
+      ],
+      "confidence": 0.9987351059089531
+    },
+    {
+      "room_number": "",
+      "room_name": "ROOMS WITHIN OR BEYOND THE",
+      "category": "unknown",
+      "bbox": [
+        809,
+        3278,
+        300,
+        19
+      ],
+      "confidence": 0.8235232716805787
+    },
+    {
+      "room_number": "",
+      "room_name": "EXISTING EQUIPMENT/DEVICE",
+      "category": "unknown",
+      "bbox": [
+        2631,
+        3520,
+        272,
+        19
+      ],
+      "confidence": 0.7425445344521173
+    },
+    {
+      "room_number": "",
+      "room_name": "EQUIPMENTIDEVICE",
+      "category": "unknown",
+      "bbox": [
+        2714,
+        3609,
+        184,
+        26
+      ],
+      "confidence": 0.9760958462353782
+    },
+    {
+      "room_number": "",
+      "room_name": "INDICATES RELOCATED EXISTING EQUIPMENT/DEVICE",
+      "category": "unknown",
+      "bbox": [
+        2524,
+        3660,
+        497,
+        19
+      ],
+      "confidence": 0.7016367482448443
+    },
+    {
+      "room_number": "",
+      "room_name": "AC MOMENTARY TOGG",
+      "category": "unknown",
+      "bbox": [
+        4458,
+        3941,
+        212,
+        26
+      ],
+      "confidence": 0.678628825929773
+    },
+    {
+      "room_number": "",
+      "room_name": "ELECTRICAL GENERAL NOTES_",
+      "category": "unknown",
+      "bbox": [
+        6482,
+        4806,
+        490,
+        45
+      ],
+      "confidence": 0.9496786446271964
+    }
+  ],
+  "panels": [],
+  "electrical_counts": {},
+  "source": "ocr_only"
+}
