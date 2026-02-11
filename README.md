@@ -203,7 +203,7 @@ export ANTHROPIC_API_KEY="your-api-key-here"
 
 Or create a `.env` file:
 ```
-export ANTHROPIC_API_KEY=sk-ant-...
+export ANTHROPIC_API_KEY=<your-api-key-here>
 ```
 
 Then load it:
