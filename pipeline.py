@@ -432,8 +432,12 @@ class AnnotationPipeline:
         # Step 7: Export to Label Studio
         self._print_step("STEP 7: Exporting to Label Studio")
 
+        # CRITICAL FIX: Export from processed_dir (cleaned, SFT-filtered)
+        # NOT from annotations_dir (original, may contain panels)
+        # The processed_dir contains annotations after prepare_sft_annotation()
+        # which removes equipment/panels and ensures SFT compatibility
         num_exported = self.exporter.export(
-            annotations_dir, images_dir, output_dir / "label_studio_import.json"
+            processed_dir, images_dir, output_dir / "label_studio_import.json"
         )
 
         # Save config for reproducibility

@@ -129,6 +129,22 @@ class LabelStudioExporter:
         if not image_file:
             return None
 
+        # DEFENSIVE VALIDATION: Reject annotations containing forbidden equipment
+        # Hard constraint: Panels, equipment, symbols MUST NOT appear in Label Studio output
+        if annotation.get("panels"):
+            logger.warning(
+                f"Skipping {image_file}: Contains {len(annotation.get('panels', []))} panels "
+                "(equipment forbidden in SFT-ready output)"
+            )
+            return None
+
+        if "ocr_rooms" in annotation:
+            logger.warning(
+                f"Skipping {image_file}: Contains unprocessed OCR results "
+                "(must be filtered through SFT validation)"
+            )
+            return None
+
         # Get image dimensions
         img_w = annotation.get("image_size", {}).get(
             "width", self.config.default_width
@@ -169,7 +185,10 @@ class LabelStudioExporter:
             )
 
             # Add text annotation for room label
-            room_label = room.get("room_number", "") or room.get("room_name", "")
+            # CRITICAL FIX: Prioritize semantic room_name over numeric room_number
+            # Before: room_number → number always wins if present
+            # After: room_name → semantic label preferred, number is fallback
+            room_label = room.get("room_name", "") or room.get("room_number", "")
             if room_label:
                 result.append(
                     {
@@ -187,27 +206,10 @@ class LabelStudioExporter:
                     }
                 )
 
-        # Add panel annotations
-        for i, panel in enumerate(annotation.get("panels", [])):
-            bbox = panel.get("bbox", [0, 0, 50, 50])
-
-            result.append(
-                {
-                    "id": f"panel_{i}",
-                    "type": "rectanglelabels",
-                    "from_name": "label",
-                    "to_name": "image",
-                    "original_width": img_w,
-                    "original_height": img_h,
-                    "value": {
-                        "x": (bbox[0] / img_w) * 100,
-                        "y": (bbox[1] / img_h) * 100,
-                        "width": (bbox[2] / img_w) * 100,
-                        "height": (bbox[3] / img_h) * 100,
-                        "rectanglelabels": ["electrical_panel"],
-                    },
-                }
-            )
+        # CRITICAL FIX: Removed panel export section
+        # Hard constraint: Equipment, panels, and symbols MUST NOT appear in final annotations
+        # Only rooms/spaces should be exported for SFT dataset
+        # Panels are electrical equipment, not spatial rooms - they contaminate VLM training
 
         return task
 
