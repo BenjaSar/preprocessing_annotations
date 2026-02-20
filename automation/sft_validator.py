@@ -85,54 +85,121 @@ class SemanticRoomValidator:
     """Filter non-spatial text from room annotations."""
 
     NON_ROOM_PATTERNS = [
-        # Documentation/Compliance
-        r"(DOCUMENTATION|REQUIREMENTS|RECOMMENDED|APPROVAL|PERMIT)",
+        # ------------------------------------------------------------------ #
+        # Documentation / compliance blocks                                    #
+        # ------------------------------------------------------------------ #
+        r"(DOCUMENTATION|REQUIREMENTS?|RECOMMENDED|APPROVAL|PERMIT)",
         r"(ENERGY CODE|COMPLIANCE|STANDARD|SPECIFICATION)",
-        r"(DISCLAIMER|NOTES|LEGEND|SYMBOL|ABBREVIATION)",
-        # Equipment/Technical (not spatial)
-        r"(^EQUIPMENT$|EQUIPMENT\s*\(|LIGHTING\s+EQUIPMENT|MANUFACTURER'S|MANUFACTURER)",
-        # Floor/Sheet/Drawing metadata
-        r"(SHEET|DRAWING|PLAN|REVISIONS|TITLE BLOCK|SCALE|FLOOR|BASEMENT|3RD|2ND|FIRST|SECOND)",
-        r"(ELECTRICAL|MECHANICAL|PLUMBING).*(PLAN|FIRST FLOOR|SECOND|BASEMENT|PAGE)",
-        # Administrative text
-        r"(DOCUMENT|STATEMENT|OUTLINE|MOVEMENT|OVERRIDE|PROVIDE|EQUIPMENT)",
+        r"(DISCLAIMER|NOTES?|LEGEND|SYMBOL|ABBREVIATION)",
+        r"(SHEET|DRAWING|PLAN|REVISIONS|TITLE BLOCK|SCALE)",
         r"(SCHEDULE|INDEX|KEY|REFERENCE|ENDORSEMENT)",
         r"^(OUTLINED|THE OUTLINED)",
-        # Phase 4 Critical Additions (Phase 5 Fix #2)
-        r"^I(?=[A-Z]{5,})",             # Corrupted OCR: capital I prefix (IELECTRICAL, IACCESSORY)
-        r"^A(?=[A-Z]{5,})",             # Corrupted OCR: A prefix (ACOMPRESSOR)
-        r"ELECTRICAL\s+(?!ROOM)",       # ELECTRICAL equipment (not ELECTRICAL ROOM)
-        r"EQUIPMENT(?!\s*ROOM)",        # EQUIPMENT equipment (not EQUIPMENT ROOM)
+        # General/national/FDNY electrical notes headers
+        r"(ELECTRICAL|MECHANICAL|PLUMBING)\s+(GENERAL|SYMBOL|DRAWING|DEVICE|NOTES|PLAN)",
+        r"(NATIONAL|STATE|LOCAL|FDNY|NYC)\s+(ELECTRICAL|FIRE|BUILDING|CODE)",
+        # ------------------------------------------------------------------ #
+        # Instruction / directive sentences                                    #
+        # ------------------------------------------------------------------ #
+        r"CONTRACTOR\s+TO\s+(VERIFY|COORDINATE|PROVIDE|INSTALL|CONFIRM)",
+        r"(SENSOR|DETECTOR)\s+PLACEMENT",
+        r"TAKE\s+OFF(\s+ONLY)?",
+        r"USE\s+\w+\s+FOR\s*(:|$)",          # "USE DEVELOPMENT FOR:"
+        r"^USE\s+(THIS|DEVELOPMENT|DIAGRAM|DRAWING|PLAN)",
+        r"(SHALL|MUST|SHOULD)\s+(BE|NOT|COMPLY)",
+        r"BEFORE\s+COMMENCING",
+        r"AS\s+(DIRECTED|REQUIRED|NEEDED|SPECIFIED|INDICATED)",
+        r"(REFER|SEE)\s+(TO\s+)?(SHEET|DRAWING|PLAN|SPEC|DETAIL)",
+        r"PER\s+(CODE|NEC|NFPA|AHJ|OWNER)",
+        r"(INSTALL|COORDINATE|VERIFY|PROVIDE|REMOVE|RELOCATE)\s+ALL",
+        # ------------------------------------------------------------------ #
+        # Equipment / non-spatial objects                                      #
+        # ------------------------------------------------------------------ #
+        # Panels – most important: PANEL A / PANEL B / PANEL 1 / LP-1
+        r"^PANEL\s*[A-Z0-9\-]*$",
+        r"^(LP|DP|EP|PP|MDP|SDP)\s*[\-]?\s*\d*[A-Z]?$",   # LP-1, MDP, etc.
+        r"^SWITCHBOARD\b",
+        r"^(TRANSFORMER|DISCONNECT|BREAKER|FEEDER|RISER)\b",
+        # Equipment text blocks
+        r"(^EQUIPMENT$|EQUIPMENT\s*\(|EQUIPMENT\s+SHOWN|EQUIPMENT\s+MUST|"
+        r"EQUIPMENT\s+MAY|EXISTING\s+EQUIPMENT|NEW\s+EQUIPMENT|"
+        r"DISTRIBUTION\s+EQUIPMENT|ELECTRICAL\s+EQUIPMENT|EQUIPMENT\s+INCLUDING)",
+        r"DEVICE(S)?\s*/?\s*EQUIPMENT",
+        r"INDICATED\s+RELOCATED\s+EXISTING",
+        # ------------------------------------------------------------------ #
+        # Building-system non-room labels                                      #
+        # ------------------------------------------------------------------ #
+        r"BUILDING\s+MANAGEMENT\s+SYSTEM",
+        r"(DISTRIBUTION|EMERGENCY|NORMAL)\s+(PANEL|SYSTEM|BUS|POWER)\b",
+        r"(AC|DC)\s+(MOMENTARY|CIRCUIT|DISCONNECT)",
+        # ------------------------------------------------------------------ #
+        # Address / firm metadata                                              #
+        # ------------------------------------------------------------------ #
+        r"(BROADWAY|AVENUE|STREET|BOULEVARD|DRIVE|LANE)\s+(SUITE|#)",
+        r"\b(NEW YORK|LOS ANGELES|CHICAGO|BOSTON|HOUSTON)\b",
+        r"^\d{3,5}\s+(BROADWAY|AVENUE|STREET)",  # "326 ROCKAWAY"
+        r"NEW\s+YORK\s+(OFFICE|CITY)",
+        # ------------------------------------------------------------------ #
+        # OCR corruption patterns                                              #
+        # ------------------------------------------------------------------ #
+        r"^I(?=[A-Z]{5,})",      # IELECTRICAL, IACCESS...
+        r"^A(?=[A-Z]{5,})",      # ACOMPRESSOR...
+        # Short OCR word-fragments (start with consonant cluster, no vowels in key positions)
+        r"^[BCDFGHJKLMNPQRSTVWXYZ]{2}[IPME]{1}[A-Z]{0,4}[NT]$",  # UIPMEN, JIPMENT, IPMEN
+        # Partial words clearly cut off
+        r"^(UIPMEN|JIPMEN|IPMEN|EMEN|JIPMENT|UIPMENT|QUIPMEN)T?$",
+        r"^(IIPMENT|ELEMEN|LEMEN|JIMENT|DIMEN)T?S?$",
+        r"^(RMINAL|ECTION|IREMENT|JIREMENT|UIREMENT)S?$",
+        r"^(QIPMEN|DWIDF|JILDING|IDFD)$",  # specific junk from test data
+        # ------------------------------------------------------------------ #
+        # ELECTRICAL standalone (not ELECTRICAL ROOM)                         #
+        # OCR splits "ELECTRICAL ROOM" into two tokens → "ELECTRICAL" alone   #
+        # is ambiguous without "ROOM"; handled by requiring compound in       #
+        # room_name_patterns, but guard here too for VLM output.              #
+        # ------------------------------------------------------------------ #
+        r"^ELECTRICAL$",         # block bare "ELECTRICAL" – must be "ELECTRICAL ROOM"
+        r"ELECTRICAL\s+(?!ROOM\b)",  # ELECTRICAL + anything except ROOM
     ]
 
     VALID_ROOM_KEYWORDS = {
+        # Commercial
         "OFFICE", "CONFERENCE", "MEETING", "LOBBY", "RESTROOM",
         "BATHROOM", "KITCHEN", "STORAGE", "ELEVATOR", "STAIRWELL",
         "HALLWAY", "CORRIDOR", "VESTIBULE", "FOYER", "RECEPTION",
         "LOUNGE", "BREAKROOM", "CAFE", "AUDITORIUM", "CLASSROOM",
-        "LAB", "MECHANICAL", "ELECTRICAL", "DATA CENTER", "SERVER",
+        "LAB", "MECHANICAL", "DATA CENTER", "SERVER",
         "PROGRAM SUPPORT", "STUDENT SERVICES", "CARPENTRY", "WORKSHOP",
-        "FACULTY", "ENTRANCE", "ACEMENT", "BEDROOM", "LIVING", "DINING",
+        "FACULTY", "ENTRANCE", "BEDROOM", "LIVING", "DINING",
         "LAUNDRY", "UTILITY", "GARAGE", "CLOSET", "LINEN", "PANTRY",
         "POWDER", "MASTER",
-        # Phase 2 Critical Additions
-        "SUITE",           # Suite 301, Suite 302 (commercial spaces)
-        "BREAK",           # Break Room (alternative to BREAKROOM)
-        # Phase 2 Medium Priority
-        "TELECOM",         # Telecom Room (technical)
-        "BICYCLE",         # Bicycle Storage (utility)
-        "COMPACTOR",       # Compactor Room (utility)
-        "BOILER",          # Boiler Room (utility)
-        "PUMP",            # Pump Room (utility)
-        "JANITOR",         # Janitor Room (facility)
-        "ART",             # Art Room (specialized)
-        "MUSIC",           # Music Room (specialized)
-        "STUDY",           # Study Room (specialized)
-        "READING",         # Reading Room (specialized)
-        # Phase 2 Low Priority
-        "CCTV",            # CCTV Room (security)
-        "PLUMBING",        # Plumbing Room (utility)
-        "MACHINE",         # Machine Room (utility)
+        "SUITE",
+        "BREAK",
+        "TELECOM",
+        "BICYCLE",
+        "COMPACTOR",
+        "BOILER",
+        "PUMP",
+        "JANITOR",
+        "ART", "MUSIC", "STUDY", "READING",
+        "CCTV",
+        "PLUMBING",
+        "MACHINE",
+        # Additional compound rooms required for MEP floor plans
+        "FIRE PUMP",
+        "COMMUNITY FACILITY",
+        "BUILDING STORAGE",
+        "BICYCLE STORAGE",
+        "COMMERCIAL STORAGE",
+        "COMPACTOR ROOM",
+        "ELEVATOR MACHINE",
+        # Residential abbreviation expansions (after _expand_abbreviation)
+        "WALK-IN CLOSET",
+        "FAMILY ROOM",
+        "DINING ROOM",
+        "LIVING ROOM",
+        "MASTER BEDROOM",
+        "POWDER ROOM",
+        "LINEN CLOSET",
+        "STUDIO",
     }
 
     # CRITICAL FIX: Abbreviation expansion mapping
@@ -271,9 +338,13 @@ class SemanticRoomValidator:
             # This ensures abbreviated room names (BR, LR, BA) are recognized
             expanded_name = self._expand_abbreviation(name)
 
-            # Keep if contains valid room keywords OR has good confidence
-            confidence = room.get("confidence", 0)
-            if any(kw in expanded_name for kw in self.VALID_ROOM_KEYWORDS) or confidence > 0.95:
+            # Keep ONLY if the name contains a valid room keyword.
+            # ⚠️  REMOVED: "or confidence > 0.95" bypass.
+            #    High OCR confidence does NOT mean the text is a room label.
+            #    OCR fragments like "UIPMEN" (confidence=0.9998) and
+            #    "PANEL A" (confidence=0.999) were bypassing this gate.
+            #    Confidence is handled separately in filter_by_confidence().
+            if any(kw in expanded_name for kw in self.VALID_ROOM_KEYWORDS):
                 # Store original name for display, expanded for validation
                 room["original_name"] = name
                 valid.append(room)

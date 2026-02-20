@@ -27,6 +27,9 @@ try:
         ImageResizer, SemanticRoomValidator, TaxonomyNormalizer,
         filter_by_confidence, validate_for_sft, prepare_sft_annotation
     )
+    from .automation.abbreviation_ocr_recovery import (
+        AbbreviationOCRRecovery, ResidentialAbbreviationRecovery
+    )
 except ImportError:
     from config import PipelineConfig
     from pdf_extractor import PDFExtractor
@@ -38,6 +41,9 @@ except ImportError:
         LabelNormalizer, QualityChecker, RegionExtractor,
         ImageResizer, SemanticRoomValidator, TaxonomyNormalizer,
         filter_by_confidence, validate_for_sft, prepare_sft_annotation
+    )
+    from automation.abbreviation_ocr_recovery import (
+        AbbreviationOCRRecovery, ResidentialAbbreviationRecovery
     )
 
 logger = logging.getLogger(__name__)
@@ -198,15 +204,56 @@ class AnnotationPipeline:
         except Exception as e:
             raise PipelineError(f"PDF extraction failed: {e}") from e
 
-        # Step 2: OCR text extraction
-        self._print_step("STEP 2: OCR text extraction")
+        # Step 2: OCR text extraction + abbreviation recovery
+        self._print_step("STEP 2: OCR text extraction + abbreviation recovery")
 
         ocr_results: Dict[str, List[RoomCandidate]] = {}
+        abbrev_recovery = AbbreviationOCRRecovery()  # no OCR tool yet; uses pattern matching
+
         for img_path in sorted(images_dir.glob("*.png")):
             try:
+                # 2a: Standard OCR room detection (compound merging + number linking built-in)
                 rooms = self.ocr_extractor.extract_and_find_rooms(img_path)
-                ocr_results[img_path.name] = rooms
-                logger.info(f"  {img_path.name}: {len(rooms)} room labels found")
+
+                # 2b: Abbreviation recovery — scan for residential short-forms
+                # that may have been rejected by strict room_name_patterns.
+                # Re-check raw OCR output for abbreviation tokens.
+                raw_detections = self.ocr_extractor.extract_text(img_path)
+                recovered_abbrevs: List[RoomCandidate] = []
+                for det in raw_detections:
+                    text = det.text.strip().upper()
+                    if ResidentialAbbreviationRecovery.is_residential_abbreviation(text):
+                        expanded = ResidentialAbbreviationRecovery.expand_abbreviation(text)
+                        x_coords = [p[0] for p in det.bbox]
+                        y_coords = [p[1] for p in det.bbox]
+                        x, y = min(x_coords), min(y_coords)
+                        w, h = max(x_coords) - x, max(y_coords) - y
+                        recovered_abbrevs.append(
+                            RoomCandidate(
+                                bbox=(x, y, w, h),
+                                room_number="",
+                                room_name=expanded,
+                                confidence=det.confidence,
+                                raw_text=text,
+                            )
+                        )
+
+                # Merge, deduplicate by proximity (50px threshold)
+                all_rooms = list(rooms)
+                for abbrev_cand in recovered_abbrevs:
+                    ax, ay = abbrev_cand.bbox[0], abbrev_cand.bbox[1]
+                    already_covered = any(
+                        abs(r.bbox[0] - ax) < 50 and abs(r.bbox[1] - ay) < 50
+                        for r in all_rooms
+                    )
+                    if not already_covered:
+                        all_rooms.append(abbrev_cand)
+
+                ocr_results[img_path.name] = all_rooms
+                logger.info(
+                    f"  {img_path.name}: {len(rooms)} rooms + "
+                    f"{len(recovered_abbrevs)} abbreviations recovered"
+                )
             except Exception as e:
                 logger.error(f"  {img_path.name}: OCR failed - {e}")
                 ocr_results[img_path.name] = []
