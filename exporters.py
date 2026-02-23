@@ -129,19 +129,26 @@ class LabelStudioExporter:
         if not image_file:
             return None
 
-        # DEFENSIVE VALIDATION: Reject annotations containing forbidden equipment
-        # Hard constraint: Panels, equipment, symbols MUST NOT appear in Label Studio output
+        # Hard gate 1: only export SFT-ready annotations.
+        # sft_ready is set by prepare_sft_annotation(); False means zero valid
+        # rooms remained after semantic filtering.  Exporting them would
+        # populate Label Studio with empty or noise-only tasks.
+        if not annotation.get("sft_ready", True):
+            logger.warning(f"Skipping {image_file}: sft_ready=False")
+            return None
+
+        # Hard gate 2: reject unprocessed annotations (still contain panels or raw OCR)
         if annotation.get("panels"):
             logger.warning(
                 f"Skipping {image_file}: Contains {len(annotation.get('panels', []))} panels "
-                "(equipment forbidden in SFT-ready output)"
+                "(run through post-processing pipeline before export)"
             )
             return None
 
         if "ocr_rooms" in annotation:
             logger.warning(
-                f"Skipping {image_file}: Contains unprocessed OCR results "
-                "(must be filtered through SFT validation)"
+                f"Skipping {image_file}: Contains raw ocr_rooms key "
+                "(must pass through SFT validation first)"
             )
             return None
 
@@ -293,58 +300,52 @@ class ReviewPrioritizer:
 
     def _compute_confidence(self, annotation: dict) -> tuple[float, str]:
         """
-        Compute confidence score for an annotation.
+        Compute a multi-factor confidence score for review prioritisation.
 
-        Scoring factors:
-        - Base score: 0.5
-        - Has rooms: +0.2
-        - Room has number: +0.1 per room
-        - Room has name: +0.1 per room
-        - Has error: -0.5
+        Replaces the naive base(0.5)+has_rooms(+0.2)+completeness(+0.3) formula
+        which ignored OCR confidence, room density, and SFT readiness flags.
 
-        Returns:
-            Tuple of (confidence score, reason string).
+        Factors:
+          - sft_ready=False           → 0.10 immediately
+          - VLM/OCR error             → 0.00 immediately
+          - No rooms                  → 0.20
+          - Average OCR confidence    → 40% weight
+          - Room density vs image size→ 30% weight
+          - Name+number completeness  → 30% weight
         """
-        score = 0.5
-        reasons = []
-
-        # Check for errors
         if annotation.get("error"):
-            return 0.0, f"Error: {annotation['error']}"
+            return 0.0, f"VLM error: {annotation['error']}"
+
+        if not annotation.get("sft_ready", True):
+            return 0.10, "sft_ready=False"
 
         rooms = annotation.get("rooms", [])
-
-        # No rooms detected
         if not rooms:
-            return 0.2, "No rooms detected"
+            return 0.20, "No rooms detected"
 
-        # Has rooms
-        score += 0.2
-        reasons.append(f"{len(rooms)} rooms")
+        # Average OCR confidence (VLM rooms without confidence field assumed 0.92)
+        confidences = [float(r.get("confidence", 0.92)) for r in rooms]
+        avg_conf = sum(confidences) / len(confidences)
 
-        # Evaluate room quality
-        complete_rooms = 0
-        for room in rooms:
-            room_score = 0.7
+        # Room density: expect ≥0.5 rooms per megapixel
+        img = annotation.get("image_size", {})
+        mp = (img.get("width", 1000) * img.get("height", 1000)) / 1_000_000
+        expected = max(1.0, mp * 0.5)
+        density = min(1.0, len(rooms) / expected)
 
-            if room.get("room_number"):
-                room_score += 0.15
+        # Completeness: rooms with both room_name and room_number
+        complete = sum(
+            1 for r in rooms
+            if (r.get("room_name") or r.get("name")) and r.get("room_number")
+        )
+        completeness = complete / len(rooms)
 
-            if room.get("room_name"):
-                room_score += 0.15
-
-            if room_score >= 0.9:
-                complete_rooms += 1
-
-        # Bonus for complete rooms
-        completeness = complete_rooms / len(rooms) if rooms else 0
-        score += completeness * 0.3
-        reasons.append(f"{complete_rooms}/{len(rooms)} complete")
-
-        # Cap at 1.0
-        score = min(1.0, score)
-
-        return score, ", ".join(reasons)
+        score = 0.40 * avg_conf + 0.30 * density + 0.30 * completeness
+        reason = (
+            f"{len(rooms)} rooms | avg_conf={avg_conf:.2f} | "
+            f"density={density:.2f} | complete={complete}/{len(rooms)}"
+        )
+        return round(min(1.0, score), 4), reason
 
     def save_review_list(
         self, items: List[ReviewItem], output_file: str | Path
@@ -394,3 +395,320 @@ class ReviewPrioritizer:
 
         if len(items) > limit:
             print(f"  ... and {len(items) - limit} more")
+
+
+# ---------------------------------------------------------------------------
+# COCO JSON Exporter
+# ---------------------------------------------------------------------------
+
+class COCOExporter:
+    """
+    Export SFT-ready annotations in COCO object detection format.
+
+    COCO format is the native input for most VLM fine-tuning frameworks
+    (LLaVA, InternVL, PaliGemma, Qwen-VL, Idefics2).  Without this exporter
+    the pipeline required a manual conversion step before every training run.
+
+    Bbox convention: COCO uses [x, y, width, height] natively — matching the
+    pipeline's internal storage format, so no conversion is needed.
+    """
+
+    def __init__(self, description: str = "MEP Floor Plan Room Annotations"):
+        self.description = description
+
+    def export(
+        self,
+        processed_dir: Path | str,
+        images_dir: Path | str,
+        output_file: Path | str,
+        sft_only: bool = True,
+    ) -> int:
+        """
+        Export all SFT-ready annotations to a single COCO JSON file.
+
+        Args:
+            processed_dir: Directory containing post-processed JSON annotations.
+            images_dir:    Directory containing the source PNG images.
+            output_file:   Output path for the COCO JSON file.
+            sft_only:      If True (default), skip annotations with sft_ready=False.
+
+        Returns:
+            Number of images exported.
+        """
+        try:
+            from .automation.taxonomy import CANONICAL_TYPES
+        except ImportError:
+            from automation.taxonomy import CANONICAL_TYPES
+
+        processed_dir = Path(processed_dir)
+        images_dir = Path(images_dir)
+        output_file = Path(output_file)
+        output_file.parent.mkdir(parents=True, exist_ok=True)
+
+        # Build category list from canonical taxonomy (sorted for determinism)
+        sorted_types = sorted(CANONICAL_TYPES.keys())
+        cat_id_map = {t: i + 1 for i, t in enumerate(sorted_types)}
+
+        coco: dict = {
+            "info": {
+                "description": self.description,
+                "version": "1.0",
+            },
+            "categories": [
+                {"id": cat_id_map[t], "name": t, "supercategory": "room"}
+                for t in sorted_types
+            ],
+            "images": [],
+            "annotations": [],
+        }
+
+        ann_id = 1
+        img_id = 0
+
+        for json_file in sorted(processed_dir.glob("*.json")):
+            try:
+                with open(json_file) as f:
+                    ann = json.load(f)
+            except Exception as e:
+                logger.error(f"COCOExporter: failed to read {json_file}: {e}")
+                continue
+
+            if sft_only and not ann.get("sft_ready", False):
+                continue
+
+            image_file = ann.get("image_file", json_file.stem + ".png")
+            img_size = ann.get("image_size", {})
+            w = img_size.get("width", 0)
+            h = img_size.get("height", 0)
+
+            img_id += 1
+            coco["images"].append({
+                "id": img_id,
+                "file_name": image_file,
+                "width": w,
+                "height": h,
+            })
+
+            for room in ann.get("rooms", []):
+                bbox = room.get("bbox", [])
+                if len(bbox) != 4:
+                    continue
+
+                # COCO uses [x, y, w, h] — matches our internal format exactly
+                bx, by, bw, bh = [float(v) for v in bbox]
+                if bw <= 0 or bh <= 0:
+                    continue
+
+                # Resolve canonical type from field chain
+                raw_type = room.get("type") or room.get("category") or "other"
+                cat_id = cat_id_map.get(raw_type, cat_id_map.get("other", 1))
+
+                coco["annotations"].append({
+                    "id": ann_id,
+                    "image_id": img_id,
+                    "category_id": cat_id,
+                    "bbox": [bx, by, bw, bh],
+                    "area": bw * bh,
+                    "iscrowd": 0,
+                    "attributes": {
+                        "room_name": room.get("room_name") or room.get("name", ""),
+                        "room_number": room.get("room_number", ""),
+                        "confidence": room.get("confidence", 1.0),
+                    },
+                })
+                ann_id += 1
+
+        with open(output_file, "w") as f:
+            json.dump(coco, f, indent=2)
+
+        logger.info(
+            f"COCOExporter: exported {img_id} images, "
+            f"{ann_id - 1} annotations → {output_file}"
+        )
+        return img_id
+
+    def export_splits(
+        self,
+        processed_dir: Path | str,
+        images_dir: Path | str,
+        output_dir: Path | str,
+        splits: tuple = (0.70, 0.15, 0.15),
+        seed: int = 42,
+    ) -> dict:
+        """
+        Export train / val / test COCO files with stratified splitting.
+
+        Stratification is by dominant room category so rare types (compactor,
+        bicycle_storage, pump_room) appear proportionally in all three splits.
+
+        Args:
+            processed_dir: Directory of processed annotation JSON files.
+            images_dir:    Directory of source images.
+            output_dir:    Directory to write train.json, val.json, test.json.
+            splits:        Fractions for (train, val, test). Must sum to 1.0.
+            seed:          Random seed for reproducibility.
+
+        Returns:
+            Dict with split names as keys and image counts as values.
+        """
+        import random
+        from collections import defaultdict
+
+        assert abs(sum(splits) - 1.0) < 1e-6, "splits must sum to 1.0"
+
+        processed_dir = Path(processed_dir)
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        # Load all SFT-ready annotations
+        all_anns = []
+        for json_file in sorted(processed_dir.glob("*.json")):
+            try:
+                with open(json_file) as f:
+                    ann = json.load(f)
+                if ann.get("sft_ready", False):
+                    all_anns.append((json_file.name, ann))
+            except Exception as e:
+                logger.error(f"Split: failed to read {json_file}: {e}")
+
+        if not all_anns:
+            logger.warning("No SFT-ready annotations found for splitting")
+            return {}
+
+        # Group by dominant room type for stratification
+        def dominant_type(ann: dict) -> str:
+            from collections import Counter
+            rooms = ann.get("rooms", [])
+            if not rooms:
+                return "other"
+            types = [r.get("type") or r.get("category") or "other" for r in rooms]
+            return Counter(types).most_common(1)[0][0]
+
+        by_type: dict = defaultdict(list)
+        for fname, ann in all_anns:
+            by_type[dominant_type(ann)].append((fname, ann))
+
+        # Stratified split within each type group
+        rng = random.Random(seed)
+        train_anns, val_anns, test_anns = [], [], []
+
+        for group in by_type.values():
+            rng.shuffle(group)
+            n = len(group)
+            n_train = int(n * splits[0])
+            n_val = int(n * splits[1])
+            train_anns.extend(group[:n_train])
+            val_anns.extend(group[n_train:n_train + n_val])
+            test_anns.extend(group[n_train + n_val:])
+
+        # Write each split
+        counts = {}
+        for split_name, split_data in [("train", train_anns), ("val", val_anns), ("test", test_anns)]:
+            # Build a temporary processed_dir containing only this split
+            split_dir = output_dir / f"_{split_name}_tmp"
+            split_dir.mkdir(exist_ok=True)
+            for fname, ann in split_data:
+                import shutil
+                shutil.copy2(processed_dir / fname, split_dir / fname)
+
+            n = self.export(split_dir, images_dir, output_dir / f"{split_name}.json")
+            counts[split_name] = n
+
+            # Clean up temp dir
+            import shutil
+            shutil.rmtree(split_dir)
+            logger.info(f"Split '{split_name}': {n} images → {output_dir}/{split_name}.json")
+
+        return counts
+
+
+# ---------------------------------------------------------------------------
+# Coverage Report Generator
+# ---------------------------------------------------------------------------
+
+class CoverageReporter:
+    """
+    Generate a room-type coverage report across all SFT-ready annotations.
+
+    Without this report there is no visibility into class imbalance before
+    fine-tuning.  A plan set with 200 'office' annotations and 2 'janitor'
+    annotations will produce a biased model with no warning.
+    """
+
+    # Types below this count are flagged as low-coverage
+    LOW_COVERAGE_THRESHOLD: int = 10
+
+    def generate(
+        self,
+        processed_dir: Path | str,
+        output_file: Path | str,
+    ) -> dict:
+        """
+        Scan all SFT-ready annotations and produce a coverage report JSON.
+
+        Args:
+            processed_dir: Directory of processed annotation JSON files.
+            output_file:   Path to write the report JSON.
+
+        Returns:
+            Coverage dict (also written to output_file).
+        """
+        from collections import Counter
+
+        processed_dir = Path(processed_dir)
+        output_file = Path(output_file)
+        output_file.parent.mkdir(parents=True, exist_ok=True)
+
+        type_counts: Counter = Counter()
+        total_images = 0
+        sft_ready_images = 0
+
+        for json_file in sorted(processed_dir.glob("*.json")):
+            try:
+                with open(json_file) as f:
+                    ann = json.load(f)
+            except Exception:
+                continue
+
+            total_images += 1
+            if not ann.get("sft_ready", False):
+                continue
+            sft_ready_images += 1
+
+            for room in ann.get("rooms", []):
+                t = room.get("type") or room.get("category") or "other"
+                type_counts[t] += 1
+
+        low_coverage = [t for t, c in type_counts.items() if c < self.LOW_COVERAGE_THRESHOLD]
+
+        report = {
+            "total_images": total_images,
+            "sft_ready_images": sft_ready_images,
+            "total_sft_ready_rooms": sum(type_counts.values()),
+            "by_type": dict(type_counts.most_common()),
+            "low_coverage_types": low_coverage,
+        }
+
+        with open(output_file, "w") as f:
+            json.dump(report, f, indent=2)
+
+        # Console output
+        print(f"\n{'='*60}")
+        print(f"COVERAGE REPORT  ({sft_ready_images}/{total_images} images SFT-ready)")
+        print(f"{'='*60}")
+        for t, count in type_counts.most_common():
+            bar = "█" * min(40, count // max(1, sum(type_counts.values()) // 40))
+            flag = "  ⚠  LOW" if count < self.LOW_COVERAGE_THRESHOLD else ""
+            print(f"  {t:30s} {count:5d}  {bar}{flag}")
+        if low_coverage:
+            print(f"\n⚠  Low-coverage types (<{self.LOW_COVERAGE_THRESHOLD}): {', '.join(low_coverage)}")
+        print(f"{'='*60}\n")
+
+        return report
+
+    def print_summary(self, report: dict) -> None:
+        """Print a summary from a previously generated report dict."""
+        print(f"SFT-ready rooms: {report.get('total_sft_ready_rooms', 0)}")
+        low = report.get("low_coverage_types", [])
+        if low:
+            print(f"⚠  Low-coverage types: {', '.join(low)}")

@@ -1,335 +1,221 @@
 """
 Quality validation for room annotations.
 
-Checks annotation consistency, validates bounding boxes, and identifies issues.
+Fixes applied vs previous version:
+  1. Bbox format: readers now convert [x, y, w, h] → [x1, y1, x2, y2] before
+     unpacking, matching the format written by all annotation writers.
+  2. Field name: reads room type from "type" | "category" | "room_type"
+     (in priority order) instead of the non-existent "room_type"-only lookup.
+  3. Taxonomy: VALID_ROOM_TYPES imported from canonical taxonomy module so
+     the whitelist is always in sync with TaxonomyNormalizer.
+  4. Overlap detection: circulation types (hallway, corridor, lobby, elevator,
+     stairwell) are exempt — adjacency overlaps are expected in floor plans.
 """
 
 import logging
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
+
+try:
+    from .taxonomy import VALID_TYPES
+except ImportError:
+    from taxonomy import VALID_TYPES
 
 logger = logging.getLogger(__name__)
 
 
+def _xywh_to_xyxy(bbox: List) -> Tuple[float, float, float, float]:
+    """Convert [x, y, width, height] → (x1, y1, x2, y2)."""
+    x, y, w, h = [float(v) for v in bbox]
+    return x, y, x + w, y + h
+
+
+def _get_room_type(room: Dict) -> Optional[str]:
+    """Read room type using canonical field priority: type > category > room_type."""
+    return room.get("type") or room.get("category") or room.get("room_type")
+
+
 @dataclass
 class ValidationIssue:
-    """Represents a single annotation quality issue."""
-
-    severity: str  # "error", "warning", "info"
-    code: str  # Issue code (e.g., "BBOX_OUT_OF_BOUNDS")
-    message: str  # Human-readable description
-    room_index: Optional[int] = None  # Which room (if applicable)
-    affected_rooms: Optional[List[int]] = None  # Multiple rooms (e.g., overlaps)
+    severity: str
+    code: str
+    message: str
+    room_index: Optional[int] = None
+    affected_rooms: Optional[List[int]] = None
 
 
 class QualityChecker:
     """Validate annotation quality and consistency."""
 
-    # Minimum bounding box area (in pixels)
-    MIN_BBOX_AREA = 50 * 50
-
-    # Valid room types (standardized)
-    VALID_ROOM_TYPES = {
-        "office",
-        "conference_room",
-        "meeting_room",
-        "restroom",
-        "kitchen",
-        "lobby",
-        "hallway",
-        "storage",
-        "mechanical_room",
-        "elevator",
-        "stairwell",
-        "other"
+    MIN_BBOX_AREA: int = 2500
+    VALID_ROOM_TYPES: Set[str] = VALID_TYPES
+    OVERLAP_EXEMPT_CATEGORIES: Set[str] = {
+        "hallway", "corridor", "lobby", "elevator", "stairwell", "riser",
     }
 
     def __init__(self, min_bbox_area: int = 2500, allow_overlaps: bool = False):
-        """
-        Initialize quality checker.
-
-        Args:
-            min_bbox_area: Minimum bounding box area in pixels
-            allow_overlaps: Whether to allow overlapping bounding boxes
-        """
         self.MIN_BBOX_AREA = min_bbox_area
         self.allow_overlaps = allow_overlaps
 
     def check_annotation(self, annotation: Dict, image_path: Optional[str] = None) -> List[ValidationIssue]:
-        """
-        Check a single annotation for quality issues.
-
-        Args:
-            annotation: Annotation dictionary with "rooms" and "image_size"
-            image_path: Optional path to image file (for verification)
-
-        Returns:
-            List of ValidationIssue objects
-        """
-        issues = []
-
-        # Check image metadata
+        issues: List[ValidationIssue] = []
         image_size = annotation.get("image_size", {})
         width = image_size.get("width")
         height = image_size.get("height")
 
         if not width or not height:
-            issues.append(ValidationIssue(
-                severity="error",
-                code="MISSING_IMAGE_SIZE",
-                message="Image dimensions not specified"
-            ))
-            # Can't validate bboxes without image size
+            issues.append(ValidationIssue("error", "MISSING_IMAGE_SIZE", "Image dimensions not specified"))
             return issues
 
-        # Check room annotations
         rooms = annotation.get("rooms", [])
-
         if not rooms:
-            issues.append(ValidationIssue(
-                severity="warning",
-                code="NO_ROOMS_DETECTED",
-                message="No rooms detected in image"
-            ))
+            issues.append(ValidationIssue("warning", "NO_ROOMS_DETECTED", "No rooms detected in image"))
             return issues
 
-        # Check each room
         for i, room in enumerate(rooms):
-            room_issues = self._check_room(room, i, width, height)
-            issues.extend(room_issues)
+            issues.extend(self._check_room(room, i, width, height))
 
-        # Check for overlaps
         if not self.allow_overlaps:
-            overlap_issues = self._check_overlaps(rooms)
-            issues.extend(overlap_issues)
+            issues.extend(self._check_overlaps(rooms))
 
         return issues
 
     def _check_room(self, room: Dict, index: int, img_width: int, img_height: int) -> List[ValidationIssue]:
-        """Check a single room annotation."""
-        issues = []
-
-        # Check bbox existence
+        issues: List[ValidationIssue] = []
         bbox = room.get("bbox")
+
         if not bbox:
-            issues.append(ValidationIssue(
-                severity="error",
-                code="MISSING_BBOX",
-                message="Bounding box missing",
-                room_index=index
-            ))
+            issues.append(ValidationIssue("error", "MISSING_BBOX", "Bounding box missing", room_index=index))
             return issues
 
-        # Check bbox format
         if len(bbox) != 4:
-            issues.append(ValidationIssue(
-                severity="error",
-                code="INVALID_BBOX_FORMAT",
-                message=f"Bbox format invalid: expected 4 values, got {len(bbox)}",
-                room_index=index
-            ))
+            issues.append(ValidationIssue("error", "INVALID_BBOX_FORMAT", f"Expected 4 values, got {len(bbox)}", room_index=index))
             return issues
 
         try:
-            x1, y1, x2, y2 = [float(v) for v in bbox]
+            bbox_floats = [float(v) for v in bbox]
         except (ValueError, TypeError):
-            issues.append(ValidationIssue(
-                severity="error",
-                code="BBOX_NOT_NUMERIC",
-                message="Bbox values are not numeric",
-                room_index=index
-            ))
+            issues.append(ValidationIssue("error", "BBOX_NOT_NUMERIC", "Bbox values not numeric", room_index=index))
             return issues
 
-        # Check bbox ordering
+        # FIX 1: Convert [x,y,w,h] → [x1,y1,x2,y2]
+        x1, y1, x2, y2 = _xywh_to_xyxy(bbox_floats)
+
         if x1 >= x2 or y1 >= y2:
-            issues.append(ValidationIssue(
-                severity="error",
-                code="INVALID_BBOX_COORDINATES",
-                message=f"Invalid bbox: x1 >= x2 or y1 >= y2",
-                room_index=index
-            ))
+            issues.append(ValidationIssue("error", "INVALID_BBOX_COORDINATES",
+                f"Degenerate bbox after xywh→xyxy: ({x1:.0f},{y1:.0f})→({x2:.0f},{y2:.0f})", room_index=index))
             return issues
 
-        # Check bounds
         if x1 < 0 or y1 < 0 or x2 > img_width or y2 > img_height:
-            issues.append(ValidationIssue(
-                severity="warning",
-                code="BBOX_OUT_OF_BOUNDS",
-                message=f"Bbox extends outside image bounds ({img_width}x{img_height})",
-                room_index=index
-            ))
+            issues.append(ValidationIssue("warning", "BBOX_OUT_OF_BOUNDS",
+                f"Bbox extends outside image ({img_width}×{img_height})", room_index=index))
 
-        # Check minimum area
         area = (x2 - x1) * (y2 - y1)
         if area < self.MIN_BBOX_AREA:
-            issues.append(ValidationIssue(
-                severity="warning",
-                code="BBOX_TOO_SMALL",
-                message=f"Bbox area {int(area)} < {self.MIN_BBOX_AREA}",
-                room_index=index
-            ))
+            issues.append(ValidationIssue("warning", "BBOX_TOO_SMALL",
+                f"Bbox area {int(area)} < {self.MIN_BBOX_AREA}", room_index=index))
 
-        # Check room type
-        room_type = room.get("room_type")
+        # FIX 2: Use canonical field chain; FIX 3: validate against full taxonomy
+        room_type = _get_room_type(room)
         if not room_type:
-            issues.append(ValidationIssue(
-                severity="error",
-                code="MISSING_ROOM_TYPE",
-                message="Room type label missing",
-                room_index=index
-            ))
+            issues.append(ValidationIssue("error", "MISSING_ROOM_TYPE",
+                "Room type missing (checked: type, category, room_type)", room_index=index))
         elif room_type not in self.VALID_ROOM_TYPES:
-            issues.append(ValidationIssue(
-                severity="error",
-                code="INVALID_ROOM_TYPE",
-                message=f"Unknown room type: {room_type}",
-                room_index=index
-            ))
+            issues.append(ValidationIssue("error", "INVALID_ROOM_TYPE",
+                f"Unknown room type: '{room_type}'", room_index=index))
 
-        # Optional: Check confidence score
         confidence = room.get("confidence")
         if confidence is not None:
             if not isinstance(confidence, (int, float)):
-                issues.append(ValidationIssue(
-                    severity="warning",
-                    code="INVALID_CONFIDENCE_TYPE",
-                    message="Confidence score is not numeric",
-                    room_index=index
-                ))
-            elif not (0.0 <= confidence <= 1.0):
-                issues.append(ValidationIssue(
-                    severity="warning",
-                    code="CONFIDENCE_OUT_OF_RANGE",
-                    message=f"Confidence {confidence} not in [0.0, 1.0]",
-                    room_index=index
-                ))
+                issues.append(ValidationIssue("warning", "INVALID_CONFIDENCE_TYPE",
+                    "Confidence not numeric", room_index=index))
+            elif not (0.0 <= float(confidence) <= 1.0):
+                issues.append(ValidationIssue("warning", "CONFIDENCE_OUT_OF_RANGE",
+                    f"Confidence {confidence} out of [0,1]", room_index=index))
 
         return issues
 
     def _check_overlaps(self, rooms: List[Dict]) -> List[ValidationIssue]:
-        """Check for overlapping bounding boxes."""
-        issues = []
-
+        issues: List[ValidationIssue] = []
         for i, room_i in enumerate(rooms):
             bbox_i = room_i.get("bbox")
             if not bbox_i or len(bbox_i) != 4:
+                continue
+            # FIX 4: exempt circulation types
+            type_i = (_get_room_type(room_i) or "").lower()
+            if type_i in self.OVERLAP_EXEMPT_CATEGORIES:
+                continue
+            try:
+                box_i = _xywh_to_xyxy(bbox_i)
+            except (ValueError, TypeError):
                 continue
 
             for j, room_j in enumerate(rooms):
                 if i >= j:
                     continue
-
                 bbox_j = room_j.get("bbox")
                 if not bbox_j or len(bbox_j) != 4:
                     continue
+                type_j = (_get_room_type(room_j) or "").lower()
+                if type_j in self.OVERLAP_EXEMPT_CATEGORIES:
+                    continue
+                try:
+                    box_j = _xywh_to_xyxy(bbox_j)
+                except (ValueError, TypeError):
+                    continue
 
-                if self._boxes_overlap(bbox_i, bbox_j):
-                    issues.append(ValidationIssue(
-                        severity="warning",
-                        code="BBOX_OVERLAP",
-                        message=f"Overlapping bboxes detected",
-                        affected_rooms=[i, j]
-                    ))
-
+                if self._boxes_overlap(box_i, box_j):
+                    if self._containment_ratio(box_i, box_j) > 0.7:
+                        continue  # label inside room polygon — expected
+                    issues.append(ValidationIssue("warning", "BBOX_OVERLAP",
+                        "Overlapping bboxes (non-circulation types)", affected_rooms=[i, j]))
         return issues
 
-    @staticmethod
-    def _boxes_overlap(box1: List, box2: List) -> bool:
-        """Check if two bounding boxes overlap."""
-        x1_1, y1_1, x2_1, y2_1 = box1
-        x1_2, y1_2, x2_2, y2_2 = box2
-
-        # Boxes don't overlap if separated on either axis
-        if x2_1 <= x1_2 or x2_2 <= x1_1:
-            return False
-        if y2_1 <= y1_2 or y2_2 <= y1_1:
-            return False
-
-        return True
-
     def check_batch(self, annotations: List[Dict]) -> Dict[str, List[ValidationIssue]]:
-        """
-        Check multiple annotations.
+        return {str(i): iss for i, ann in enumerate(annotations) if (iss := self.check_annotation(ann))}
 
-        Returns:
-            Dictionary mapping annotation index to list of issues
-        """
-        results = {}
-        for i, annotation in enumerate(annotations):
-            issues = self.check_annotation(annotation)
-            if issues:
-                results[str(i)] = issues
-
-        return results
-
-    def get_summary(self, issues: List[ValidationIssue]) -> Dict[str, int]:
-        """
-        Get summary counts of issue types.
-
-        Args:
-            issues: List of validation issues
-
-        Returns:
-            Dictionary with counts by severity and code
-        """
-        summary = {
-            "total": len(issues),
-            "by_severity": {},
-            "by_code": {}
-        }
-
-        for issue in issues:
-            # Count by severity
-            summary["by_severity"][issue.severity] = \
-                summary["by_severity"].get(issue.severity, 0) + 1
-
-            # Count by code
-            summary["by_code"][issue.code] = \
-                summary["by_code"].get(issue.code, 0) + 1
-
-        return summary
+    def get_summary(self, issues: List[ValidationIssue]) -> Dict:
+        s: Dict = {"total": len(issues), "by_severity": {}, "by_code": {}}
+        for iss in issues:
+            s["by_severity"][iss.severity] = s["by_severity"].get(iss.severity, 0) + 1
+            s["by_code"][iss.code] = s["by_code"].get(iss.code, 0) + 1
+        return s
 
     def report(self, issues: List[ValidationIssue]) -> str:
-        """
-        Generate a human-readable report of issues.
-
-        Args:
-            issues: List of validation issues
-
-        Returns:
-            Formatted report string
-        """
         if not issues:
             return "✅ No issues found"
-
-        report_lines = [f"Found {len(issues)} issues:\n"]
-
-        # Group by severity
-        by_severity = {}
-        for issue in issues:
-            if issue.severity not in by_severity:
-                by_severity[issue.severity] = []
-            by_severity[issue.severity].append(issue)
-
-        # Print by severity (errors first, then warnings)
-        for severity in ["error", "warning", "info"]:
-            if severity not in by_severity:
+        lines = [f"Found {len(issues)} issues:\n"]
+        by_sev: Dict = {}
+        for iss in issues:
+            by_sev.setdefault(iss.severity, []).append(iss)
+        for sev in ("error", "warning", "info"):
+            if sev not in by_sev:
                 continue
+            lines.append(f"{sev.upper()} ({len(by_sev[sev])}):")
+            for iss in by_sev[sev]:
+                loc = ""
+                if iss.room_index is not None:
+                    loc = f" [room {iss.room_index}]"
+                elif iss.affected_rooms:
+                    loc = f" [rooms {iss.affected_rooms}]"
+                lines.append(f"  - {iss.code}{loc}: {iss.message}")
+            lines.append("")
+        return "\n".join(lines)
 
-            issues_for_severity = by_severity[severity]
-            report_lines.append(f"{severity.upper()} ({len(issues_for_severity)}):")
+    @staticmethod
+    def _boxes_overlap(b1, b2) -> bool:
+        x1_1, y1_1, x2_1, y2_1 = b1
+        x1_2, y1_2, x2_2, y2_2 = b2
+        return not (x2_1 <= x1_2 or x2_2 <= x1_1 or y2_1 <= y1_2 or y2_2 <= y1_1)
 
-            for issue in issues_for_severity:
-                location = ""
-                if issue.room_index is not None:
-                    location = f" [room {issue.room_index}]"
-                elif issue.affected_rooms:
-                    location = f" [rooms {issue.affected_rooms}]"
-
-                report_lines.append(f"  - {issue.code}{location}: {issue.message}")
-
-            report_lines.append("")
-
-        return "\n".join(report_lines)
+    @staticmethod
+    def _containment_ratio(b1, b2) -> float:
+        ix1 = max(b1[0], b2[0]); iy1 = max(b1[1], b2[1])
+        ix2 = min(b1[2], b2[2]); iy2 = min(b1[3], b2[3])
+        if ix2 <= ix1 or iy2 <= iy1:
+            return 0.0
+        inter = (ix2 - ix1) * (iy2 - iy1)
+        a1 = (b1[2] - b1[0]) * (b1[3] - b1[1])
+        a2 = (b2[2] - b2[0]) * (b2[3] - b2[1])
+        smaller = min(a1, a2)
+        return inter / smaller if smaller > 0 else 0.0

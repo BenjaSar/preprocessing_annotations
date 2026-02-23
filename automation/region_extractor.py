@@ -59,13 +59,17 @@ class RegionExtractor:
         # Extract each room
         rooms = annotation.get("rooms", [])
         for i, room in enumerate(rooms):
+
             bbox = room.get("bbox")
             if not bbox or len(bbox) != 4:
                 logger.warning(f"Skipping room {i}: invalid bbox")
                 continue
 
             try:
-                x1, y1, x2, y2 = [int(v) for v in bbox]
+                # FIX: Bbox is stored as [x, y, width, height].
+                # Convert to corner coordinates before cropping.
+                x, y, w, h = [int(v) for v in bbox]
+                x1, y1, x2, y2 = x, y, x + w, y + h
             except (ValueError, TypeError):
                 logger.warning(f"Skipping room {i}: non-numeric bbox")
                 continue
@@ -90,7 +94,15 @@ class RegionExtractor:
                     continue
 
                 # Save region
-                room_type = room.get("room_type", "unknown")
+                # FIX: Read room type from canonical field chain (type > category > room_type).
+                # Previously used only room.get("room_type") which never existed,
+                # causing every extracted patch to be named "..._unknown.png".
+                room_type = (
+                    room.get("type")
+                    or room.get("category")
+                    or room.get("room_type")
+                    or "unknown"
+                )
                 filename = f"{image_stem}_{i:03d}_{room_type}.png"
                 if prefix:
                     filename = f"{prefix}_{filename}"

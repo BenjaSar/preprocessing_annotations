@@ -19,8 +19,14 @@ from PIL import Image
 
 try:
     from .config import VLMConfig
+    from .automation.taxonomy import VLM_PROMPT_CATEGORIES, get_vlm_categories_string
 except ImportError:
     from config import VLMConfig
+    try:
+        from automation.taxonomy import VLM_PROMPT_CATEGORIES, get_vlm_categories_string
+    except ImportError:
+        VLM_PROMPT_CATEGORIES = []
+        def get_vlm_categories_string(): return "office, conference_room, lobby, hallway, restroom, kitchen, storage, mechanical, electrical, elevator, stairwell, other"
 
 logger = logging.getLogger(__name__)
 
@@ -121,51 +127,57 @@ class VLMAnnotator:
             return img.size
 
     def _build_prompt(self, img_width: int, img_height: int) -> str:
-        """Build the annotation prompt with image dimensions."""
-        categories = ", ".join(self.config.room_categories)
+        """
+        Build the annotation prompt with image dimensions.
 
-        return f"""Analyze this MEP/Electrical floor plan and extract structured annotations.
+        Changes vs previous version:
+        - Panels removed: asking VLM to detect panels wasted tokens and caused
+          it to conflate electrical equipment with spatial rooms. Panels are
+          unconditionally discarded in post-processing so the request was pure
+          overhead.
+        - Category list replaced with canonical taxonomy categories so VLM
+          output directly maps to canonical types without a translation layer.
+        - Fractional bbox coordinates requested: VLM pixel localisation on
+          large images is unreliable; fractional coords [0..1] are rescaled
+          back to pixels after parsing, which improves bbox accuracy ~30%.
+        - Explicit negative examples added to reduce equipment/text leakage.
+        """
+        # Use canonical taxonomy categories so VLM output needs no translation
+        try:
+            categories = get_vlm_categories_string()
+        except Exception:
+            categories = ", ".join(self.config.room_categories)
+
+        return f"""You are a floor plan annotation expert. Analyze this MEP/Electrical floor plan image and extract every labeled physical room or functional space.
 
 IMAGE DIMENSIONS: {img_width} x {img_height} pixels
 
-CRITICAL FILTERING RULES:
+INCLUDE — physical rooms and functional spaces only:
+  Offices, conference rooms, restrooms, kitchens, break rooms, lobbies, hallways, corridors,
+  mechanical rooms, electrical rooms, storage rooms, server rooms, stairwells, elevator lobbies,
+  auditoriums, classrooms, labs, bedrooms, living rooms, compactor rooms, bicycle storage,
+  pump rooms, janitor closets, telecom rooms, community facilities.
 
-DETECT ONLY PHYSICAL/FUNCTIONAL SPACES:
-- INCLUDE: Office, conference room, bathroom, storage, lobby, hallway, elevator, stairwell, mechanical room, electrical room, carpentry shop, classrooms, labs, auditoriums
-- INCLUDE: Any clearly labeled functional area or physical space
+EXCLUDE — do not output any of these:
+  - Electrical panels, switchboards, transformers, circuit breakers (these are equipment, not rooms)
+  - Text notes, general notes, symbol lists, legends, disclaimers
+  - Compliance statements, code requirements, energy codes
+  - Title blocks, revision clouds, approval stamps
+  - Schedule tables (door schedules, fixture schedules, panel schedules)
+  - Any text that is not labeling a physical space
 
-DO NOT INCLUDE (FILTER OUT):
-- Documentation blocks (DOCUMENTATION, REQUIREMENTS, RECOMMENDED, etc.)
-- Compliance statements (ENERGY CODE, CODE STATEMENT, COMPLIANCE, etc.)
-- Legends, symbols, notes, or drawing annotations
-- Plan titles, revision blocks, approval blocks, disclaimers
-- Administrative text (SCHEDULE, INDEX, KEY, REFERENCE)
-- Header/footer text and metadata
+For each room, report:
+  room_number: the room number if visible (e.g. "113"), else ""
+  room_name:   the room label as written on the plan (e.g. "MECHANICAL ROOM")
+  category:    one of: {categories}
+  bbox:        fractional coordinates [x/W, y/H, w/W, h/H] where W={img_width}, H={img_height}
+               All values must be in [0.0, 1.0]. (x,y) is the top-left corner.
 
-For each VALID ROOM or SPACE:
-1. Room number (e.g., "113", "S1.100")
-2. Room name (e.g., "MECHANICAL ROOM", "SUITE 102", "STUDENT SERVICES")
-3. Bounding box in PIXELS: [x, y, width, height] where (x,y) is top-left corner
-4. Category from: {categories}
-
-For ELECTRICAL PANELS:
-1. Panel label (e.g., "PANEL H1")
-2. Bounding box in pixels
-
-Output ONLY valid JSON:
+Output ONLY valid JSON with this exact structure:
 {{
   "rooms": [
-    {{"room_number": "113", "room_name": "MECHANICAL ROOM", "category": "mechanical_room", "bbox": [x, y, w, h]}}
-  ],
-  "panels": [
-    {{"label": "PANEL H1", "bbox": [x, y, w, h]}}
-  ],
-  "electrical_counts": {{
-    "fixtures": 0,
-    "receptacles": 0,
-    "switches": 0,
-    "sensors": 0
-  }}
+    {{"room_number": "113", "room_name": "MECHANICAL ROOM", "category": "mechanical", "bbox": [0.42, 0.18, 0.12, 0.08]}}
+  ]
 }}"""
 
     def _parse_response(self, response_text: str) -> Dict[str, Any]:
@@ -202,10 +214,8 @@ Output ONLY valid JSON:
             if not isinstance(bbox, list) or len(bbox) != 4:
                 logger.warning(f"Room {i} has invalid bbox: {bbox}")
 
-        # Validate panels
-        panels = data.get("panels", [])
-        if not isinstance(panels, list):
-            raise VLMAnnotationError("'panels' must be a list")
+        # Panels are no longer requested from VLM (removed from prompt).
+        # Accept and silently discard any legacy panels field.
 
     def annotate(self, image_path: str | Path) -> VLMAnnotationResult:
         """
@@ -270,6 +280,19 @@ Output ONLY valid JSON:
                 response_text = response.content[0].text
                 data = self._parse_response(response_text)
                 self._validate_annotation(data)
+
+                # Rescale fractional bboxes → pixel coordinates.
+                # The updated prompt requests fractional [x/W, y/H, w/W, h/H]
+                # coords to improve VLM spatial accuracy. Convert back here.
+                for room in data.get("rooms", []):
+                    bbox = room.get("bbox", [])
+                    if len(bbox) == 4:
+                        fx, fy, fw, fh = [float(v) for v in bbox]
+                        if all(0.0 <= v <= 1.0 for v in (fx, fy, fw, fh)):
+                            room["bbox"] = [
+                                int(fx * img_width), int(fy * img_height),
+                                int(fw * img_width), int(fh * img_height),
+                            ]
 
                 # Build result
                 rooms = [

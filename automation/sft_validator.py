@@ -8,12 +8,16 @@ Filters non-spatial text, validates taxonomy, enforces confidence thresholds.
 import re
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
-from difflib import SequenceMatcher
 from PIL import Image
 import io
 import logging
 
 logger = logging.getLogger(__name__)
+
+try:
+    from .taxonomy import CANONICAL_TYPES, VALID_TYPES, VLM_CATEGORY_MAP, normalize_room_type
+except ImportError:
+    from taxonomy import CANONICAL_TYPES, VALID_TYPES, VLM_CATEGORY_MAP, normalize_room_type
 
 
 class ImageResizer:
@@ -85,54 +89,121 @@ class SemanticRoomValidator:
     """Filter non-spatial text from room annotations."""
 
     NON_ROOM_PATTERNS = [
-        # Documentation/Compliance
-        r"(DOCUMENTATION|REQUIREMENTS|RECOMMENDED|APPROVAL|PERMIT)",
+        # ------------------------------------------------------------------ #
+        # Documentation / compliance blocks                                    #
+        # ------------------------------------------------------------------ #
+        r"(DOCUMENTATION|REQUIREMENTS?|RECOMMENDED|APPROVAL|PERMIT)",
         r"(ENERGY CODE|COMPLIANCE|STANDARD|SPECIFICATION)",
-        r"(DISCLAIMER|NOTES|LEGEND|SYMBOL|ABBREVIATION)",
-        # Equipment/Technical (not spatial)
-        r"(^EQUIPMENT$|EQUIPMENT\s*\(|LIGHTING\s+EQUIPMENT|MANUFACTURER'S|MANUFACTURER)",
-        # Floor/Sheet/Drawing metadata
-        r"(SHEET|DRAWING|PLAN|REVISIONS|TITLE BLOCK|SCALE|FLOOR|BASEMENT|3RD|2ND|FIRST|SECOND)",
-        r"(ELECTRICAL|MECHANICAL|PLUMBING).*(PLAN|FIRST FLOOR|SECOND|BASEMENT|PAGE)",
-        # Administrative text
-        r"(DOCUMENT|STATEMENT|OUTLINE|MOVEMENT|OVERRIDE|PROVIDE|EQUIPMENT)",
+        r"(DISCLAIMER|NOTES?|LEGEND|SYMBOL|ABBREVIATION)",
+        r"(SHEET|DRAWING|PLAN|REVISIONS|TITLE BLOCK|SCALE)",
         r"(SCHEDULE|INDEX|KEY|REFERENCE|ENDORSEMENT)",
         r"^(OUTLINED|THE OUTLINED)",
-        # Phase 4 Critical Additions (Phase 5 Fix #2)
-        r"^I(?=[A-Z]{5,})",             # Corrupted OCR: capital I prefix (IELECTRICAL, IACCESSORY)
-        r"^A(?=[A-Z]{5,})",             # Corrupted OCR: A prefix (ACOMPRESSOR)
-        r"ELECTRICAL\s+(?!ROOM)",       # ELECTRICAL equipment (not ELECTRICAL ROOM)
-        r"EQUIPMENT(?!\s*ROOM)",        # EQUIPMENT equipment (not EQUIPMENT ROOM)
+        # General/national/FDNY electrical notes headers
+        r"(ELECTRICAL|MECHANICAL|PLUMBING)\s+(GENERAL|SYMBOL|DRAWING|DEVICE|NOTES|PLAN)",
+        r"(NATIONAL|STATE|LOCAL|FDNY|NYC)\s+(ELECTRICAL|FIRE|BUILDING|CODE)",
+        # ------------------------------------------------------------------ #
+        # Instruction / directive sentences                                    #
+        # ------------------------------------------------------------------ #
+        r"CONTRACTOR\s+TO\s+(VERIFY|COORDINATE|PROVIDE|INSTALL|CONFIRM)",
+        r"(SENSOR|DETECTOR)\s+PLACEMENT",
+        r"TAKE\s+OFF(\s+ONLY)?",
+        r"USE\s+\w+\s+FOR\s*(:|$)",          # "USE DEVELOPMENT FOR:"
+        r"^USE\s+(THIS|DEVELOPMENT|DIAGRAM|DRAWING|PLAN)",
+        r"(SHALL|MUST|SHOULD)\s+(BE|NOT|COMPLY)",
+        r"BEFORE\s+COMMENCING",
+        r"AS\s+(DIRECTED|REQUIRED|NEEDED|SPECIFIED|INDICATED)",
+        r"(REFER|SEE)\s+(TO\s+)?(SHEET|DRAWING|PLAN|SPEC|DETAIL)",
+        r"PER\s+(CODE|NEC|NFPA|AHJ|OWNER)",
+        r"(INSTALL|COORDINATE|VERIFY|PROVIDE|REMOVE|RELOCATE)\s+ALL",
+        # ------------------------------------------------------------------ #
+        # Equipment / non-spatial objects                                      #
+        # ------------------------------------------------------------------ #
+        # Panels – most important: PANEL A / PANEL B / PANEL 1 / LP-1
+        r"^PANEL\s*[A-Z0-9\-]*$",
+        r"^(LP|DP|EP|PP|MDP|SDP)\s*[\-]?\s*\d*[A-Z]?$",   # LP-1, MDP, etc.
+        r"^SWITCHBOARD\b",
+        r"^(TRANSFORMER|DISCONNECT|BREAKER|FEEDER|RISER)\b",
+        # Equipment text blocks
+        r"(^EQUIPMENT$|EQUIPMENT\s*\(|EQUIPMENT\s+SHOWN|EQUIPMENT\s+MUST|"
+        r"EQUIPMENT\s+MAY|EXISTING\s+EQUIPMENT|NEW\s+EQUIPMENT|"
+        r"DISTRIBUTION\s+EQUIPMENT|ELECTRICAL\s+EQUIPMENT|EQUIPMENT\s+INCLUDING)",
+        r"DEVICE(S)?\s*/?\s*EQUIPMENT",
+        r"INDICATED\s+RELOCATED\s+EXISTING",
+        # ------------------------------------------------------------------ #
+        # Building-system non-room labels                                      #
+        # ------------------------------------------------------------------ #
+        r"BUILDING\s+MANAGEMENT\s+SYSTEM",
+        r"(DISTRIBUTION|EMERGENCY|NORMAL)\s+(PANEL|SYSTEM|BUS|POWER)\b",
+        r"(AC|DC)\s+(MOMENTARY|CIRCUIT|DISCONNECT)",
+        # ------------------------------------------------------------------ #
+        # Address / firm metadata                                              #
+        # ------------------------------------------------------------------ #
+        r"(BROADWAY|AVENUE|STREET|BOULEVARD|DRIVE|LANE)\s+(SUITE|#)",
+        r"\b(NEW YORK|LOS ANGELES|CHICAGO|BOSTON|HOUSTON)\b",
+        r"^\d{3,5}\s+(BROADWAY|AVENUE|STREET)",  # "326 ROCKAWAY"
+        r"NEW\s+YORK\s+(OFFICE|CITY)",
+        # ------------------------------------------------------------------ #
+        # OCR corruption patterns                                              #
+        # ------------------------------------------------------------------ #
+        r"^I(?=[A-Z]{5,})",      # IELECTRICAL, IACCESS...
+        r"^A(?=[A-Z]{5,})",      # ACOMPRESSOR...
+        # Short OCR word-fragments (start with consonant cluster, no vowels in key positions)
+        r"^[BCDFGHJKLMNPQRSTVWXYZ]{2}[IPME]{1}[A-Z]{0,4}[NT]$",  # UIPMEN, JIPMENT, IPMEN
+        # Partial words clearly cut off
+        r"^(UIPMEN|JIPMEN|IPMEN|EMEN|JIPMENT|UIPMENT|QUIPMEN)T?$",
+        r"^(IIPMENT|ELEMEN|LEMEN|JIMENT|DIMEN)T?S?$",
+        r"^(RMINAL|ECTION|IREMENT|JIREMENT|UIREMENT)S?$",
+        r"^(QIPMEN|DWIDF|JILDING|IDFD)$",  # specific junk from test data
+        # ------------------------------------------------------------------ #
+        # ELECTRICAL standalone (not ELECTRICAL ROOM)                         #
+        # OCR splits "ELECTRICAL ROOM" into two tokens → "ELECTRICAL" alone   #
+        # is ambiguous without "ROOM"; handled by requiring compound in       #
+        # room_name_patterns, but guard here too for VLM output.              #
+        # ------------------------------------------------------------------ #
+        r"^ELECTRICAL$",         # block bare "ELECTRICAL" – must be "ELECTRICAL ROOM"
+        r"ELECTRICAL\s+(?!ROOM\b)",  # ELECTRICAL + anything except ROOM
     ]
 
     VALID_ROOM_KEYWORDS = {
+        # Commercial
         "OFFICE", "CONFERENCE", "MEETING", "LOBBY", "RESTROOM",
         "BATHROOM", "KITCHEN", "STORAGE", "ELEVATOR", "STAIRWELL",
         "HALLWAY", "CORRIDOR", "VESTIBULE", "FOYER", "RECEPTION",
         "LOUNGE", "BREAKROOM", "CAFE", "AUDITORIUM", "CLASSROOM",
-        "LAB", "MECHANICAL", "ELECTRICAL", "DATA CENTER", "SERVER",
+        "LAB", "MECHANICAL", "DATA CENTER", "SERVER",
         "PROGRAM SUPPORT", "STUDENT SERVICES", "CARPENTRY", "WORKSHOP",
-        "FACULTY", "ENTRANCE", "ACEMENT", "BEDROOM", "LIVING", "DINING",
+        "FACULTY", "ENTRANCE", "BEDROOM", "LIVING", "DINING",
         "LAUNDRY", "UTILITY", "GARAGE", "CLOSET", "LINEN", "PANTRY",
         "POWDER", "MASTER",
-        # Phase 2 Critical Additions
-        "SUITE",           # Suite 301, Suite 302 (commercial spaces)
-        "BREAK",           # Break Room (alternative to BREAKROOM)
-        # Phase 2 Medium Priority
-        "TELECOM",         # Telecom Room (technical)
-        "BICYCLE",         # Bicycle Storage (utility)
-        "COMPACTOR",       # Compactor Room (utility)
-        "BOILER",          # Boiler Room (utility)
-        "PUMP",            # Pump Room (utility)
-        "JANITOR",         # Janitor Room (facility)
-        "ART",             # Art Room (specialized)
-        "MUSIC",           # Music Room (specialized)
-        "STUDY",           # Study Room (specialized)
-        "READING",         # Reading Room (specialized)
-        # Phase 2 Low Priority
-        "CCTV",            # CCTV Room (security)
-        "PLUMBING",        # Plumbing Room (utility)
-        "MACHINE",         # Machine Room (utility)
+        "SUITE",
+        "BREAK",
+        "TELECOM",
+        "BICYCLE",
+        "COMPACTOR",
+        "BOILER",
+        "PUMP",
+        "JANITOR",
+        "ART", "MUSIC", "STUDY", "READING",
+        "CCTV",
+        "PLUMBING",
+        "MACHINE",
+        # Additional compound rooms required for MEP floor plans
+        "FIRE PUMP",
+        "COMMUNITY FACILITY",
+        "BUILDING STORAGE",
+        "BICYCLE STORAGE",
+        "COMMERCIAL STORAGE",
+        "COMPACTOR ROOM",
+        "ELEVATOR MACHINE",
+        # Residential abbreviation expansions (after _expand_abbreviation)
+        "WALK-IN CLOSET",
+        "FAMILY ROOM",
+        "DINING ROOM",
+        "LIVING ROOM",
+        "MASTER BEDROOM",
+        "POWDER ROOM",
+        "LINEN CLOSET",
+        "STUDIO",
     }
 
     # CRITICAL FIX: Abbreviation expansion mapping
@@ -271,9 +342,13 @@ class SemanticRoomValidator:
             # This ensures abbreviated room names (BR, LR, BA) are recognized
             expanded_name = self._expand_abbreviation(name)
 
-            # Keep if contains valid room keywords OR has good confidence
-            confidence = room.get("confidence", 0)
-            if any(kw in expanded_name for kw in self.VALID_ROOM_KEYWORDS) or confidence > 0.95:
+            # Keep ONLY if the name contains a valid room keyword.
+            # ⚠️  REMOVED: "or confidence > 0.95" bypass.
+            #    High OCR confidence does NOT mean the text is a room label.
+            #    OCR fragments like "UIPMEN" (confidence=0.9998) and
+            #    "PANEL A" (confidence=0.999) were bypassing this gate.
+            #    Confidence is handled separately in filter_by_confidence().
+            if any(kw in expanded_name for kw in self.VALID_ROOM_KEYWORDS):
                 # Store original name for display, expanded for validation
                 room["original_name"] = name
                 valid.append(room)
@@ -420,45 +495,13 @@ class TaxonomyNormalizer:
 
     def normalize(self, room_name: str) -> str:
         """
-        Map extracted room name to standard taxonomy.
+        Map extracted room name to canonical taxonomy type.
 
-        Args:
-            room_name: Raw room name from extraction
-
-        Returns:
-            Standardized room type (lowercase)
+        Delegates to the centralised normalize_room_type() from taxonomy.py,
+        which replaced the previous local SequenceMatcher-based implementation.
+        This ensures all normalisation uses the same 35-type canonical taxonomy.
         """
-        name_upper = room_name.upper().strip()
-
-        # CRITICAL FIX: Expand abbreviations before taxonomy matching
-        # This ensures abbreviations like BR, LR, BA are correctly classified
-        expanded_name = self._expand_abbreviation(name_upper)
-
-        # Exact match first
-        for std_type, variants in self.STANDARD_TAXONOMY.items():
-            if expanded_name in variants:
-                return std_type
-
-        # Fuzzy match for OCR errors (use expanded name for better matching)
-        best_match = None
-        best_ratio = 0.0
-
-        all_variants = [
-            v for variants in self.STANDARD_TAXONOMY.values() for v in variants
-        ]
-
-        for variant in all_variants:
-            ratio = SequenceMatcher(None, expanded_name, variant).ratio()
-            if ratio > best_ratio and ratio > 0.80:
-                best_ratio = ratio
-                best_match = variant
-
-        if best_match:
-            for std_type, variants in self.STANDARD_TAXONOMY.items():
-                if best_match in variants:
-                    return std_type
-
-        return "other"
+        return normalize_room_type(room_name)
 
 
 def filter_by_confidence(rooms: List[Dict], min_confidence: float = 0.85,
@@ -549,9 +592,8 @@ def validate_for_sft(room: Dict) -> Tuple[bool, Dict[str, bool]]:
     """
     Strict validation for SFT ground truth data.
 
-    CRITICAL: VLM-detected rooms have NO confidence field (high-confidence by design).
-    OCR rooms HAVE confidence field and must pass 0.85 threshold.
-    VLM uses "room_name", OCR uses "name".
+    VLM rooms have no confidence field (high-confidence by design).
+    OCR rooms have confidence field and must pass 0.85 threshold.
 
     Args:
         room: Single room annotation dictionary
@@ -559,31 +601,23 @@ def validate_for_sft(room: Dict) -> Tuple[bool, Dict[str, bool]]:
     Returns:
         Tuple of (is_valid, checks_dict)
     """
-    # CRITICAL FIX: Support both "room_name" (VLM) and "name" (OCR)
     name = room.get("room_name") or room.get("name", "")
 
-    # CRITICAL FIX #1: Normalize category field before validation
-    room_type = room.get("type", "other")
+    # Normalize type using canonical taxonomy (covers all 35 types)
+    room_type = room.get("type") or room.get("category") or "other"
     if isinstance(room_type, str):
-        room_type = _normalize_category(room_type)
+        room_type = normalize_room_type(room_type)
 
     checks = {
         "has_name": bool(name.strip()),
         "has_bbox": len(room.get("bbox", [])) == 4,
         "bbox_valid": all(isinstance(x, (int, float)) for x in room.get("bbox", [])),
-        # CRITICAL FIX: VLM rooms have no confidence field (they're implicitly high-confidence)
-        # OCR rooms have confidence field and must pass threshold
         "confidence_high": (
-            "confidence" not in room or  # VLM rooms: no field = high confidence
-            room.get("confidence", 0) >= 0.85  # OCR rooms: must pass threshold
+            "confidence" not in room or
+            room.get("confidence", 0) >= 0.85
         ),
         "name_not_generic": name.upper() not in ["ROOM", "SPACE"],
-        # CRITICAL FIX #1: Check normalized type against whitelist
-        "type_in_taxonomy": room_type in [
-            "office", "conference_room", "restroom", "storage", "lobby",
-            "hallway", "elevator", "stairwell", "mechanical", "electrical",
-            "carpentry", "breakroom", "cafe", "other"
-        ],
+        "type_in_taxonomy": room_type in VALID_TYPES,
     }
 
     is_valid = all(checks.values())
@@ -716,6 +750,20 @@ def prepare_sft_annotation(annotation: Dict) -> Dict:
         if "type" not in room and "category" in room:
             room["type"] = room["category"]
             logger.debug(f"Normalized category '{room.get('category')}' → type field")
+
+    # Step 0b: Exclude synthetic rooms from SFT training set.
+    # Synthetic rooms are structurally inferred (e.g., "a 2BR unit must have
+    # 2 bedrooms"), not visually detected.  Including them teaches the VLM to
+    # hallucinate rooms with no image evidence.  They are archived to a
+    # separate "synthetic_rooms" key so humans can review them as suggestions.
+    _synthetic = [r for r in rooms if r.get("source") == "synthetic_residential"]
+    rooms = [r for r in rooms if r.get("source") != "synthetic_residential"]
+    if _synthetic:
+        annotation.setdefault("synthetic_rooms", []).extend(_synthetic)
+        logger.info(
+            f"Excluded {len(_synthetic)} synthetic room(s) from SFT path "
+            f"(archived to annotation['synthetic_rooms'] for review)"
+        )
 
     # Step 1: Semantic filtering
     rooms = validator.filter_rooms(rooms)
