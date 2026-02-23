@@ -204,6 +204,11 @@ class SemanticRoomValidator:
         "POWDER ROOM",
         "LINEN CLOSET",
         "STUDIO",
+        # Residential unit-type expansions (0BR/1BR/2BR → STUDIO / N BEDROOM)
+        "1 BEDROOM",
+        "2 BEDROOM",
+        "3 BEDROOM",
+        "4 BEDROOM",
     }
 
     # CRITICAL FIX: Abbreviation expansion mapping
@@ -249,6 +254,17 @@ class SemanticRoomValidator:
         "WC": "RESTROOM",
         "TLT": "RESTROOM",
         "RM": "ROOM",
+        # Residential unit types (apartment floor plans)
+        "0BR": "STUDIO",
+        "0 BR": "STUDIO",
+        "1BR": "1 BEDROOM",
+        "1 BR": "1 BEDROOM",
+        "2BR": "2 BEDROOM",
+        "2 BR": "2 BEDROOM",
+        "3BR": "3 BEDROOM",
+        "3 BR": "3 BEDROOM",
+        "4BR": "4 BEDROOM",
+        "4 BR": "4 BEDROOM",
         # Industrial / Utility
         "MECH": "MECHANICAL ROOM",
         "BSMT": "BASEMENT",

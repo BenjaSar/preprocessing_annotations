@@ -284,15 +284,52 @@ Output ONLY valid JSON with this exact structure:
                 # Rescale fractional bboxes → pixel coordinates.
                 # The updated prompt requests fractional [x/W, y/H, w/W, h/H]
                 # coords to improve VLM spatial accuracy. Convert back here.
+                #
+                # BUG FIX: Previously, when the VLM disobeyed the fractional
+                # format and returned raw pixel values (e.g., [8547, 1039, ...]),
+                # the guard `all(v <= 1.0)` correctly rejected them but the
+                # room was kept with the corrupt pixel values unchanged.
+                # Those values propagated into COCO output as out-of-bounds
+                # bboxes (x+w > img_width), producing untrainable annotations.
+                #
+                # New behaviour: mark non-fractional rooms for removal.
+                # Rooms whose bbox cannot be rescaled have no valid location and
+                # must be dropped rather than kept with garbage coordinates.
+                rooms_to_remove = []
                 for room in data.get("rooms", []):
                     bbox = room.get("bbox", [])
                     if len(bbox) == 4:
-                        fx, fy, fw, fh = [float(v) for v in bbox]
+                        try:
+                            fx, fy, fw, fh = [float(v) for v in bbox]
+                        except (ValueError, TypeError):
+                            rooms_to_remove.append(room)
+                            continue
+
                         if all(0.0 <= v <= 1.0 for v in (fx, fy, fw, fh)):
+                            # Valid fractional coords — rescale to pixels
                             room["bbox"] = [
                                 int(fx * img_width), int(fy * img_height),
                                 int(fw * img_width), int(fh * img_height),
                             ]
+                        else:
+                            # VLM returned raw pixel values instead of
+                            # fractional. These are unreliable; drop the room.
+                            rooms_to_remove.append(room)
+                            logger.warning(
+                                f"VLM returned non-fractional bbox "
+                                f"[{fx:.1f},{fy:.1f},{fw:.1f},{fh:.1f}] "
+                                f"for '{room.get('room_name','?')}' "
+                                f"(image {img_width}×{img_height}) — dropping"
+                            )
+
+                if rooms_to_remove:
+                    data["rooms"] = [
+                        r for r in data["rooms"] if r not in rooms_to_remove
+                    ]
+                    logger.info(
+                        f"Dropped {len(rooms_to_remove)} room(s) with "
+                        f"out-of-bounds or non-fractional bboxes"
+                    )
 
                 # Build result
                 rooms = [

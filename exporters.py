@@ -499,16 +499,48 @@ class COCOExporter:
                 if bw <= 0 or bh <= 0:
                     continue
 
+                # BUG FIX: Drop annotations whose bbox exceeds image bounds.
+                # These were produced when the VLM returned raw pixel coords
+                # instead of fractional ones. Even after the vlm_annotator fix
+                # that drops them early, this guard defends against any future
+                # source of out-of-bounds coordinates reaching export.
+                if w > 0 and h > 0:
+                    if bx < 0 or by < 0 or bx + bw > w or by + bh > h:
+                        logger.warning(
+                            f"COCOExporter: dropping out-of-bounds bbox "
+                            f"[{bx:.0f},{by:.0f},{bw:.0f},{bh:.0f}] "
+                            f"for '{room.get('room_name') or room.get('name', '?')}' "
+                            f"(image {w}×{h})"
+                        )
+                        continue
+
                 # Resolve canonical type from field chain
                 raw_type = room.get("type") or room.get("category") or "other"
                 cat_id = cat_id_map.get(raw_type, cat_id_map.get("other", 1))
+
+                # Build rectangular segmentation polygon from bbox corners.
+                # COCO spec requires `segmentation` for iscrowd=0 annotations.
+                # Without true mask data we use a 4-point rectangle; this
+                # satisfies pycocotools, makes area derivable via Shoelace,
+                # and is trivially upgradeable to real polygon masks later.
+                # Vertex order: TL → TR → BR → BL.
+                rect_polygon = [
+                    bx,      by,
+                    bx + bw, by,
+                    bx + bw, by + bh,
+                    bx,      by + bh,
+                ]
+                # For a rectangle, Shoelace == w*h. Using bw*bh is equivalent
+                # but the formula is kept explicit for future polygon support.
+                area = bw * bh
 
                 coco["annotations"].append({
                     "id": ann_id,
                     "image_id": img_id,
                     "category_id": cat_id,
+                    "segmentation": [rect_polygon],
                     "bbox": [bx, by, bw, bh],
-                    "area": bw * bh,
+                    "area": area,
                     "iscrowd": 0,
                     "attributes": {
                         "room_name": room.get("room_name") or room.get("name", ""),

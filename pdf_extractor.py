@@ -6,6 +6,7 @@ optimized for MEP floor plans where small symbols require high DPI.
 """
 
 import logging
+import re
 from pathlib import Path
 from typing import Generator, Optional, Tuple, List
 
@@ -226,7 +227,21 @@ class PageTypeClassifier:
         r"|SHEET\s+INDEX|DRAWING\s+INDEX|TITLE\s+SHEET"
         r"|SPECIFICATIONS?|SCOPE\s+OF\s+WORK"
         r"|FDNY\s+REQUIREMENTS?|ENERGY\s+CODE\s+COMPLIANCE"
-        r"|BEFORE\s+COMMENCING\s+WORK)",
+        r"|BEFORE\s+COMMENCING\s+WORK"
+        # Pattern that appeared on the 326 Rockaway notes page:
+        # "REFER TO E-000 SERIES FOR GENERAL NOTES, SYMBOL LIST, ETC."
+        r"|REFER\s+TO\s+[A-Z]-\d+\s+SERIES"
+        r"|FOR\s+GENERAL\s+NOTES,?\s+SYMBOL"
+        # AVI-ON / 540 Madison-style notes indicators
+        r"|NYC\s+DOB\s+NUMBER"
+        r"|PLACE\s+STICKER\s+HERE"
+        r"|DRAWING\s+TITLE"
+        r"|PROJECT\s+NO\.?"
+        r"|REVISIONS?\s+DATE\s+DESCRIPTION"
+        r"|SEAL\s+&\s+SIGNATURE"
+        r"|THESE\s+PLANS?\s+ARE\s+THE\s+SOLE\s+PROPERTY"
+        r"|WORKING\s+DWG"
+        r"|ARCHITECT\s+OF\s+RECORD)",
         re.IGNORECASE,
     )
 

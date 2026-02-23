@@ -146,9 +146,20 @@ CANONICAL_TYPES: Dict[str, List[str]] = {
     "bedroom": [
         "BEDROOM", "MASTER BEDROOM", "BEDROOM 1", "BEDROOM 2", "BEDROOM 3",
         "1 BEDROOM", "2 BEDROOM", "3 BEDROOM",
+        # Abbreviations — declared here so _SURFACE_TO_CANONICAL catches them
+        # at Step 3 (exact match) BEFORE the substring scan reaches
+        # conference_room, whose surface form "BREAKOUT SPACE" contains "BR".
+        "BR", "BR1", "BR2", "BR3",
+        "MBR", "MSTR BR", "MSTR", "BDRM",
+        "1BR", "2BR", "3BR", "4BR",
+        "1 BR", "2 BR", "3 BR", "4 BR",
+        "MASTER BR",
     ],
     "living_room": [
         "LIVING ROOM", "LIVING", "GREAT ROOM", "FAMILY ROOM",
+        # Abbreviations
+        "LR", "LV", "LVG",
+        "LIVING RM", "LIV ROOM",
     ],
     "laundry": [
         "LAUNDRY", "LAUNDRY ROOM", "UTILITY ROOM", "UTILITY",
@@ -158,6 +169,8 @@ CANONICAL_TYPES: Dict[str, List[str]] = {
     ],
     "studio": [
         "STUDIO", "STUDIO APARTMENT",
+        # 0-bedroom unit = studio
+        "0BR", "0 BR",
     ],
 
     # ── Catch-all ─────────────────────────────────────────────────────────────
@@ -203,6 +216,16 @@ VLM_CATEGORY_MAP: Dict[str, str] = {
     "family_room":                "living_room",
     "janitor":                    "custodial",
     "closet":                     "storage",
+    # Residential unit-type abbreviations used in residential floor plans
+    "0br":                        "studio",
+    "1br":                        "bedroom",
+    "2br":                        "bedroom",
+    "3br":                        "bedroom",
+    "4br":                        "bedroom",
+    "br":                         "bedroom",
+    "lr":                         "living_room",
+    "lv":                         "living_room",
+    "mbr":                        "bedroom",
     "storage":                    "storage",
     "mechanical_room":            "mechanical",
     "mechanical":                 "mechanical",
@@ -299,6 +322,18 @@ def normalize_room_type(raw: str) -> str:
     # 3. Surface-form exact match
     if raw_upper in _SURFACE_TO_CANONICAL:
         return _SURFACE_TO_CANONICAL[raw_upper]
+
+    # 3b. Short-token guard: tokens of ≤4 characters that are not in the
+    #     exact map cannot be reliably resolved by substring containment.
+    #     The scan was designed for partial-word fuzzy matching of full phrases
+    #     ("MECH ROOM" vs "MECHANICAL"), not two-letter abbreviations.
+    #     Without this guard, "BR" matches "BREAKOUT SPACE" (conference_room)
+    #     because Python's `"BR" in "BREAKOUT SPACE"` is True.
+    #     Any abbreviation that should be recognized MUST be added to
+    #     CANONICAL_TYPES surface forms above so it is caught at Step 3.
+    if len(raw_upper) <= 4:
+        logger.debug(f"Short token '{raw}' not in exact map → 'other' (add to CANONICAL_TYPES if needed)")
+        return "other"
 
     # 4. Substring containment: check if any canonical surface form is
     #    contained in raw_upper OR raw_upper is contained in a surface form.
