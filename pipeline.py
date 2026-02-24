@@ -154,7 +154,12 @@ class AnnotationPipeline:
         Run the full annotation pipeline.
 
         Args:
-            input_dir: Directory containing PDF files.
+            input_dir: One of:
+                - A directory containing PDF files (original behaviour)
+                - A directory containing PNG/JPG images (direct image input)
+                - A single PDF file path
+                - A single image file path (PNG/JPG/TIFF)
+              Mixed directories (PDFs + images) prefer PDF extraction.
             output_dir: Output directory for images and annotations.
             skip_existing: Skip images that already have annotations.
 
@@ -164,7 +169,9 @@ class AnnotationPipeline:
         Raises:
             PipelineError: If a critical step fails.
         """
-        input_dir = Path(input_dir)
+        import shutil as _shutil
+
+        input_path = Path(input_dir)
         output_dir = Path(output_dir)
 
         # Setup output directories
@@ -186,23 +193,105 @@ class AnnotationPipeline:
             "flagged_for_review": 0,
         }
 
-        # Step 1: Extract images from PDFs
-        self._print_step("STEP 1: Extracting images from PDFs")
+        # ------------------------------------------------------------------ #
+        # Step 1: Resolve input → images_dir                                   #
+        #                                                                      #
+        # The pipeline accepts four input forms:                               #
+        #   A. PDF directory  → batch_extract() → images_dir  (original)     #
+        #   B. Image directory → copy images   → images_dir  (NEW)           #
+        #   C. Single PDF file → extract_to_directory → images_dir  (NEW)    #
+        #   D. Single image file → copy to images_dir  (NEW)                 #
+        #                                                                      #
+        # Previously: only form A was supported.  Providing a directory of    #
+        # PNG images or a single file silently produced zero output because    #
+        # batch_extract() globs for *.pdf and returns an empty dict.          #
+        # ------------------------------------------------------------------ #
+        _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".tif", ".tiff"}
 
-        try:
-            extraction_results = self.pdf_extractor.batch_extract(
-                input_dir, images_dir
+        self._print_step("STEP 1: Resolving input to images")
+
+        if not input_path.exists():
+            raise PipelineError(f"Input path does not exist: {input_path}")
+
+        # --- Form C / D: single file ----------------------------------------
+        if input_path.is_file():
+            suffix = input_path.suffix.lower()
+            if suffix == ".pdf":
+                logger.info(f"Single PDF input: {input_path.name}")
+                try:
+                    extracted = self.pdf_extractor.extract_to_directory(
+                        input_path, images_dir
+                    )
+                    stats["pdfs_processed"] = 1
+                    stats["images_extracted"] = len(extracted)
+                    logger.info(f"  Extracted {len(extracted)} pages from {input_path.name}")
+                except Exception as e:
+                    raise PipelineError(f"PDF extraction failed: {e}") from e
+            elif suffix in _IMAGE_EXTS:
+                logger.info(f"Single image input: {input_path.name}")
+                dst = images_dir / input_path.name
+                if not (skip_existing and dst.exists()):
+                    _shutil.copy2(str(input_path), str(dst))
+                stats["images_extracted"] = 1
+                logger.info(f"  Copied {input_path.name} to images/")
+            else:
+                raise PipelineError(
+                    f"Unsupported input file type '{suffix}'. "
+                    f"Expected .pdf or {sorted(_IMAGE_EXTS)}."
+                )
+
+        # --- Form A / B: directory ------------------------------------------
+        elif input_path.is_dir():
+            pdf_files = sorted(input_path.glob("*.pdf"))
+
+            # Case-insensitive image glob (handles .PNG, .JPG, etc.)
+            image_files = sorted(
+                p for p in input_path.iterdir()
+                if p.suffix.lower() in _IMAGE_EXTS
             )
-            stats["pdfs_processed"] = len(extraction_results)
-            stats["images_extracted"] = sum(
-                len(paths) for paths in extraction_results.values()
-            )
-            logger.info(
-                f"Extracted {stats['images_extracted']} images "
-                f"from {stats['pdfs_processed']} PDFs"
-            )
-        except Exception as e:
-            raise PipelineError(f"PDF extraction failed: {e}") from e
+
+            if pdf_files:
+                # Form A: PDF directory (original flow)
+                logger.info(
+                    f"PDF directory input: {len(pdf_files)} PDF(s) in {input_path}"
+                )
+                try:
+                    extraction_results = self.pdf_extractor.batch_extract(
+                        input_path, images_dir
+                    )
+                    stats["pdfs_processed"] = len(extraction_results)
+                    stats["images_extracted"] = sum(
+                        len(paths) for paths in extraction_results.values()
+                    )
+                    logger.info(
+                        f"  Extracted {stats['images_extracted']} images "
+                        f"from {stats['pdfs_processed']} PDFs"
+                    )
+                except Exception as e:
+                    raise PipelineError(f"PDF extraction failed: {e}") from e
+
+            elif image_files:
+                # Form B: image directory (new — user provides PNG/JPG directly)
+                logger.info(
+                    f"Image directory input: {len(image_files)} image(s) in {input_path}"
+                )
+                copied = 0
+                for src in image_files:
+                    dst = images_dir / src.name
+                    if not (skip_existing and dst.exists()):
+                        _shutil.copy2(str(src), str(dst))
+                        copied += 1
+                stats["images_extracted"] = len(image_files)
+                logger.info(f"  Copied {copied} images to images/")
+
+            else:
+                raise PipelineError(
+                    f"No PDF or image files found in {input_path}. "
+                    f"Expected *.pdf or {sorted(_IMAGE_EXTS)} files."
+                )
+
+        else:
+            raise PipelineError(f"Input path is neither a file nor a directory: {input_path}")
 
         # Step 1b: Plan-type classification — skip notes/legend/schedule pages.
         # Runs before OCR to eliminate the largest source of false room candidates
@@ -216,7 +305,14 @@ class AnnotationPipeline:
         _classified_skips: set = set()
         try:
             import fitz
-            for pdf_path in sorted(Path(input_dir).glob("*.pdf")):
+            # Resolve which PDFs to classify: single-file or directory input
+            if input_path.is_file() and input_path.suffix.lower() == ".pdf":
+                _pdfs_to_classify = [input_path]
+            elif input_path.is_dir():
+                _pdfs_to_classify = sorted(input_path.glob("*.pdf"))
+            else:
+                _pdfs_to_classify = []  # image-only input — skip classifier
+            for pdf_path in _pdfs_to_classify:
                 try:
                     doc = fitz.open(str(pdf_path))
                     for page_num, page in enumerate(doc):

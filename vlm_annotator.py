@@ -217,6 +217,88 @@ Output ONLY valid JSON with this exact structure:
         # Panels are no longer requested from VLM (removed from prompt).
         # Accept and silently discard any legacy panels field.
 
+    # Claude API hard limit: neither dimension may exceed this value.
+    # https://docs.anthropic.com/en/docs/build-with-claude/vision
+    _API_MAX_DIMENSION: int = 7900   # stay 100px below the 8000px hard limit
+    # Target quality for in-memory PNG encode sent to the API
+    _API_TARGET_KB: int = 4500
+
+    def _prepare_image_for_api(
+        self, image_path: Path
+    ) -> tuple[str, int, int]:
+        """
+        Load image, enforce API dimension limit, and base64-encode for the API.
+
+        This is the single authoritative place where the image is prepared for
+        transmission.  It operates entirely in memory so it never writes to
+        disk and never fails with PermissionError regardless of file permissions.
+
+        Returns
+        -------
+        (base64_data, sent_width, sent_height)
+            base64_data  : UTF-8 encoded base64 string ready for the API
+            sent_width   : pixel width of the image that was actually sent
+            sent_height  : pixel height of the image that was actually sent
+
+        Raises
+        ------
+        VLMAnnotationError
+            If the image cannot be opened or encoded.
+        """
+        import io
+
+        try:
+            img = Image.open(image_path).convert("RGB")
+        except Exception as e:
+            raise VLMAnnotationError(
+                f"Cannot open image {image_path.name}: {e}"
+            ) from e
+
+        original_w, original_h = img.size
+        current_max = max(original_w, original_h)
+
+        # ── Step 1: enforce pixel dimension limit ────────────────────────────
+        if current_max > self._API_MAX_DIMENSION:
+            scale = self._API_MAX_DIMENSION / current_max
+            new_w = max(1, int(original_w * scale))
+            new_h = max(1, int(original_h * scale))
+            img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+            logger.info(
+                f"  {image_path.name}: resized {original_w}×{original_h}"
+                f" → {new_w}×{new_h} (API 8000px limit)"
+            )
+
+        sent_w, sent_h = img.size
+
+        # ── Step 2: encode to PNG bytes in memory ────────────────────────────
+        # Iteratively compress if over the size target (rare for floor plans).
+        iteration = 0
+        while True:
+            buf = io.BytesIO()
+            img.save(buf, format="PNG", optimize=True)
+            kb = len(buf.getvalue()) / 1024
+            if kb <= self._API_TARGET_KB or max(img.size) <= 400:
+                break
+            # Reduce dimensions 10% and retry
+            new_max = int(max(img.size) * 0.9)
+            scale = new_max / max(img.size)
+            img = img.resize(
+                (max(1, int(img.width * scale)), max(1, int(img.height * scale))),
+                Image.Resampling.LANCZOS,
+            )
+            sent_w, sent_h = img.size
+            iteration += 1
+            if iteration >= 10:
+                logger.warning(
+                    f"  {image_path.name}: could not compress below "
+                    f"{self._API_TARGET_KB} KB (final: {kb:.0f} KB, "
+                    f"size: {sent_w}×{sent_h})"
+                )
+                break
+
+        base64_data = base64.standard_b64encode(buf.getvalue()).decode("utf-8")
+        return base64_data, sent_w, sent_h
+
     def annotate(self, image_path: str | Path) -> VLMAnnotationResult:
         """
         Generate annotations for a floor plan image.
@@ -235,22 +317,23 @@ Output ONLY valid JSON with this exact structure:
         if not image_path.exists():
             raise VLMAnnotationError(f"Image file not found: {image_path}")
 
-        # Get image info
-        img_width, img_height = self._get_image_dimensions(image_path)
-        image_data = self._encode_image(image_path)
+        # Record ORIGINAL dimensions for the result metadata (so bboxes can
+        # be mapped back to the original image coordinate space by callers).
+        orig_width, orig_height = self._get_image_dimensions(image_path)
 
-        # Determine media type
-        suffix = image_path.suffix.lower()
-        media_type = {
-            ".png": "image/png",
-            ".jpg": "image/jpeg",
-            ".jpeg": "image/jpeg",
-            ".gif": "image/gif",
-            ".webp": "image/webp",
-        }.get(suffix, "image/png")
+        # Prepare image for API: resize in memory if needed, encode to base64.
+        # This is the single authoritative resize step — it runs regardless of
+        # whether the pipeline already called resize_in_place.  It operates
+        # entirely in memory so PermissionError on read-only source files is
+        # impossible.
+        image_data, sent_width, sent_height = self._prepare_image_for_api(image_path)
 
-        # Build prompt
-        prompt = self._build_prompt(img_width, img_height)
+        # Determine media type (always PNG after in-memory encode)
+        media_type = "image/png"
+
+        # Build prompt using SENT dimensions so fractional bbox rescaling is
+        # consistent with what the model actually sees.
+        prompt = self._build_prompt(sent_width, sent_height)
 
         # Call API with retries
         last_error = None
@@ -306,10 +389,13 @@ Output ONLY valid JSON with this exact structure:
                             continue
 
                         if all(0.0 <= v <= 1.0 for v in (fx, fy, fw, fh)):
-                            # Valid fractional coords — rescale to pixels
+                            # Valid fractional coords — rescale to pixels using
+                            # SENT dimensions (what the model actually saw).
+                            # If the image was resized before sending, these
+                            # are smaller than orig_width/orig_height.
                             room["bbox"] = [
-                                int(fx * img_width), int(fy * img_height),
-                                int(fw * img_width), int(fh * img_height),
+                                int(fx * sent_width), int(fy * sent_height),
+                                int(fw * sent_width), int(fh * sent_height),
                             ]
                         else:
                             # VLM returned raw pixel values instead of
@@ -319,7 +405,7 @@ Output ONLY valid JSON with this exact structure:
                                 f"VLM returned non-fractional bbox "
                                 f"[{fx:.1f},{fy:.1f},{fw:.1f},{fh:.1f}] "
                                 f"for '{room.get('room_name','?')}' "
-                                f"(image {img_width}×{img_height}) — dropping"
+                                f"(sent {sent_width}×{sent_height}) — dropping"
                             )
 
                 if rooms_to_remove:
@@ -331,7 +417,12 @@ Output ONLY valid JSON with this exact structure:
                         f"out-of-bounds or non-fractional bboxes"
                     )
 
-                # Build result
+                # Build result.
+                # image_size records the ORIGINAL file dimensions so that
+                # bboxes (in sent-image pixel space) can be projected back
+                # to the original coordinate space by downstream tools.
+                # sent_size records what was actually transmitted so callers
+                # can perform the scale-back if needed.
                 rooms = [
                     RoomAnnotation(
                         room_number=r.get("room_number", ""),
@@ -352,7 +443,7 @@ Output ONLY valid JSON with this exact structure:
 
                 result = VLMAnnotationResult(
                     image_file=image_path.name,
-                    image_size={"width": img_width, "height": img_height},
+                    image_size={"width": orig_width, "height": orig_height},
                     rooms=rooms,
                     panels=panels,
                     electrical_counts=data.get("electrical_counts", {}),
@@ -378,7 +469,7 @@ Output ONLY valid JSON with this exact structure:
         # All retries failed
         return VLMAnnotationResult(
             image_file=image_path.name,
-            image_size={"width": img_width, "height": img_height},
+            image_size={"width": orig_width, "height": orig_height},
             error=str(last_error),
         )
 

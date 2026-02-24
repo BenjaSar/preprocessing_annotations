@@ -312,18 +312,36 @@ class MEPTextExtractor:
 
         # ------------------------------------------------------------------ #
         # Step 2: Compound-label merging                                       #
-        # Tokens on the same text-line within MERGE_X_THRESHOLD pixels are    #
-        # concatenated left-to-right to reconstruct multi-word labels.        #
+        #                                                                      #
+        # Floor plan labels appear in TWO spatial arrangements:               #
+        #   (a) Horizontal: "BUILDING STORAGE" side-by-side on one line       #
+        #   (b) Vertical stack:  FIRE          ← separate OCR tokens          #
+        #                        PUMP          ← on different text lines       #
+        #                        ROOM          ← horizontal merge misses these #
+        #                                                                      #
+        # Root cause of missing compound rooms (confirmed 2026-02-23):        #
+        # _merge_compound_labels only chains tokens whose centroids are within #
+        # Y_LINE_TOLERANCE=20px — i.e., horizontally adjacent on the same     #
+        # text row.  Vertically stacked labels span multiple rows so          #
+        # _same_line() returns False and they never enter the same chain.     #
+        # "FIRE"/"PUMP"/"ROOM" each fail every room pattern individually, so  #
+        # all three are discarded in Step 3 classification.                   #
+        #                                                                      #
+        # Fix: run _merge_vertical_stacks FIRST (Step 2a), then the existing  #
+        # horizontal merge (Step 2b) on the result.  Two-pass coverage        #
+        # reconstructs all compound labels regardless of layout orientation.  #
         # ------------------------------------------------------------------ #
-        # DPI-aware threshold: base 120px calibrated at 200 DPI.
-        # At 300 DPI inter-word gap scales to ~180px; at 150 DPI to ~90px.
         _base_dpi = 200
         _current_dpi = getattr(getattr(self, "config", None), "dpi", _base_dpi) or _base_dpi
         MERGE_X_THRESHOLD = int(120 * _current_dpi / _base_dpi)
-        Y_LINE_TOLERANCE = 20     # pixels; same-line check
+        Y_LINE_TOLERANCE = 20     # pixels; same-line check (horizontal pass)
 
+        # Step 2a: Vertical-stack merging (new — handles FIRE/PUMP/ROOM etc.)
+        after_vertical = self._merge_vertical_stacks(surviving, dpi=_current_dpi)
+
+        # Step 2b: Horizontal merging (existing, now runs on vertically-merged output)
         merged_detections = self._merge_compound_labels(
-            surviving, MERGE_X_THRESHOLD, Y_LINE_TOLERANCE
+            after_vertical, MERGE_X_THRESHOLD, Y_LINE_TOLERANCE
         )
 
         # ------------------------------------------------------------------ #
@@ -490,6 +508,161 @@ class MEPTextExtractor:
                     # No compound match at this position; emit single token
                     result.append(ch[k])
                     k += 1
+
+        return result
+
+    def _merge_vertical_stacks(
+        self,
+        detections: List[TextDetection],
+        dpi: int = 200,
+    ) -> List[TextDetection]:
+        """
+        Merge vertically stacked tokens that form a single compound room label.
+
+        Problem solved
+        ──────────────
+        In architectural floor plans, multi-word room labels are frequently
+        stacked vertically to fit inside narrow room boundaries:
+
+            FIRE          BUILDING          COMMUNITY          ELEVATOR
+            PUMP          STORAGE           FACILITY            MACHINE
+            ROOM                                                  ROOM
+
+        Each individual word (FIRE, PUMP, ROOM) fails every room-name pattern,
+        so all three tokens are silently discarded in Step 3 classification.
+        The horizontal merger in _merge_compound_labels never sees them in the
+        same chain because _same_line() returns False across rows.
+
+        Algorithm
+        ─────────
+        1.  Sort tokens top-to-bottom by Y centroid.
+        2.  For each unprocessed token T, collect candidate "stack members":
+            tokens below T whose X range overlaps T's by ≥ X_OVERLAP_FRACTION
+            and whose top edge is within MAX_Y_GAP pixels of T's bottom edge.
+        3.  Try combining T plus the next 1–3 stack members (longest first).
+            Accept the first combination that matches a room pattern.
+        4.  Emit the merged token and mark all constituent tokens as consumed.
+            If no combination matches, emit T unchanged.
+
+        Parameters
+        ──────────
+        dpi : int
+            Extraction DPI.  Used to scale the Y-gap threshold so the same
+            code works at 150 DPI (default), 200 DPI, and 300 DPI.
+        """
+        if not detections:
+            return []
+
+        def _self_matches(text: str) -> bool:
+            return (
+                bool(self._room_number_pattern.match(text))
+                or any(p.search(text) for p in self._room_name_patterns)
+            )
+
+        def _x_range(d: TextDetection):
+            xs = [p[0] for p in d.bbox]
+            return min(xs), max(xs)
+
+        def _x_overlap_frac(a: TextDetection, b: TextDetection) -> float:
+            """Fraction of the shorter token's X span that overlaps the other."""
+            a_min, a_max = _x_range(a)
+            b_min, b_max = _x_range(b)
+            overlap = max(0, min(a_max, b_max) - max(a_min, b_min))
+            shorter = min(a_max - a_min, b_max - b_min)
+            return overlap / shorter if shorter > 0 else 0.0
+
+        def _make_stack_merge(group: List[TextDetection]) -> TextDetection:
+            """Merge a vertical stack top-to-bottom."""
+            g_sorted = sorted(group, key=lambda d: _centroid(d.bbox)[1])
+            combined_text = " ".join(d.text.strip() for d in g_sorted)
+            all_x = [p[0] for d in group for p in d.bbox]
+            all_y = [p[1] for d in group for p in d.bbox]
+            combined_bbox = [
+                [min(all_x), min(all_y)], [max(all_x), min(all_y)],
+                [max(all_x), max(all_y)], [min(all_x), max(all_y)],
+            ]
+            total_len = sum(len(d.text) for d in group)
+            avg_conf = (
+                sum(d.confidence * len(d.text) for d in group) / total_len
+                if total_len > 0 else group[0].confidence
+            )
+            return TextDetection(bbox=combined_bbox, text=combined_text, confidence=avg_conf)
+
+        # DPI-aware Y-gap threshold.
+        # At 200 DPI: typical room-label text is ~20–25px tall; line spacing
+        # ~1.2–1.5× that gives 24–38px.  Use 60px to be lenient.
+        MAX_Y_GAP = int(60 * dpi / 200)
+        X_OVERLAP_FRACTION = 0.30   # ≥30% X overlap → same column
+        MAX_STACK_DEPTH = 4         # max tokens in one vertical stack
+
+        # Sort top-to-bottom by Y centroid
+        sorted_dets = sorted(detections, key=lambda d: _centroid(d.bbox)[1])
+        consumed = [False] * len(sorted_dets)
+        result: List[TextDetection] = []
+
+        for i, anchor in enumerate(sorted_dets):
+            if consumed[i]:
+                continue
+
+            # Collect tokens that could stack below anchor
+            stack_candidates: List[tuple] = []   # (index, token)
+            anchor_cx, anchor_cy = _centroid(anchor.bbox)
+            anchor_bottom = max(p[1] for p in anchor.bbox)
+
+            for j in range(i + 1, len(sorted_dets)):
+                if consumed[j]:
+                    continue
+                below = sorted_dets[j]
+                below_cx, below_cy = _centroid(below.bbox)
+                below_top = min(p[1] for p in below.bbox)
+
+                # Must be below anchor
+                if below_cy <= anchor_cy:
+                    continue
+                # Top edge of below must be within MAX_Y_GAP of anchor's bottom
+                if below_top - anchor_bottom > MAX_Y_GAP:
+                    break  # sorted by Y — no further tokens can qualify
+                # X ranges must overlap enough to be in the same column
+                if _x_overlap_frac(anchor, below) < X_OVERLAP_FRACTION:
+                    continue
+
+                stack_candidates.append((j, below))
+                if len(stack_candidates) >= MAX_STACK_DEPTH - 1:
+                    break
+
+            if not stack_candidates:
+                # No vertical neighbours; emit as-is for horizontal pass
+                result.append(anchor)
+                consumed[i] = True
+                continue
+
+            # Try longest stack first, then shorter
+            merged_token = None
+            best_indices: List[int] = []
+
+            for depth in range(min(MAX_STACK_DEPTH - 1, len(stack_candidates)), 0, -1):
+                group_tokens = [anchor] + [t for _, t in stack_candidates[:depth]]
+                group_indices = [i] + [idx for idx, _ in stack_candidates[:depth]]
+                candidate_text = " ".join(d.text.strip() for d in
+                                          sorted(group_tokens, key=lambda d: _centroid(d.bbox)[1]))
+                if _self_matches(candidate_text):
+                    merged_token = _make_stack_merge(group_tokens)
+                    best_indices = group_indices
+                    logger.debug(
+                        f"Vertical stack merged: "
+                        f"{[d.text for d in sorted(group_tokens, key=lambda d: _centroid(d.bbox)[1])]} "
+                        f"→ '{merged_token.text}'"
+                    )
+                    break
+
+            if merged_token is not None:
+                result.append(merged_token)
+                for idx in best_indices:
+                    consumed[idx] = True
+            else:
+                # No compound match for any stack depth; emit anchor alone
+                result.append(anchor)
+                consumed[i] = True
 
         return result
 
