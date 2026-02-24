@@ -16,8 +16,10 @@ logger = logging.getLogger(__name__)
 
 try:
     from .taxonomy import CANONICAL_TYPES, VALID_TYPES, VLM_CATEGORY_MAP, normalize_room_type
+    from .abbreviations import ABBREVIATION_MAP as _ABBREVIATION_MAP
 except ImportError:
     from taxonomy import CANONICAL_TYPES, VALID_TYPES, VLM_CATEGORY_MAP, normalize_room_type
+    from abbreviations import ABBREVIATION_MAP as _ABBREVIATION_MAP
 
 
 class ImageResizer:
@@ -211,66 +213,24 @@ class SemanticRoomValidator:
         "4 BEDROOM",
     }
 
-    # CRITICAL FIX: Abbreviation expansion mapping
-    # Maps abbreviated room names to their canonical expanded forms
-    # This ensures abbreviations like "BR", "LR", "BA" are recognized as valid rooms
-    ABBREVIATION_EXPANSIONS = {
-        # Residential & Room Areas
-        "BR": "BEDROOM",
-        "BD": "BEDROOM",
-        "BDRM": "BEDROOM",
-        "MBR": "MASTER BEDROOM",
-        "MSTR": "MASTER BEDROOM",
-        "MS": "MASTER BEDROOM",
-        "BA": "BATHROOM",
-        "BATH": "BATHROOM",
-        "PDR": "POWDER ROOM",
-        "LR": "LIVING ROOM",
-        "DR": "DINING ROOM",
-        "DIN": "DINING ROOM",
-        "KIT": "KITCHEN",
-        "K": "KITCHEN",
-        "FR": "FAMILY ROOM",
-        "FAM": "FAMILY ROOM",
-        "OF": "OFFICE",
-        "OFC": "OFFICE",
-        "LNDRY": "LAUNDRY",
-        "UTL": "UTILITY",
-        "GAR": "GARAGE",
-        "G": "GARAGE",
-        "CL": "CLOSET",
-        "CLS": "CLOSET",
-        "WIC": "WALK-IN CLOSET",
-        "LIN": "LINEN CLOSET",
-        "PAN": "PANTRY",
-        "P": "PANTRY",
-        "STR": "STORAGE",
-        "STOR": "STORAGE",
-        # Commercial
-        "OFF": "OFFICE",
-        "CONF": "CONFERENCE ROOM",
-        "STE": "SUITE",
-        "RECP": "RECEPTION",
-        "WC": "RESTROOM",
-        "TLT": "RESTROOM",
-        "RM": "ROOM",
-        # Residential unit types (apartment floor plans)
-        "0BR": "STUDIO",
-        "0 BR": "STUDIO",
-        "1BR": "1 BEDROOM",
-        "1 BR": "1 BEDROOM",
-        "2BR": "2 BEDROOM",
-        "2 BR": "2 BEDROOM",
-        "3BR": "3 BEDROOM",
-        "3 BR": "3 BEDROOM",
-        "4BR": "4 BEDROOM",
-        "4 BR": "4 BEDROOM",
-        # Industrial / Utility
-        "MECH": "MECHANICAL ROOM",
-        "BSMT": "BASEMENT",
-        "UTIL": "UTILITY",
-        "SHOP": "WORKSHOP",
-    }
+    # Class-level compiled word-boundary pattern built from VALID_ROOM_KEYWORDS.
+    # Replaces the previous `any(kw in name ...)` substring check which allowed
+    # labels like "BUILDING MANAGEMENT SYSTEM" to pass because they contained
+    # "BUILDING" as a substring.  Word-boundary matching ensures keywords only
+    # match when they appear as complete words.
+    #
+    # Keywords are sorted longest-first so multi-word phrases ("FIRE PUMP",
+    # "ELEVATOR MACHINE") are tried before their component words ("PUMP",
+    # "MACHINE"), preventing partial matches that shadow the full phrase.
+    #
+    # The pattern is compiled once at class definition time (not per-instance)
+    # to avoid repeated re.compile() overhead in tight filter loops.
+    _KW_PATTERN: "re.Pattern" = None  # populated after class definition
+
+    # CRITICAL FIX: Abbreviation expansion mapping — single source of truth.
+    # Previously this was a separate dict that diverged from ResidentialAbbreviationRecovery
+    # and TaxonomyNormalizer.  All three now import from abbreviations.py.
+    ABBREVIATION_EXPANSIONS = _ABBREVIATION_MAP
 
     def _expand_abbreviation(self, name: str) -> str:
         """
@@ -364,7 +324,12 @@ class SemanticRoomValidator:
             #    OCR fragments like "UIPMEN" (confidence=0.9998) and
             #    "PANEL A" (confidence=0.999) were bypassing this gate.
             #    Confidence is handled separately in filter_by_confidence().
-            if any(kw in expanded_name for kw in self.VALID_ROOM_KEYWORDS):
+            #
+            # Word-boundary regex replaces the previous substring check
+            # `any(kw in expanded_name ...)` which allowed labels like
+            # "BUILDING MANAGEMENT SYSTEM" to pass because they contained
+            # "BUILDING" as a substring.
+            if SemanticRoomValidator._KW_PATTERN.search(expanded_name):
                 # Store original name for display, expanded for validation
                 room["original_name"] = name
                 valid.append(room)
@@ -381,56 +346,23 @@ class SemanticRoomValidator:
         return False
 
 
+# Build the class-level keyword pattern now that VALID_ROOM_KEYWORDS is defined.
+# Sorted longest-first so multi-word phrases ("FIRE PUMP") match before their
+# constituent words ("PUMP") when both could apply to the same string.
+_sorted_kws = sorted(SemanticRoomValidator.VALID_ROOM_KEYWORDS, key=len, reverse=True)
+SemanticRoomValidator._KW_PATTERN = re.compile(
+    r"\b(?:" + "|".join(re.escape(kw) for kw in _sorted_kws) + r")\b",
+    re.IGNORECASE,
+)
+
+
 class TaxonomyNormalizer:
     """Normalize room names to standard taxonomy."""
 
-    # Abbreviation expansion mapping (shared with SemanticRoomValidator)
-    ABBREVIATION_EXPANSIONS = {
-        # Residential & Room Areas
-        "BR": "BEDROOM",
-        "BD": "BEDROOM",
-        "BDRM": "BEDROOM",
-        "MBR": "MASTER BEDROOM",
-        "MSTR": "MASTER BEDROOM",
-        "MS": "MASTER BEDROOM",
-        "BA": "BATHROOM",
-        "BATH": "BATHROOM",
-        "PDR": "POWDER ROOM",
-        "LR": "LIVING ROOM",
-        "DR": "DINING ROOM",
-        "DIN": "DINING ROOM",
-        "KIT": "KITCHEN",
-        "K": "KITCHEN",
-        "FR": "FAMILY ROOM",
-        "FAM": "FAMILY ROOM",
-        "OF": "OFFICE",
-        "OFC": "OFFICE",
-        "LNDRY": "LAUNDRY",
-        "UTL": "UTILITY",
-        "GAR": "GARAGE",
-        "G": "GARAGE",
-        "CL": "CLOSET",
-        "CLS": "CLOSET",
-        "WIC": "WALK-IN CLOSET",
-        "LIN": "LINEN CLOSET",
-        "PAN": "PANTRY",
-        "P": "PANTRY",
-        "STR": "STORAGE",
-        "STOR": "STORAGE",
-        # Commercial
-        "OFF": "OFFICE",
-        "CONF": "CONFERENCE ROOM",
-        "STE": "SUITE",
-        "RECP": "RECEPTION",
-        "WC": "RESTROOM",
-        "TLT": "RESTROOM",
-        "RM": "ROOM",
-        # Industrial / Utility
-        "MECH": "MECHANICAL ROOM",
-        "BSMT": "BASEMENT",
-        "UTIL": "UTILITY",
-        "SHOP": "WORKSHOP",
-    }
+    # Single source of truth — imported from abbreviations.py.
+    # Previously a separate dict that diverged from SemanticRoomValidator
+    # and ResidentialAbbreviationRecovery.
+    ABBREVIATION_EXPANSIONS = _ABBREVIATION_MAP
 
     STANDARD_TAXONOMY = {
         "office": [
@@ -553,8 +485,18 @@ def filter_by_confidence(rooms: List[Dict], min_confidence: float = 0.85,
         confidence = room.get("confidence", 0)
         room_name = (room.get("name") or room.get("room_name", "")).upper()
 
-        # Check if contains valid keyword
-        has_keyword = any(kw in room_name for kw in validator.VALID_ROOM_KEYWORDS)
+        # Abbreviation-recovered rooms have already been validated by dictionary
+        # lookup in ResidentialAbbreviationRecovery.  Applying a confidence
+        # threshold here is redundant and risks dropping legitimate rooms whose
+        # raw OCR confidence is low (common for small abbreviated text).
+        if room.get("source") == "ocr_abbreviation_recovered":
+            result.append(room)
+            logger.debug(f"Kept (abbreviation exemption): {room_name}")
+            continue
+
+        # Word-boundary check replaces the previous `any(kw in room_name ...)`
+        # substring test.  See SemanticRoomValidator._KW_PATTERN for rationale.
+        has_keyword = bool(SemanticRoomValidator._KW_PATTERN.search(room_name))
 
         # Apply conditional threshold
         threshold = keyword_min_confidence if has_keyword else min_confidence

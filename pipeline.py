@@ -76,6 +76,34 @@ class AnnotationPipeline:
         pipeline.run(input_dir="./pdfs", output_dir="./dataset")
     """
 
+    # All image extensions the pipeline can process.
+    # Used by _iter_images() to replace the previous glob("*.png") calls that
+    # silently dropped JPG/TIFF inputs copied into images_dir by Form B/D.
+    _IMAGE_EXTS: frozenset = frozenset({".png", ".jpg", ".jpeg", ".tif", ".tiff"})
+
+    def _iter_images(self, images_dir: Path) -> list:
+        """
+        Return all supported image files in images_dir, sorted by name.
+
+        Handles mixed-case extensions (.PNG, .Jpg, .TIFF) that shutil.copy2
+        preserves when the source file has uppercase extensions (Form B / D
+        input).  Deduplicates so the same logical file is never yielded twice
+        even if the filesystem is case-insensitive.
+
+        Replaces every ``sorted(images_dir.glob("*.png"))`` call in the
+        pipeline, which silently omitted any non-PNG image.
+
+        Returns:
+            Sorted list of Path objects for all supported images.
+        """
+        seen: set = set()
+        result: list = []
+        for p in sorted(images_dir.iterdir()):
+            if p.suffix.lower() in self._IMAGE_EXTS and p not in seen:
+                seen.add(p)
+                result.append(p)
+        return result
+
     def __init__(self, config: Optional[PipelineConfig] = None):
         self.config = config or PipelineConfig()
 
@@ -323,7 +351,13 @@ class AnnotationPipeline:
                         page_type, reason = page_classifier.classify_page(page)
                         if page_type != "floor_plan":
                             import shutil
-                            shutil.move(str(img_candidate), str(skipped_dir / img_candidate.name))
+                            # copy+delete instead of move: keeps a recovery path
+                            # in skipped_pages/ if classification is a false positive
+                            # on a scanned or ambiguous page, while still removing
+                            # the image from images_dir so OCR does not process it.
+                            dst = skipped_dir / img_candidate.name
+                            shutil.copy2(str(img_candidate), str(dst))
+                            img_candidate.unlink()
                             _classified_skips.add(img_candidate.name)
                             skipped_count += 1
                             logger.info(f"  Skipped {img_candidate.name}: {page_type} ({reason})")
@@ -339,10 +373,22 @@ class AnnotationPipeline:
         # Step 2: OCR text extraction + abbreviation recovery
         self._print_step("STEP 2: OCR text extraction + abbreviation recovery")
 
+        # Per-image status tracking.  Built from _iter_images() so it covers
+        # every file in images_dir regardless of extension (P1 fix).
+        # Updated across steps; inspected at pipeline end to report any image
+        # that was loaded but never annotated (silent-skip detection, P6 fix).
+        image_status: dict = {}
+        for _img in self._iter_images(images_dir):
+            image_status[_img.name] = {
+                "loaded": True,
+                "ocr": False,
+                "annotated": False,
+            }
+
         ocr_results: Dict[str, List[RoomCandidate]] = {}
         abbrev_recovery = AbbreviationOCRRecovery()  # uses pattern matching only
 
-        for img_path in sorted(images_dir.glob("*.png")):
+        for img_path in self._iter_images(images_dir):
             try:
                 # 2a: Standard OCR room detection (compound merging + number linking built-in).
                 # extract_and_find_rooms now returns (candidates, raw_detections) to avoid
@@ -386,12 +432,15 @@ class AnnotationPipeline:
             except Exception as e:
                 logger.error(f"  {img_path.name}: OCR failed - {e}")
                 ocr_results[img_path.name] = []
+            finally:
+                if img_path.name in image_status:
+                    image_status[img_path.name]["ocr"] = True
 
         # Step 3: VLM annotation (optional)
         if self.config.use_vlm:
             self._print_step("STEP 3: VLM zero-shot annotation")
 
-            for img_path in sorted(images_dir.glob("*.png")):
+            for img_path in self._iter_images(images_dir):
                 ann_path = annotations_dir / f"{img_path.stem}.json"
 
                 if skip_existing and ann_path.exists():
@@ -399,11 +448,25 @@ class AnnotationPipeline:
                     continue
 
                 try:
-                    # Step 3a: Resize image to fit Claude API 5MB limit
+                    # Step 3a: Pre-resize image on disk to reduce I/O for the
+                    # VLM annotator.  This is best-effort: if it fails (e.g.
+                    # read-only source file, OOM), vlm_annotator.annotate()
+                    # enforces its own in-memory dimension limit and will still
+                    # produce a valid result.  Log the failure so it is visible
+                    # in the pipeline log, but do not abort the annotation step.
                     try:
                         ImageResizer.resize_in_place(img_path, max_kb=4500)
+                    except PermissionError:
+                        logger.info(
+                            f"  {img_path.name}: pre-resize skipped "
+                            f"(read-only file — annotator will resize in memory)"
+                        )
                     except Exception as resize_error:
-                        logger.warning(f"  {img_path.name}: Image resize failed - {resize_error}")
+                        logger.warning(
+                            f"  {img_path.name}: pre-resize failed "
+                            f"({type(resize_error).__name__}: {resize_error}) "
+                            f"— annotator will resize in memory"
+                        )
 
                     result = self.vlm_annotator.annotate(img_path)
                     stats["images_annotated"] += 1
@@ -412,6 +475,9 @@ class AnnotationPipeline:
                     # Save annotation
                     self._save_annotation(result, ann_path, ocr_results.get(img_path.name, []))
 
+                    if img_path.name in image_status:
+                        image_status[img_path.name]["annotated"] = True
+
                     logger.info(
                         f"  {img_path.name}: {len(result.rooms)} rooms, "
                         f"{len(result.panels)} panels (VLM)"
@@ -419,39 +485,60 @@ class AnnotationPipeline:
                 except Exception as e:
                     logger.error(f"  {img_path.name}: VLM annotation failed - {e}")
 
-                    # Fallback: Try OCR if VLM fails
+                    # Fallback: always write OCR annotation (even if empty) so
+                    # the image is not silently lost from downstream steps.
                     ocr_rooms = ocr_results.get(img_path.name, [])
-                    if ocr_rooms:
-                        try:
-                            self._save_ocr_annotation(img_path, ocr_rooms, annotations_dir)
-                            stats["images_annotated"] += 1
-                            stats["rooms_detected"] += len(ocr_rooms)
+                    try:
+                        self._save_ocr_annotation(img_path, ocr_rooms, annotations_dir)
+                        stats["images_annotated"] += 1
+                        stats["rooms_detected"] += len(ocr_rooms)
+                        if img_path.name in image_status:
+                            image_status[img_path.name]["annotated"] = True
+                        if ocr_rooms:
                             logger.info(
                                 f"  {img_path.name}: Fallback to OCR - "
                                 f"saved {len(ocr_rooms)} rooms"
                             )
-                        except Exception as fallback_error:
-                            logger.error(
-                                f"  {img_path.name}: OCR fallback also failed - {fallback_error}"
+                        else:
+                            logger.warning(
+                                f"  {img_path.name}: VLM failed and OCR found 0 rooms "
+                                f"— zero-room annotation written for review"
                             )
+                    except Exception as fallback_error:
+                        logger.error(
+                            f"  {img_path.name}: OCR fallback also failed - {fallback_error}"
+                        )
         else:
             # Use OCR results as primary annotations
             self._print_step("STEP 3: Generating annotations from OCR")
 
-            for img_path in sorted(images_dir.glob("*.png")):
+            for img_path in self._iter_images(images_dir):
                 rooms = ocr_results.get(img_path.name, [])
-                if rooms:
-                    try:
-                        self._save_ocr_annotation(img_path, rooms, annotations_dir)
-                        stats["images_annotated"] += 1
-                        stats["rooms_detected"] += len(rooms)
+                # Always write the annotation, even when rooms == [].
+                # Previously, images with zero OCR rooms were silently dropped:
+                # no annotation file was written, no warning was logged, and
+                # the image disappeared from all downstream steps and exports.
+                # A zero-room annotation is written with sft_ready=False and
+                # lands in needs_review.json so a human can inspect it.
+                try:
+                    self._save_ocr_annotation(img_path, rooms, annotations_dir)
+                    stats["images_annotated"] += 1
+                    stats["rooms_detected"] += len(rooms)
+                    if img_path.name in image_status:
+                        image_status[img_path.name]["annotated"] = True
+                    if rooms:
                         logger.info(
                             f"  {img_path.name}: Saved {len(rooms)} rooms from OCR"
                         )
-                    except Exception as e:
-                        logger.error(
-                            f"  {img_path.name}: Failed to save OCR annotation - {e}"
+                    else:
+                        logger.warning(
+                            f"  {img_path.name}: 0 rooms detected — "
+                            f"zero-room annotation written for review"
                         )
+                except Exception as e:
+                    logger.error(
+                        f"  {img_path.name}: Failed to save OCR annotation - {e}"
+                    )
 
         # Step 4: Annotation post-processing (label normalization, quality checks, region extraction)
         self._print_step("STEP 4: Post-processing annotations")
@@ -568,7 +655,7 @@ class AnnotationPipeline:
         if self.config.use_sam:
             self._print_step("STEP 5: SAM boundary refinement")
 
-            for img_path in sorted(images_dir.glob("*.png")):
+            for img_path in self._iter_images(images_dir):
                 ann_path = annotations_dir / f"{img_path.stem}.json"
 
                 if not ann_path.exists():
@@ -635,6 +722,28 @@ class AnnotationPipeline:
 
         # Print summary
         self._print_summary(stats, output_dir)
+
+        # ── Pipeline integrity check ───────────────────────────────────────────
+        # Any image that was loaded into images_dir but never annotated represents
+        # a silent data loss.  Report these explicitly so they are never invisible.
+        _never_annotated = [
+            name for name, s in image_status.items()
+            if s["loaded"] and not s["annotated"]
+        ]
+        if _never_annotated:
+            logger.error(
+                f"PIPELINE INTEGRITY FAILURE: {len(_never_annotated)} image(s) "
+                f"were loaded into images_dir but produced no annotation file. "
+                f"These images are absent from all downstream steps and exports. "
+                f"Affected files: {_never_annotated}"
+            )
+            stats["images_skipped_silently"] = len(_never_annotated)
+        else:
+            total_tracked = len(image_status)
+            logger.info(
+                f"Pipeline integrity OK: all {total_tracked} image(s) in "
+                f"images_dir produced an annotation file."
+            )
 
         return stats
 

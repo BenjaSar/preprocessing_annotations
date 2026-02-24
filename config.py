@@ -121,6 +121,16 @@ class OCRConfig:
             r"^(BA|BATH|MB|PB|PDR)$",              # bathroom
             r"^WIC$",                                # walk-in closet
             r"^(STOR|UTIL|GAR)$",                   # storage/utility/garage
+            # --- Abbreviations present in ABBREVIATION_MAP but previously ---
+            # --- missing here, causing them to be dropped at the OCR gate ---
+            # Without these patterns, find_room_candidates() discards the token
+            # before it ever reaches AbbreviationOCRRecovery or SemanticRoomValidator.
+            r"^(FR|FAM)$",                           # family room
+            r"^(OF|OFC|OFF)$",                       # office
+            r"^(CL|CLS)$",                           # closet
+            r"^PDR$",                                 # powder room
+            r"^(CONF|STE|RECP|WC|TLT|RM)$",         # commercial
+            r"^(MECH|BSMT|UTL|LNDRY)$",             # building services
         ]
     )
 
