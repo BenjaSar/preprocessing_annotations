@@ -621,6 +621,33 @@ def _bbox_distance(bbox1: List, bbox2: List, threshold: int = 100) -> bool:
     return x_overlap and y_overlap
 
 
+def _bbox_in_bounds(bbox: List, img_w: int, img_h: int) -> bool:
+    """
+    Check if a bounding box lies entirely within the image bounds.
+
+    (pipeline-revalidation-analysis §3 Fix B)
+
+    Rooms with coordinates exceeding image dimensions are produced when
+    OCR or VLM returns pixel coordinates relative to the full-resolution
+    PDF page rather than the cropped/resized image used by the pipeline.
+    These must be filtered BEFORE sft_ready is computed, otherwise images
+    with only OOB rooms are marked sft_ready=True and appear in COCO
+    splits as zero-annotation ghost images.
+
+    Args:
+        bbox: [x, y, width, height]
+        img_w: Image width in pixels
+        img_h: Image height in pixels
+
+    Returns:
+        True if bbox is entirely within image bounds
+    """
+    if len(bbox) < 4:
+        return False
+    x, y, w, h = bbox[:4]
+    return x >= 0 and y >= 0 and x + w <= img_w and y + h <= img_h
+
+
 def _merge_vlm_and_ocr(vlm_rooms: List[Dict], ocr_rooms: List[Dict]) -> List[Dict]:
     """
     Merge VLM and OCR room detections, preferring compound names from OCR.
@@ -741,15 +768,48 @@ def prepare_sft_annotation(annotation: Dict) -> Dict:
     rooms = filter_by_confidence(rooms, min_confidence=0.85)
     logger.debug(f"After confidence filter: {len(rooms)} rooms")
 
-    # Step 3: Normalize room types (for OCR-only detections)
+    # Step 2b: Filter out-of-bounds rooms
+    # (pipeline-revalidation-analysis §3 Fix B)
+    #
+    # Rooms with bboxes exceeding the image dimensions are produced when
+    # OCR returns pixel coordinates from the full-resolution PDF rather
+    # than the cropped image.  Previously these were only filtered in the
+    # exporters, AFTER sft_ready was set.  This caused pages with only
+    # OOB rooms (e.g., page000 with ELEVATOR at y=5892 on a 3375-tall
+    # image) to get sft_ready=True and appear in COCO splits as
+    # zero-annotation ghost images.  Filtering here ensures sft_ready
+    # accurately reflects exportable room count.
+    img_w = annotation.get("image_size", {}).get("width", 0)
+    img_h = annotation.get("image_size", {}).get("height", 0)
+    if img_w > 0 and img_h > 0:
+        pre_oob = len(rooms)
+        rooms = [r for r in rooms if _bbox_in_bounds(r.get("bbox", []), img_w, img_h)]
+        n_dropped = pre_oob - len(rooms)
+        if n_dropped > 0:
+            logger.warning(
+                f"Dropped {n_dropped} out-of-bounds room(s) "
+                f"(image={img_w}x{img_h})"
+            )
+    logger.debug(f"After OOB filter: {len(rooms)} rooms")
+
+    # Step 3: Normalize ALL room types through canonical taxonomy
+    # (pipeline-revalidation-analysis §3 Fix A)
+    #
+    # CRITICAL FIX: The previous condition (type == "other" or type missing)
+    # skipped rooms where the VLM assigned a plausible-but-wrong type.
+    # Example: VLM assigns PANTRY → type="storage" (wrong; should be kitchen).
+    # Because type≠"other", normalization was skipped and the error propagated
+    # to COCO output.  Unconditional normalization through the canonical
+    # taxonomy guarantees deterministic, consistent category assignment
+    # regardless of VLM output variance.  This is idempotent: rooms already
+    # correctly typed (KITCHEN→kitchen) are unchanged.
     for room in rooms:
-        # Only normalize if type not already set (e.g., from VLM category)
-        if room.get("type") == "other" or "type" not in room:
-            # Support both "room_name" (VLM) and "name" (OCR)
-            room_name = room.get("room_name") or room.get("name", "")
-            room_type = normalizer.normalize(room_name)
-            room["type"] = room_type
-            logger.debug(f"Normalized '{room_name}' → {room_type}")
+        room_name = room.get("room_name") or room.get("name", "")
+        if room_name:
+            normalized = normalizer.normalize(room_name)
+            room["type"] = normalized
+            room["category"] = normalized  # Sync category field for COCO exporter
+            logger.debug(f"Normalized '{room_name}' → {normalized}")
 
     # Step 4: SFT validation
     sft_ready = []
