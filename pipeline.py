@@ -280,6 +280,12 @@ class AnnotationPipeline:
 
             if pdf_files:
                 # Form A: PDF directory (original flow)
+                if image_files:
+                    logger.warning(
+                        f"Input directory contains {len(image_files)} image file(s) "
+                        f"alongside {len(pdf_files)} PDF(s). Only PDFs will be processed. "
+                        f"Image files ignored: {[p.name for p in image_files]}"
+                    )
                 logger.info(
                     f"PDF directory input: {len(pdf_files)} PDF(s) in {input_path}"
                 )
@@ -324,6 +330,21 @@ class AnnotationPipeline:
         # Step 1b: Plan-type classification — skip notes/legend/schedule pages.
         # Runs before OCR to eliminate the largest source of false room candidates
         # at the source, reducing OCR load by 30–50% on typical MEP sets.
+
+        # Per-image status tracking — built BEFORE classification so that
+        # images removed by the classifier are still tracked and reported.
+        # Updated across steps; inspected at pipeline end to report any image
+        # that was loaded but never annotated (silent-skip detection).
+        image_status: dict = {}
+        for _img in self._iter_images(images_dir):
+            image_status[_img.name] = {
+                "loaded": True,
+                "ocr": False,
+                "annotated": False,
+                "classified_skip": False,
+                "skip_reason": None,
+            }
+
         page_classifier = PageTypeClassifier()
         skipped_dir = output_dir / "skipped_pages"
         skipped_dir.mkdir(parents=True, exist_ok=True)
@@ -360,6 +381,10 @@ class AnnotationPipeline:
                             img_candidate.unlink()
                             _classified_skips.add(img_candidate.name)
                             skipped_count += 1
+                            # Update tracking dict for classified-away images
+                            if img_candidate.name in image_status:
+                                image_status[img_candidate.name]["classified_skip"] = True
+                                image_status[img_candidate.name]["skip_reason"] = reason
                             logger.info(f"  Skipped {img_candidate.name}: {page_type} ({reason})")
                     doc.close()
                 except Exception as e:
@@ -372,18 +397,6 @@ class AnnotationPipeline:
 
         # Step 2: OCR text extraction + abbreviation recovery
         self._print_step("STEP 2: OCR text extraction + abbreviation recovery")
-
-        # Per-image status tracking.  Built from _iter_images() so it covers
-        # every file in images_dir regardless of extension (P1 fix).
-        # Updated across steps; inspected at pipeline end to report any image
-        # that was loaded but never annotated (silent-skip detection, P6 fix).
-        image_status: dict = {}
-        for _img in self._iter_images(images_dir):
-            image_status[_img.name] = {
-                "loaded": True,
-                "ocr": False,
-                "annotated": False,
-            }
 
         ocr_results: Dict[str, List[RoomCandidate]] = {}
         abbrev_recovery = AbbreviationOCRRecovery()  # uses pattern matching only
@@ -607,8 +620,15 @@ class AnnotationPipeline:
                     )
 
                 # Step 4d: Extract room regions for training
-                img_path = images_dir / f"{ann_path.stem}.png"
-                if img_path.exists() and rooms:
+                # Find the actual image file — do not assume .png extension.
+                # Images may be .jpg, .tiff, etc. when copied from Form B/D input.
+                img_path = None
+                for _ext in self._IMAGE_EXTS:
+                    _candidate = images_dir / f"{ann_path.stem}{_ext}"
+                    if _candidate.exists():
+                        img_path = _candidate
+                        break
+                if img_path is not None and rooms:
                     extracted = self.region_extractor.extract_regions(
                         str(img_path), annotation, str(regions_dir), prefix="room"
                     )
@@ -724,11 +744,30 @@ class AnnotationPipeline:
         self._print_summary(stats, output_dir)
 
         # ── Pipeline integrity check ───────────────────────────────────────────
-        # Any image that was loaded into images_dir but never annotated represents
-        # a silent data loss.  Report these explicitly so they are never invisible.
+        # Report classified skips (moved to skipped_pages/ by Step 1b) and
+        # true silent skips (images that reached images_dir but never got an
+        # annotation file) as separate categories.
+
+        _classified_skips_list = [
+            name for name, s in image_status.items()
+            if s.get("classified_skip")
+        ]
+        if _classified_skips_list:
+            logger.warning(
+                f"Page classifier skipped {len(_classified_skips_list)} image(s). "
+                f"Review skipped_pages/ for false positives. "
+                f"Affected files: {_classified_skips_list}"
+            )
+            for name in _classified_skips_list:
+                reason = image_status[name].get("skip_reason", "unknown")
+                logger.warning(f"  - {name}: {reason}")
+            stats["images_classified_skip"] = len(_classified_skips_list)
+
+        # Any image that was loaded but NOT classified-away AND NOT annotated
+        # represents a true silent data loss.
         _never_annotated = [
             name for name, s in image_status.items()
-            if s["loaded"] and not s["annotated"]
+            if s["loaded"] and not s["annotated"] and not s.get("classified_skip")
         ]
         if _never_annotated:
             logger.error(
@@ -740,9 +779,12 @@ class AnnotationPipeline:
             stats["images_skipped_silently"] = len(_never_annotated)
         else:
             total_tracked = len(image_status)
+            total_classified = len(_classified_skips_list)
+            total_annotated = total_tracked - total_classified
             logger.info(
-                f"Pipeline integrity OK: all {total_tracked} image(s) in "
-                f"images_dir produced an annotation file."
+                f"Pipeline integrity OK: {total_annotated} of {total_tracked} "
+                f"image(s) produced an annotation file"
+                + (f" ({total_classified} skipped by classifier)." if total_classified else ".")
             )
 
         return stats

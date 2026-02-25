@@ -49,6 +49,9 @@ CANONICAL_TYPES: Dict[str, List[str]] = {
         "LOBBY", "RECEPTION", "RECEPTION AREA", "ENTRANCE", "ENTRY",
         "ENTRANCE VESTIBULE", "ENTRY AREA", "FOYER", "VESTIBULE",
         "LOBBY RECEPTION",
+        # Waiting areas are functionally reception/lobby spaces
+        # (common in supportive housing, medical offices, government buildings)
+        "WAITING ROOM", "WAITING", "WAITING AREA",
     ],
     "hallway": [
         "HALLWAY", "CORRIDOR", "PASSAGE", "WALKWAY", "CIRCULATION",

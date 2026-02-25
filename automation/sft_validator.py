@@ -211,6 +211,16 @@ class SemanticRoomValidator:
         "2 BEDROOM",
         "3 BEDROOM",
         "4 BEDROOM",
+        # Pipeline-output-analysis §4/§5: Keywords present in CANONICAL_TYPES
+        # surface forms but previously absent from this whitelist, causing
+        # the keyword gate to silently drop valid room labels before
+        # taxonomy normalization could map them to canonical types.
+        "COMMUNITY",        # §4 Case 1: "COMMUNITY ROOM" → community_facility
+        "COMMUNITY ROOM",   # §5 table: direct compound match
+        "WAITING",          # §4 Case 3: "WAITING" / "WAITING ROOM" → lobby
+        "WAITING ROOM",     # §4 Case 3: compound form
+        "REFUSE",           # §4 Case 4: "REFUSE ROOM" → compactor
+        "TRASH",            # §5 table:  "TRASH ROOM"  → compactor
     }
 
     # Class-level compiled word-boundary pattern built from VALID_ROOM_KEYWORDS.

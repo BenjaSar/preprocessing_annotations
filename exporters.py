@@ -161,18 +161,43 @@ class LabelStudioExporter:
         )
 
         # Build task structure
+        # CRITICAL FIX (pipeline-output-analysis §Category C):
+        # Label Studio expects room annotations in the "annotations" key,
+        # not "predictions".  Using "predictions" causes Label Studio to
+        # show 0 annotations and display them only as pre-annotations,
+        # breaking the human review workflow.
         task = {
             "data": {"image": f"{image_url_prefix}{images_dir}/{image_file}"},
-            "predictions": [{"result": []}],
+            "annotations": [{"result": []}],
         }
 
-        result = task["predictions"][0]["result"]
+        result = task["annotations"][0]["result"]
 
         # Add room annotations
         for i, room in enumerate(annotation.get("rooms", [])):
             bbox = room.get("bbox", [0, 0, 100, 100])
 
             # Convert to Label Studio percentage format
+            x_pct = (bbox[0] / img_w) * 100
+            y_pct = (bbox[1] / img_h) * 100
+            w_pct = (bbox[2] / img_w) * 100
+            h_pct = (bbox[3] / img_h) * 100
+
+            # CRITICAL FIX (pipeline-output-analysis §Category C):
+            # Drop annotations whose percentage coordinates exceed 100%.
+            # These are produced when the VLM returns pixel coordinates
+            # relative to full-resolution images while the pipeline
+            # expects fractional coordinates.  Without this guard, Label
+            # Studio renders them off-canvas, invisible to reviewers.
+            if x_pct > 100 or y_pct > 100 or x_pct + w_pct > 100 or y_pct + h_pct > 100:
+                room_name = room.get("room_name") or room.get("name", "unknown")
+                logger.warning(
+                    f"LabelStudioExporter: dropping out-of-bounds annotation "
+                    f"'{room_name}' (x={x_pct:.1f}%, y={y_pct:.1f}%, "
+                    f"w={w_pct:.1f}%, h={h_pct:.1f}%) in {image_file}"
+                )
+                continue
+
             result.append(
                 {
                     "id": f"room_{i}",
@@ -182,10 +207,10 @@ class LabelStudioExporter:
                     "original_width": img_w,
                     "original_height": img_h,
                     "value": {
-                        "x": (bbox[0] / img_w) * 100,
-                        "y": (bbox[1] / img_h) * 100,
-                        "width": (bbox[2] / img_w) * 100,
-                        "height": (bbox[3] / img_h) * 100,
+                        "x": x_pct,
+                        "y": y_pct,
+                        "width": w_pct,
+                        "height": h_pct,
                         "rectanglelabels": [room.get("category", "unknown")],
                     },
                 }
@@ -204,10 +229,10 @@ class LabelStudioExporter:
                         "from_name": "room_label",
                         "to_name": "image",
                         "value": {
-                            "x": (bbox[0] / img_w) * 100,
-                            "y": (bbox[1] / img_h) * 100,
-                            "width": (bbox[2] / img_w) * 100,
-                            "height": (bbox[3] / img_h) * 100,
+                            "x": x_pct,
+                            "y": y_pct,
+                            "width": w_pct,
+                            "height": h_pct,
                             "text": [room_label],
                         },
                     }
@@ -632,6 +657,30 @@ class COCOExporter:
             train_anns.extend(group[:n_train])
             val_anns.extend(group[n_train:n_train + n_val])
             test_anns.extend(group[n_train + n_val:])
+
+        # CRITICAL FIX (pipeline-output-analysis §Category A):
+        # Per-group int() truncation can produce empty splits when groups
+        # are small.  With 8 images and 70/15/15 ratios, every group of
+        # size 1–2 assigns 0 to val → val.json ends up empty.
+        #
+        # Post-hoc redistribution: when total images ≥ 3 and any split is
+        # empty, move one image from the largest split to fill it.  This
+        # guarantees a non-empty validation set for training monitoring.
+        split_lists = [train_anns, val_anns, test_anns]
+        total = len(all_anns)
+        if total >= 3:
+            for i, slist in enumerate(split_lists):
+                if len(slist) == 0:
+                    # Find the largest split to donate from
+                    donor_idx = max(range(3), key=lambda j: len(split_lists[j]))
+                    if len(split_lists[donor_idx]) > 1:
+                        slist.append(split_lists[donor_idx].pop())
+                        split_names = ["train", "val", "test"]
+                        logger.info(
+                            f"Split rebalance: moved 1 image from "
+                            f"'{split_names[donor_idx]}' to '{split_names[i]}' "
+                            f"to prevent empty split"
+                        )
 
         # Write each split
         counts = {}
