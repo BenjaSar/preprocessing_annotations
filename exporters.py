@@ -211,7 +211,12 @@ class LabelStudioExporter:
                         "y": y_pct,
                         "width": w_pct,
                         "height": h_pct,
-                        "rectanglelabels": [room.get("category", "unknown")],
+                        # BUG-2 fix: use same type→category→"other" resolution
+                        # chain as COCOExporter to guarantee identical category
+                        # assignment across both export formats.
+                        "rectanglelabels": [
+                            room.get("type") or room.get("category") or "other"
+                        ],
                     },
                 }
             )
@@ -460,35 +465,23 @@ class COCOExporter:
         Returns:
             Number of images exported.
         """
-        try:
-            from .automation.taxonomy import CANONICAL_TYPES
-        except ImportError:
-            from automation.taxonomy import CANONICAL_TYPES
-
         processed_dir = Path(processed_dir)
         images_dir = Path(images_dir)
         output_file = Path(output_file)
         output_file.parent.mkdir(parents=True, exist_ok=True)
 
-        # Build category list from canonical taxonomy (sorted for determinism)
-        sorted_types = sorted(CANONICAL_TYPES.keys())
-        cat_id_map = {t: i + 1 for i, t in enumerate(sorted_types)}
-
-        coco: dict = {
-            "info": {
-                "description": self.description,
-                "version": "1.0",
-            },
-            "categories": [
-                {"id": cat_id_map[t], "name": t, "supercategory": "room"}
-                for t in sorted_types
-            ],
-            "images": [],
-            "annotations": [],
-        }
-
-        ann_id = 1
-        img_id = 0
+        # ── Phase 1: Collect all rooms to determine which categories are used ──
+        # (vlm-sft-fitness-evaluation BUG-7)
+        #
+        # Previously the COCO categories list was built from the full 31-entry
+        # CANONICAL_TYPES taxonomy.  19 of those categories had zero training
+        # examples, inflating the classification head and diluting gradient
+        # signal for populated categories.
+        #
+        # Two-pass approach: first scan to find used types, then build the
+        # category list from only populated types.
+        all_file_data = []
+        used_types: set = set()
 
         for json_file in sorted(processed_dir.glob("*.json")):
             try:
@@ -506,29 +499,15 @@ class COCOExporter:
             w = img_size.get("width", 0)
             h = img_size.get("height", 0)
 
-            img_id += 1
-            coco["images"].append({
-                "id": img_id,
-                "file_name": image_file,
-                "width": w,
-                "height": h,
-            })
-
+            # Pre-filter rooms and collect used types
+            valid_rooms = []
             for room in ann.get("rooms", []):
                 bbox = room.get("bbox", [])
                 if len(bbox) != 4:
                     continue
-
-                # COCO uses [x, y, w, h] — matches our internal format exactly
                 bx, by, bw, bh = [float(v) for v in bbox]
                 if bw <= 0 or bh <= 0:
                     continue
-
-                # BUG FIX: Drop annotations whose bbox exceeds image bounds.
-                # These were produced when the VLM returned raw pixel coords
-                # instead of fractional ones. Even after the vlm_annotator fix
-                # that drops them early, this guard defends against any future
-                # source of out-of-bounds coordinates reaching export.
                 if w > 0 and h > 0:
                     if bx < 0 or by < 0 or bx + bw > w or by + bh > h:
                         logger.warning(
@@ -538,25 +517,61 @@ class COCOExporter:
                             f"(image {w}×{h})"
                         )
                         continue
+                raw_type = room.get("type") or room.get("category") or "other"
+                used_types.add(raw_type)
+                valid_rooms.append(room)
 
-                # Resolve canonical type from field chain
+            if valid_rooms:
+                all_file_data.append({
+                    "image_file": image_file,
+                    "w": w,
+                    "h": h,
+                    "rooms": valid_rooms,
+                })
+
+        # ── Phase 2: Build COCO structure with pruned categories ──
+        # Only categories with ≥1 annotation are included.
+        sorted_used = sorted(used_types)
+        cat_id_map = {t: i + 1 for i, t in enumerate(sorted_used)}
+
+        coco: dict = {
+            "info": {
+                "description": self.description,
+                "version": "1.0",
+            },
+            "categories": [
+                {"id": cat_id_map[t], "name": t, "supercategory": "room"}
+                for t in sorted_used
+            ],
+            "images": [],
+            "annotations": [],
+        }
+
+        ann_id = 1
+        img_id = 0
+
+        for file_data in all_file_data:
+            img_id += 1
+            coco["images"].append({
+                "id": img_id,
+                "file_name": file_data["image_file"],
+                "width": file_data["w"],
+                "height": file_data["h"],
+            })
+
+            for room in file_data["rooms"]:
+                bbox = room.get("bbox", [])
+                bx, by, bw, bh = [float(v) for v in bbox]
+
                 raw_type = room.get("type") or room.get("category") or "other"
                 cat_id = cat_id_map.get(raw_type, cat_id_map.get("other", 1))
 
-                # Build rectangular segmentation polygon from bbox corners.
-                # COCO spec requires `segmentation` for iscrowd=0 annotations.
-                # Without true mask data we use a 4-point rectangle; this
-                # satisfies pycocotools, makes area derivable via Shoelace,
-                # and is trivially upgradeable to real polygon masks later.
-                # Vertex order: TL → TR → BR → BL.
                 rect_polygon = [
                     bx,      by,
                     bx + bw, by,
                     bx + bw, by + bh,
                     bx,      by + bh,
                 ]
-                # For a rectangle, Shoelace == w*h. Using bw*bh is equivalent
-                # but the formula is kept explicit for future polygon support.
                 area = bw * bh
 
                 coco["annotations"].append({

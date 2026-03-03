@@ -648,6 +648,27 @@ def _bbox_in_bounds(bbox: List, img_w: int, img_h: int) -> bool:
     return x >= 0 and y >= 0 and x + w <= img_w and y + h <= img_h
 
 
+def _bbox_area(bbox: List) -> float:
+    """
+    Compute the area of a bounding box.
+
+    (vlm-sft-fitness-evaluation BUG-3)
+
+    Used to distinguish real room annotations (area ≥ 30,000 px²) from
+    OCR text-label detections (area ~1,500–2,500 px²).
+
+    Args:
+        bbox: [x, y, width, height]
+
+    Returns:
+        Area in px², or 0 if bbox is malformed.
+    """
+    if len(bbox) < 4:
+        return 0.0
+    w, h = bbox[2], bbox[3]
+    return float(w) * float(h) if w > 0 and h > 0 else 0.0
+
+
 def _merge_vlm_and_ocr(vlm_rooms: List[Dict], ocr_rooms: List[Dict]) -> List[Dict]:
     """
     Merge VLM and OCR room detections, preferring compound names from OCR.
@@ -791,6 +812,30 @@ def prepare_sft_annotation(annotation: Dict) -> Dict:
                 f"(image={img_w}x{img_h})"
             )
     logger.debug(f"After OOB filter: {len(rooms)} rooms")
+
+    # Step 2c: Minimum bounding-box area guard
+    # (vlm-sft-fitness-evaluation BUG-3)
+    #
+    # OCR detects text labels like "2BR" and creates room annotations
+    # from the text bounding box (50×30 px, area ~1,500–2,500 px²).
+    # These are 50× smaller than the smallest legitimate room annotation
+    # (~30,000 px²) and teach the VLM that bedrooms are postage-stamp-
+    # sized text labels.  A threshold of 10,000 px² (~0.5"×0.5" at
+    # 200 DPI) excludes all text-label detections while preserving the
+    # smallest real rooms (closets, risers).
+    MIN_ROOM_AREA_PX = 10_000
+    pre_area = len(rooms)
+    rooms = [
+        r for r in rooms
+        if _bbox_area(r.get("bbox", [])) >= MIN_ROOM_AREA_PX
+    ]
+    n_tiny = pre_area - len(rooms)
+    if n_tiny > 0:
+        logger.warning(
+            f"Dropped {n_tiny} text-label annotation(s) "
+            f"(area < {MIN_ROOM_AREA_PX} px²)"
+        )
+    logger.debug(f"After min-area filter: {len(rooms)} rooms")
 
     # Step 3: Normalize ALL room types through canonical taxonomy
     # (pipeline-revalidation-analysis §3 Fix A)

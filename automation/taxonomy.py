@@ -49,6 +49,9 @@ CANONICAL_TYPES: Dict[str, List[str]] = {
         "LOBBY", "RECEPTION", "RECEPTION AREA", "ENTRANCE", "ENTRY",
         "ENTRANCE VESTIBULE", "ENTRY AREA", "FOYER", "VESTIBULE",
         "LOBBY RECEPTION",
+        # Elevator lobby is a waiting area adjacent to elevator shafts,
+        # not an elevator shaft itself. Moved from "elevator" per BUG-4.
+        "ELEVATOR LOBBY",
         # Waiting areas are functionally reception/lobby spaces
         # (common in supportive housing, medical offices, government buildings)
         "WAITING ROOM", "WAITING", "WAITING AREA",
@@ -58,7 +61,7 @@ CANONICAL_TYPES: Dict[str, List[str]] = {
         "HALLWAY/CORRIDOR", "HALL",
     ],
     "elevator": [
-        "ELEVATOR", "ELEVATOR LOBBY", "ELEVATOR CORE", "ELEVATOR AREA",
+        "ELEVATOR", "ELEVATOR CORE", "ELEVATOR AREA",
         "LIFT", "ELEVATOR MACHINE ROOM",
     ],
     "stairwell": [
