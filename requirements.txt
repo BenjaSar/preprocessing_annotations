@@ -6,9 +6,16 @@ numpy>=1.21.0
 
 # OCR
 easyocr>=1.6.0
+paddlepaddle>=2.5.0  # PaddleOCR backend
+paddleocr>=2.7.0.3   # PaddleOCR wrapper
 
-# VLM
+# VLM (Claude + Qwen2.5-VL)
 anthropic>=0.7.0
+transformers>=4.36.0  # For Qwen2.5-VL local inference
+qwen-vl-utils>=0.0.12 # Qwen2.5-VL utilities
+
+# Semantic reconciliation
+shapely>=2.0.0  # Polygon operations for spatial matching
 
 # Segmentation
 segment-anything>=1.0

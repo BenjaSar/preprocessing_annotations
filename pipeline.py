@@ -1009,6 +1009,13 @@ Examples:
         "--use-vlm", action="store_true", help="Use Claude VLM for annotation"
     )
     parser.add_argument(
+        "--ocr-backend",
+        choices=["easyocr", "paddleocr"],
+        default="easyocr",
+        help="OCR backend to use. Default: easyocr. Use 'paddleocr' for improved "
+             "accuracy (requires: pip install paddlepaddle paddleocr)",
+    )
+    parser.add_argument(
         "--use-sam", action="store_true", help="Use SAM for boundary refinement"
     )
     parser.add_argument(
@@ -1047,6 +1054,7 @@ Examples:
     # Apply CLI overrides
     config.use_vlm = args.use_vlm
     config.use_sam = args.use_sam
+    config.ocr.backend = args.ocr_backend
 
     if args.dpi:
         config.pdf.dpi = args.dpi

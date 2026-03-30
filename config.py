@@ -13,7 +13,11 @@ Environment variables:
 import os
 from dataclasses import dataclass, field
 from typing import List, Optional
-import torch
+
+try:
+    import torch
+except ImportError:
+    torch = None  # Optional dependency
 
 
 def _get_vlm_model() -> str:
@@ -23,10 +27,15 @@ def _get_vlm_model() -> str:
 
 def _detect_device() -> str:
     """Detect available compute device with graceful fallback."""
-    if torch.cuda.is_available():
-        return "cuda"
-    elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-        return "mps"
+    if torch is None:
+        return "cpu"  # Torch not available, default to CPU
+    try:
+        if torch.cuda.is_available():
+            return "cuda"
+        elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            return "mps"
+    except Exception:
+        pass
     return "cpu"
 
 
@@ -51,7 +60,12 @@ class PDFConfig:
 class OCRConfig:
     """Configuration for OCR text extraction."""
 
-    # Languages for EasyOCR
+    # OCR backend selection: 'easyocr' (default) or 'paddleocr' (recommended)
+    # 'easyocr' is the default for backward compatibility (already in requirements.txt)
+    # 'paddleocr' uses PaddleOCR v3 for better accuracy and speed (opt-in via --ocr-backend)
+    backend: str = "easyocr"
+
+    # Languages for OCR
     languages: List[str] = field(default_factory=lambda: ["en"])
 
     # Device for OCR inference (auto-detected if None)
@@ -162,26 +176,50 @@ class TemplateConfig:
 
 @dataclass
 class VLMConfig:
-    """Configuration for VLM (Claude) annotation.
+    """Configuration for VLM (Vision Language Model) annotation.
 
+    Supports two backends:
+    1. Claude (Anthropic API) - Requires ANTHROPIC_API_KEY
+    2. Qwen2.5-VL (Local inference) - Requires transformers + qwen_vl_utils
+
+    Backend can be selected via backend field (default: 'claude').
     Model can be set via VLM_MODEL environment variable.
-    Available models:
-      - claude-haiku-4-5-20251001 (default) - Fast, cheap, good for room detection
-      - claude-sonnet-4-5-20250929 - Balanced performance and cost
-      - claude-opus-4-6 - Most capable (expensive)
+
+    Claude models:
+       - claude-haiku-4-5-20251001 (default) - Fast, cheap, good for room detection
+       - claude-sonnet-4-5-20250929 - Balanced performance and cost
+       - claude-opus-4-6 - Most capable (expensive)
+
+    Qwen2.5-VL models:
+       - qwen/Qwen2.5-VL-7B (local, requires ~6GB VRAM at 4-bit quantization)
     """
 
+    # VLM backend: 'claude' (API) or 'qwen' (local inference)
+    backend: str = "claude"
+
     # Model to use for annotation (reads from VLM_MODEL env var)
+    # For Claude: claude-haiku-4-5-20251001, claude-sonnet-4-5-20250929, claude-opus-4-6
+    # For Qwen: qwen/Qwen2.5-VL-7B (or other Qwen2.5-VL variants)
     model: str = field(default_factory=_get_vlm_model)
 
     # Maximum tokens for response (reads from VLM_MAX_TOKENS env var)
     max_tokens: int = field(default_factory=lambda: int(os.getenv("VLM_MAX_TOKENS", "4096")))
 
-    # Number of retries for API calls
+    # Number of retries for API calls (Claude only)
     max_retries: int = 3
 
-    # Delay between retries (seconds)
+    # Delay between retries (seconds) (Claude only)
     retry_delay: float = 1.0
+
+    # Quantization for Qwen2.5-VL (8-bit or 4-bit) - reduces VRAM
+    qwen_quantization: str = "4bit"  # "8bit" or "4bit" or "none"
+
+    # Device for Qwen2.5-VL inference (auto-detected if None)
+    qwen_device: Optional[str] = None
+
+    def __post_init__(self):
+        if self.qwen_device is None:
+            self.qwen_device = _detect_device()
 
     # Room categories for classification (CV-focused, standardized taxonomy)
     room_categories: List[str] = field(
@@ -245,7 +283,13 @@ class ExportConfig:
 
 @dataclass
 class PipelineConfig:
-    """Master configuration for the full annotation pipeline."""
+    """Master configuration for the full annotation pipeline.
+
+    Supports Solution C (Hybrid) architecture:
+    - Step 2: PaddleOCR for text detection/recognition
+    - Step 3: Qwen2.5-VL or Claude for room detection/classification
+    - New: SemanticReconciler merges OCR text with VLM room polygons
+    """
 
     pdf: PDFConfig = field(default_factory=PDFConfig)
     ocr: OCRConfig = field(default_factory=OCRConfig)
@@ -260,6 +304,11 @@ class PipelineConfig:
     use_vlm: bool = False
     use_sam: bool = False
     use_template_matching: bool = False
+
+    # Semantic reconciliation: merge OCR text with VLM room detections (Solution C)
+    # Requires use_vlm=True. When enabled, PaddleOCR text is matched to VLM room polygons
+    # via spatial containment and enriched with OCR-derived room names/numbers.
+    use_semantic_reconciliation: bool = False
 
     # Parallel processing
     num_workers: int = 4

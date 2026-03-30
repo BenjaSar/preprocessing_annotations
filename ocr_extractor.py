@@ -16,8 +16,10 @@ import numpy as np
 
 try:
     from .config import OCRConfig
+    from .ocr_adapter import OCRFactory, TextDetection as AdapterTextDetection
 except ImportError:
     from config import OCRConfig
+    from ocr_adapter import OCRFactory, TextDetection as AdapterTextDetection
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +65,19 @@ def _is_excluded_token(text: str) -> bool:
         or _INSTRUCTION_PATTERN.search(text)
         or _DOCUMENTATION_PATTERN.search(text)
     )
+
+
+def _normalized_bbox_to_quad(bbox: Tuple[float, float, float, float]) -> List[List[int]]:
+    """Convert normalized bbox [x1, y1, x2, y2] to quadrilateral [[x,y], [x,y], [x,y], [x,y]].
+    
+    Args:
+        bbox: (x1, y1, x2, y2) - top-left and bottom-right corners
+        
+    Returns:
+        [[x1,y1], [x2,y1], [x2,y2], [x1,y2]] - counter-clockwise from top-left
+    """
+    x1, y1, x2, y2 = bbox
+    return [[int(x1), int(y1)], [int(x2), int(y1)], [int(x2), int(y2)], [int(x1), int(y2)]]
 
 
 def _centroid(bbox_points: List[List[int]]) -> Tuple[float, float]:
@@ -114,12 +129,13 @@ class RoomCandidate:
 
 
 @dataclass
+@dataclass
 class TextDetection:
     """
     Raw text detection result.
 
     Attributes:
-        bbox: Bounding box as list of 4 corner points.
+        bbox: Bounding box as list of 4 corner points [[x,y], [x,y], [x,y], [x,y]].
         text: Detected text string.
         confidence: Detection confidence (0.0 to 1.0).
     """
@@ -131,23 +147,34 @@ class TextDetection:
 
 class MEPTextExtractor:
     """
-    Extracts and classifies text from MEP floor plan images.
+    Extract text from floor plan images using pluggable OCR backends + domain-specific heuristics.
 
-    Uses EasyOCR for text detection and applies domain-specific
-    patterns to identify room labels and other relevant text.
+    This module handles all aspects of OCR-based text extraction:
+      - image preprocessing (adaptive CLAHE)
+      - raw text detection via configurable backend (EasyOCR or PaddleOCR)
+      - room candidate identification (vertical stack merging, regex filters)
+      - abbreviation recovery
+      - room number ↔ room name linking
+
+    Usage:
+        config = OCRConfig(backend='paddleocr')  # or 'easyocr'
+        extractor = MEPTextExtractor(config)
+        candidates, raw_detections = extractor.extract_and_find_rooms("path/to/image.png")
 
     Attributes:
-        config: OCRConfig with extraction parameters.
-
-    Example:
-        extractor = MEPTextExtractor()
-        results = extractor.extract_text("floorplan.png")
-        rooms = extractor.find_room_candidates(results)
+        config: OCRConfig instance for all settings.
+        _ocr_backend: Lazy-initialized OCR backend (EasyOCR or PaddleOCR).
     """
 
-    def __init__(self, config: Optional[OCRConfig] = None):
-        self.config = config or OCRConfig()
-        self._reader = None
+    def __init__(self, config: OCRConfig):
+        """Initialize the text extractor with OCR configuration.
+
+        Args:
+            config: OCRConfig instance containing model/preprocessing parameters.
+                    The backend field determines which OCR engine to use ('easyocr' or 'paddleocr').
+        """
+        self.config = config
+        self._ocr_backend = None
 
         # Compile patterns for efficiency
         self._room_number_pattern = re.compile(
@@ -159,23 +186,18 @@ class MEPTextExtractor:
         ]
 
     @property
-    def reader(self):
-        """Lazy initialization of EasyOCR reader."""
-        if self._reader is None:
+    def ocr_backend(self):
+        """Lazy initialization of OCR backend (EasyOCR or PaddleOCR)."""
+        if self._ocr_backend is None:
             try:
-                import easyocr
-
-                use_gpu = self.config.device in ("cuda", "mps")
-                self._reader = easyocr.Reader(
-                    self.config.languages, gpu=use_gpu, verbose=False
-                )
+                self._ocr_backend = OCRFactory.create(self.config)
                 logger.info(
-                    f"Initialized EasyOCR with languages={self.config.languages}, "
-                    f"device={self.config.device}"
+                    f"Initialized OCR backend: {self.config.backend} "
+                    f"with languages={self.config.languages}, device={self.config.device}"
                 )
             except Exception as e:
-                raise OCRError(f"Failed to initialize EasyOCR: {e}") from e
-        return self._reader
+                raise OCRError(f"Failed to initialize OCR backend '{self.config.backend}': {e}") from e
+        return self._ocr_backend
 
     def preprocess_image(self, image: np.ndarray) -> np.ndarray:
         """
@@ -226,11 +248,18 @@ class MEPTextExtractor:
         """
         Extract all text with bounding boxes from an image.
 
+        This method:
+        1. Loads the image from disk
+        2. Applies optional preprocessing (adaptive CLAHE)
+        3. Runs the configured OCR backend (EasyOCR or PaddleOCR)
+        4. Filters by length-aware confidence thresholds
+        5. Returns normalized TextDetection objects
+
         Args:
             image_path: Path to the image file.
 
         Returns:
-            List of TextDetection objects.
+            List of TextDetection objects with bbox in [x1, y1, x2, y2] format.
 
         Raises:
             OCRError: If image cannot be loaded or OCR fails.
@@ -248,35 +277,36 @@ class MEPTextExtractor:
         # Optional preprocessing
         if self.config.preprocess:
             processed = self.preprocess_image(image)
-            # Convert back to BGR for EasyOCR
-            image = cv2.cvtColor(processed, cv2.COLOR_GRAY2BGR)
+        else:
+            processed = image
 
-        # Run OCR
+        # Run OCR using the configured backend (EasyOCR or PaddleOCR)
         try:
-            raw_results = self.reader.readtext(image)
+            raw_detections = self.ocr_backend.extract_text(processed)
         except Exception as e:
             raise OCRError(f"OCR failed on {image_path}: {e}") from e
 
-        # Convert to TextDetection objects.
-        # Length-aware confidence thresholds replace the flat 0.5 cutoff:
-        # EasyOCR systematically underestimates confidence for short tokens
-        # (fewer characters = less context for the model) so abbreviations
-        # like BR/LR at 0.6 confidence are often correct, while a 20-char
-        # token at 0.6 is more likely garbled.
-        # Conversely, single characters need very high confidence to avoid
-        # spurious symbol detections.
+        # Apply length-aware confidence thresholds.
+        # OCR models systematically underestimate confidence for short tokens
+        # (fewer characters = less context) so abbreviations like BR/LR at 0.6
+        # confidence are often correct, while a 20-char token at 0.6 is likely
+        # garbled. Conversely, single characters need very high confidence to
+        # avoid spurious symbol detections.
         MIN_CONF_BY_LEN = {1: 0.85, 2: 0.70, 3: 0.65, 4: 0.60}
         DEFAULT_MIN_CONF = self.config.confidence_threshold  # 0.50
 
         detections = []
-        for bbox, text, conf in raw_results:
-            min_conf = MIN_CONF_BY_LEN.get(len(text.strip()), DEFAULT_MIN_CONF)
-            if conf >= min_conf:
+        for detection in raw_detections:
+            min_conf = MIN_CONF_BY_LEN.get(len(detection.text.strip()), DEFAULT_MIN_CONF)
+            if detection.confidence >= min_conf:
+                # Convert normalized bbox [x1,y1,x2,y2] to quadrilateral format
+                # expected by downstream code
+                quad_bbox = _normalized_bbox_to_quad(detection.bbox)
                 detections.append(
                     TextDetection(
-                        bbox=[[int(p[0]), int(p[1])] for p in bbox],
-                        text=text,
-                        confidence=conf,
+                        bbox=quad_bbox,
+                        text=detection.text,
+                        confidence=detection.confidence,
                     )
                 )
 
