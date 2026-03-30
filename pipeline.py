@@ -20,6 +20,8 @@ try:
     from .pdf_extractor import PDFExtractor, PageTypeClassifier
     from .ocr_extractor import MEPTextExtractor, RoomCandidate
     from .vlm_annotator import VLMAnnotator
+    from .semantic_reconciler import SemanticReconciler
+    from .vlm_backend import VLMFactory
     from .sam_segmenter import RoomSegmenter
     from .exporters import LabelStudioExporter, ReviewPrioritizer, COCOExporter, CoverageReporter
     from .automation import (
@@ -35,6 +37,8 @@ except ImportError:
     from pdf_extractor import PDFExtractor, PageTypeClassifier
     from ocr_extractor import MEPTextExtractor, RoomCandidate
     from vlm_annotator import VLMAnnotator
+    from semantic_reconciler import SemanticReconciler
+    from vlm_backend import VLMFactory
     from sam_segmenter import RoomSegmenter
     from exporters import LabelStudioExporter, ReviewPrioritizer, COCOExporter, CoverageReporter
     from automation import (
@@ -131,9 +135,15 @@ class AnnotationPipeline:
         return self._ocr_extractor
 
     @property
-    def vlm_annotator(self) -> VLMAnnotator:
+    def vlm_annotator(self):
+        """Return appropriate VLM backend (Claude VLMAnnotator or Qwen VLMBackend)."""
         if self._vlm_annotator is None:
-            self._vlm_annotator = VLMAnnotator(self.config.vlm)
+            if self.config.vlm.backend.lower() == "qwen":
+                # Use VLMFactory to create Qwen backend
+                self._vlm_annotator = VLMFactory.create(self.config.vlm)
+            else:
+                # Default to Claude backend (VLMAnnotator)
+                self._vlm_annotator = VLMAnnotator(self.config.vlm)
         return self._vlm_annotator
 
     @property
@@ -481,7 +491,22 @@ class AnnotationPipeline:
                             f"— annotator will resize in memory"
                         )
 
-                    result = self.vlm_annotator.annotate(img_path)
+                    # Get VLM result (handles both Claude and Qwen backends)
+                    result = self._get_vlm_result(img_path)
+                    
+                    # Apply semantic reconciliation if enabled
+                    ocr_list = ocr_results.get(img_path.name, [])
+                    if self.config.use_semantic_reconciliation and ocr_list:
+                        # Convert OCR RoomCandidate objects to dicts for reconciler
+                        ocr_dicts = []
+                        for room in ocr_list:
+                            ocr_dicts.append({
+                                "text": room.name,
+                                "bbox": room.bbox,
+                                "confidence": room.confidence
+                            })
+                        result = self._apply_semantic_reconciliation(result, ocr_dicts)
+                    
                     stats["images_annotated"] += 1
                     stats["rooms_detected"] += len(result.rooms)
 
@@ -831,6 +856,110 @@ class AnnotationPipeline:
 
         return stats
 
+    def _get_vlm_result(self, img_path: Path):
+        """Get VLM annotation result, handling both Claude and Qwen backends."""
+        vlm = self.vlm_annotator
+        is_qwen = self.config.vlm.backend.lower() == "qwen"
+        
+        if is_qwen:
+            # Qwen backend returns list of dicts from detect_rooms()
+            rooms_dicts = vlm.detect_rooms(img_path)
+            result = self._qwen_dicts_to_vlm_result(rooms_dicts, img_path)
+        else:
+            # Claude backend returns VLMAnnotationResult from annotate()
+            result = vlm.annotate(img_path)
+        
+        return result
+
+    def _qwen_dicts_to_vlm_result(self, rooms_dicts: List[dict], img_path: Path):
+        """Convert Qwen backend dict output to VLMAnnotationResult."""
+        from PIL import Image
+        
+        # Get image dimensions
+        try:
+            img = Image.open(img_path)
+            width, height = img.size
+        except Exception:
+            width, height = 1000, 1000  # fallback
+        
+        # Convert dict rooms to RoomAnnotation objects
+        rooms = []
+        for idx, room_dict in enumerate(rooms_dicts):
+            bbox = room_dict.get("bbox", [0, 0, 100, 100])
+            
+            # bbox format: [x1, y1, x2, y2] (from Qwen) → [x, y, w, h] (for RoomAnnotation)
+            if len(bbox) == 4:
+                x1, y1, x2, y2 = bbox
+                x, y = int(x1), int(y1)
+                w, h = int(x2 - x1), int(y2 - y1)
+            else:
+                x, y, w, h = 0, 0, 100, 100
+            
+            from vlm_annotator import RoomAnnotation
+            room = RoomAnnotation(
+                room_number=room_dict.get("room_number", f"room_{idx}"),
+                room_name=room_dict.get("room_name", room_dict.get("room_type", "Room")),
+                category=room_dict.get("room_type", "other"),
+                bbox=[x, y, w, h]
+            )
+            rooms.append(room)
+        
+        # Create VLMAnnotationResult
+        from vlm_annotator import VLMAnnotationResult
+        return VLMAnnotationResult(
+            image_file=img_path.name,
+            image_size={"width": width, "height": height},
+            rooms=rooms,
+            panels=[],
+            electrical_counts={}
+        )
+
+    def _apply_semantic_reconciliation(self, result, ocr_results: List[dict]):
+        """Apply semantic reconciliation to VLM result if enabled."""
+        if not self.config.use_semantic_reconciliation:
+            return result
+        
+        if not ocr_results:
+            return result
+        
+        try:
+            reconciler = SemanticReconciler(self.config.ocr)
+            
+            # Convert VLM rooms to dict format for reconciler
+            vlm_rooms_dicts = []
+            for room in result.rooms:
+                vlm_rooms_dicts.append({
+                    "room_id": room.room_number,
+                    "room_name": room.room_name,
+                    "room_type": room.category,
+                    "bbox": room.bbox,
+                    "confidence": 1.0,
+                    "polygon": None
+                })
+            
+            # Reconcile with OCR results
+            enriched = reconciler.reconcile_with_config(
+                ocr_results, vlm_rooms_dicts, self.config
+            )
+            
+            # Update result.rooms with enriched data
+            from vlm_annotator import RoomAnnotation
+            new_rooms = []
+            for enriched_room in enriched:
+                room = RoomAnnotation(
+                    room_number=enriched_room.get("room_number", ""),
+                    room_name=enriched_room.get("room_name", "Room"),
+                    category=enriched_room.get("room_type", "other"),
+                    bbox=enriched_room.get("bbox", [0, 0, 100, 100])
+                )
+                new_rooms.append(room)
+            
+            result.rooms = new_rooms
+            return result
+        except Exception as e:
+            logger.warning(f"Semantic reconciliation failed: {e}. Using VLM results as-is.")
+            return result
+
     def _save_annotation(
         self, result, output_path: Path, ocr_rooms: List[RoomCandidate]
     ) -> None:
@@ -1016,6 +1145,19 @@ Examples:
              "accuracy (requires: pip install paddlepaddle paddleocr)",
     )
     parser.add_argument(
+        "--use-semantic-reconciliation",
+        action="store_true",
+        help="Merge OCR text into VLM room polygons via spatial containment "
+             "(requires: pip install shapely)",
+    )
+    parser.add_argument(
+        "--vlm-backend",
+        choices=["claude", "qwen"],
+        default="claude",
+        help="VLM backend. Default: claude. Use 'qwen' for local Qwen2.5-VL inference "
+             "(requires: pip install transformers torch torchvision)",
+    )
+    parser.add_argument(
         "--use-sam", action="store_true", help="Use SAM for boundary refinement"
     )
     parser.add_argument(
@@ -1055,6 +1197,8 @@ Examples:
     config.use_vlm = args.use_vlm
     config.use_sam = args.use_sam
     config.ocr.backend = args.ocr_backend
+    config.use_semantic_reconciliation = args.use_semantic_reconciliation
+    config.vlm.backend = args.vlm_backend
 
     if args.dpi:
         config.pdf.dpi = args.dpi
