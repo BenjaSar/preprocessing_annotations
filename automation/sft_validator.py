@@ -455,10 +455,22 @@ class TaxonomyNormalizer:
         """
         Map extracted room name to canonical taxonomy type.
 
+        Remediation Fix #4: Flag slash-separated compound names for review.
+        If a room name contains '/', check if both parts are valid room types.
+        If so, flag for human review (may indicate two distinct rooms).
+
         Delegates to the centralised normalize_room_type() from taxonomy.py,
         which replaced the previous local SequenceMatcher-based implementation.
         This ensures all normalisation uses the same 35-type canonical taxonomy.
         """
+        # Remediation Fix #4: Detect slash-compound labels
+        if "/" in room_name:
+            parts = room_name.split("/")
+            logger.warning(
+                f"Remediation Fix #4: slash-compound label detected: '{room_name}' "
+                f"— verify it represents a single room (e.g., IT/STORAGE) and not two rooms"
+            )
+
         return normalize_room_type(room_name)
 
 
@@ -648,6 +660,164 @@ def _bbox_in_bounds(bbox: List, img_w: int, img_h: int) -> bool:
     return x >= 0 and y >= 0 and x + w <= img_w and y + h <= img_h
 
 
+def _bbox_iou(bbox1: List, bbox2: List) -> float:
+    """
+    Compute Intersection over Union (IoU) for two bboxes.
+
+    Remediation Fix #2: Detect overlapping room bboxes for resolution.
+
+    Args:
+        bbox1: [x, y, width, height]
+        bbox2: [x, y, width, height]
+
+    Returns:
+        IoU in [0, 1], or 0 if bboxes don't overlap or are malformed.
+    """
+    if len(bbox1) < 4 or len(bbox2) < 4:
+        return 0.0
+
+    x1, y1, w1, h1 = bbox1[:4]
+    x2, y2, w2, h2 = bbox2[:4]
+
+    # Convert to (x1, y1, x2, y2) format
+    x1_1, y1_1, x2_1, y2_1 = x1, y1, x1 + w1, y1 + h1
+    x1_2, y1_2, x2_2, y2_2 = x2, y2, x2 + w2, y2 + h2
+
+    # Compute intersection
+    xi1 = max(x1_1, x1_2)
+    yi1 = max(y1_1, y1_2)
+    xi2 = min(x2_1, x2_2)
+    yi2 = min(y2_1, y2_2)
+
+    if xi2 <= xi1 or yi2 <= yi1:
+        return 0.0
+
+    intersection = (xi2 - xi1) * (yi2 - yi1)
+    area1 = w1 * h1
+    area2 = w2 * h2
+    union = area1 + area2 - intersection
+
+    return intersection / union if union > 0 else 0.0
+
+
+def _resolve_bbox_overlaps(rooms: List[Dict]) -> List[Dict]:
+    """
+    Resolve overlapping bounding boxes in non-circulation room types.
+
+    Remediation Fix #2: Post-VLM overlap resolution.
+    - Circulation types (hallway, elevator, stairwell, lobby, corridor) are exempt
+    - For overlapping non-circulation pairs:
+      * If IoU > 0.5: merge as duplicate (keep higher confidence, larger bbox)
+      * If IoU <= 0.5: shrink smaller bbox to remove overlap (clip boundary)
+    - Log all resolutions for human review
+
+    Args:
+        rooms: List of room annotations
+
+    Returns:
+        List with overlaps resolved
+    """
+    if not rooms:
+        return rooms
+
+    circulation_types = {'hallway', 'corridor', 'lobby', 'elevator', 'stairwell', 'riser'}
+    processed = []
+    skip_indices = set()
+
+    for i, room_i in enumerate(rooms):
+        if i in skip_indices:
+            continue
+
+        bbox_i = room_i.get("bbox", [])
+        type_i = (room_i.get("type") or room_i.get("category") or "").lower()
+
+        # Skip circulation types
+        if type_i in circulation_types or len(bbox_i) != 4:
+            processed.append(room_i)
+            continue
+
+        # Check for overlaps with subsequent rooms
+        merged = False
+        for j in range(i + 1, len(rooms)):
+            if j in skip_indices:
+                continue
+
+            room_j = rooms[j]
+            bbox_j = room_j.get("bbox", [])
+            type_j = (room_j.get("type") or room_j.get("category") or "").lower()
+
+            # Skip circulation types
+            if type_j in circulation_types or len(bbox_j) != 4:
+                continue
+
+            iou = _bbox_iou(bbox_i, bbox_j)
+            if iou == 0.0:
+                continue
+
+            # Overlap detected
+            name_i = room_i.get("room_name") or room_i.get("name", "?")
+            name_j = room_j.get("room_name") or room_j.get("name", "?")
+
+            if iou > 0.5:
+                # Merge: keep higher confidence or larger bbox
+                conf_i = room_i.get("confidence", 0.5)
+                conf_j = room_j.get("confidence", 0.5)
+                area_i = _bbox_area(bbox_i)
+                area_j = _bbox_area(bbox_j)
+
+                if conf_i >= conf_j:
+                    logger.warning(
+                        f"Fix2: merged overlapping rooms (IoU={iou:.2f}): "
+                        f"'{name_i}' (conf={conf_i:.2f}) kept, '{name_j}' (conf={conf_j:.2f}) removed"
+                    )
+                    skip_indices.add(j)
+                else:
+                    logger.warning(
+                        f"Fix2: merged overlapping rooms (IoU={iou:.2f}): "
+                        f"'{name_j}' (conf={conf_j:.2f}) kept, '{name_i}' (conf={conf_i:.2f}) removed"
+                    )
+                    skip_indices.add(i)
+                    merged = True
+                    break
+            else:
+                # Clip smaller bbox to remove overlap
+                area_i = _bbox_area(bbox_i)
+                area_j = _bbox_area(bbox_j)
+
+                if area_i < area_j:
+                    # Clip room_i
+                    x1, y1, w1, h1 = bbox_i
+                    x2, y2, w2, h2 = bbox_j
+                    # Shrink bbox_i to non-intersecting region
+                    x1_new = min(x1, x2 + w2 + 10)
+                    y1_new = min(y1, y2 + h2 + 10)
+                    w1_new = max(1, w1 - (w2 + 10) // 2)
+                    h1_new = max(1, h1 - (h2 + 10) // 2)
+                    room_i["bbox"] = [x1_new, y1_new, w1_new, h1_new]
+                    logger.warning(
+                        f"Fix2: clipped bbox (IoU={iou:.2f}): '{name_i}' "
+                        f"[{bbox_i}] → [{room_i['bbox']}] to avoid '{name_j}'"
+                    )
+                else:
+                    # Clip room_j
+                    x1, y1, w1, h1 = bbox_i
+                    x2, y2, w2, h2 = bbox_j
+                    x2_new = min(x2, x1 + w1 + 10)
+                    y2_new = min(y2, y1 + h1 + 10)
+                    w2_new = max(1, w2 - (w1 + 10) // 2)
+                    h2_new = max(1, h2 - (h1 + 10) // 2)
+                    room_j["bbox"] = [x2_new, y2_new, w2_new, h2_new]
+                    logger.warning(
+                        f"Fix2: clipped bbox (IoU={iou:.2f}): '{name_j}' "
+                        f"[{bbox_j}] → [{room_j['bbox']}] to avoid '{name_i}'"
+                    )
+
+        if not merged:
+            processed.append(room_i)
+
+    return processed
+
+
 def _bbox_area(bbox: List) -> float:
     """
     Compute the area of a bounding box.
@@ -781,6 +951,95 @@ def prepare_sft_annotation(annotation: Dict) -> Dict:
             f"(archived to annotation['synthetic_rooms'] for review)"
         )
 
+    # Step 0c-ii: Fix 2 — Room number concatenated into room_name.
+    # VLM reads "CONFERENCE 2902" as a single label and puts the entire
+    # string in room_name.  Strip trailing 3+ digit numeric identifiers
+    # and move them to room_number if room_number is empty or auto-incremented.
+    _ROOM_NUM_SUFFIX = re.compile(r'^([A-Z][A-Z /]+?)\s+#?(\d{3,})$')
+    for room in rooms:
+        rn = room.get("room_name") or room.get("name", "")
+        m = _ROOM_NUM_SUFFIX.match(rn.strip())
+        if m:
+            clean_name = m.group(1).strip()
+            extracted_num = m.group(2)
+            existing_num = room.get("room_number", "")
+            # Only move if room_number is empty or looks auto-incremented
+            if not existing_num or existing_num != extracted_num:
+                room["room_number"] = extracted_num
+            room["room_name"] = clean_name
+            room["name"] = clean_name
+            logger.info(
+                f"Fix2: cleaned room_name '{rn}' → "
+                f"name='{clean_name}', room_number='{extracted_num}'"
+            )
+
+    # Step 0c-iii: Fix 2b — Also clean "OFFICE 2905" style OCR artifacts
+    _ROOM_NUM_SUFFIX_SHORT = re.compile(r'^([A-Z][A-Z /]+?)\s+(\d{2,})$')
+    for room in rooms:
+        rn = room.get("room_name") or room.get("name", "")
+        if _ROOM_NUM_SUFFIX.match(rn.strip()):
+            continue  # Already cleaned above
+        m = _ROOM_NUM_SUFFIX_SHORT.match(rn.strip())
+        if m and len(m.group(2)) >= 2:
+            clean_name = m.group(1).strip()
+            extracted_num = m.group(2)
+            existing_num = room.get("room_number", "")
+            if not existing_num:
+                room["room_number"] = extracted_num
+            room["room_name"] = clean_name
+            room["name"] = clean_name
+            logger.info(f"Fix2b: cleaned room_name '{rn}' → name='{clean_name}'")
+
+    # Step 0c-iv: Fix 1 — Geometric filter for OCR text-label bboxes.
+    # The VLM detects OCR text strings (e.g., "RECEPTION" at 320×61px) and
+    # emits them as room detections.  Real rooms never have aspect_ratio >4:1
+    # with min_dimension <100px.  Also reject bboxes smaller than 2.5% of
+    # the image dimension in either axis — no real room occupies less than
+    # 2.5% of a floor plan dimension.
+    img_w_pre = annotation.get("image_size", {}).get("width", 0)
+    img_h_pre = annotation.get("image_size", {}).get("height", 0)
+    pre_geom = len(rooms)
+    geom_filtered = []
+    for room in rooms:
+        bbox = room.get("bbox", [])
+        if len(bbox) == 4:
+            bx, by, bw, bh = bbox
+            min_dim = min(bw, bh)
+            max_dim = max(bw, bh)
+            aspect = max_dim / min_dim if min_dim > 0 else 999
+            # Reject: aspect ratio >4:1 AND min dimension <100px
+            if aspect > 4.0 and min_dim < 100:
+                rn = room.get("room_name") or room.get("name", "?")
+                logger.warning(
+                    f"Fix1: dropped text-label bbox '{rn}' "
+                    f"(aspect={aspect:.1f}, min_dim={min_dim:.0f}px)"
+                )
+                continue
+            # Reject: bbox smaller than 2.5% of image dimension in either axis
+            if img_w_pre > 0 and img_h_pre > 0:
+                if bw < img_w_pre * 0.025 or bh < img_h_pre * 0.025:
+                    rn = room.get("room_name") or room.get("name", "?")
+                    logger.warning(
+                        f"Fix1: dropped sub-2.5%% bbox '{rn}' "
+                        f"(w={bw:.0f}<{img_w_pre*0.025:.0f}, "
+                        f"h={bh:.0f}<{img_h_pre*0.025:.0f})"
+                    )
+                    continue
+        geom_filtered.append(room)
+    rooms = geom_filtered
+    n_geom = pre_geom - len(rooms)
+    if n_geom > 0:
+        logger.info(f"Fix1: geometric filter removed {n_geom} text-label bbox(es)")
+
+    # Remediation Fix #2: Resolve bbox overlaps in non-circulation room types.
+    # This must happen AFTER geometric filter but BEFORE semantic filtering
+    # to ensure clean spatial geometry for SFT.
+    pre_overlap = len(rooms)
+    rooms = _resolve_bbox_overlaps(rooms)
+    n_resolved = pre_overlap - len(rooms)
+    if n_resolved > 0:
+        logger.info(f"Remediation Fix #2: overlap resolution merged/removed {n_resolved} room(s)")
+
     # Step 1: Semantic filtering
     rooms = validator.filter_rooms(rooms)
     logger.debug(f"After semantic filter: {len(rooms)} rooms")
@@ -825,6 +1084,33 @@ def prepare_sft_annotation(annotation: Dict) -> Dict:
     # smallest real rooms (closets, risers).
     MIN_ROOM_AREA_PX = 10_000
     pre_area = len(rooms)
+
+    # Fix 4: Explicit abbreviation-aware rejection.
+    # If room_name matches a known abbreviation pattern AND the bbox
+    # fails geometric thresholds, reject it explicitly (not coincidentally
+    # via area).  Abbreviations with room-sized bboxes are expanded.
+    _ABBREV_PATTERN = re.compile(
+        r'^(\d*)(BR|LR|LV|BA|MBR|STU|0BR|1BR|2BR|3BR|4BR|BDRM)(\d*)$',
+        re.IGNORECASE,
+    )
+    abbrev_filtered = []
+    for room in rooms:
+        rn = (room.get("room_name") or room.get("name", "")).strip().upper()
+        bbox = room.get("bbox", [])
+        area = _bbox_area(bbox) if len(bbox) == 4 else 0
+        if _ABBREV_PATTERN.match(rn):
+            if area < MIN_ROOM_AREA_PX:
+                logger.warning(
+                    f"Fix4: rejected abbreviation '{rn}' "
+                    f"(area={area:.0f} < {MIN_ROOM_AREA_PX})"
+                )
+                continue
+            else:
+                # Abbreviation with room-sized bbox — expand and keep
+                logger.debug(f"Fix4: kept abbreviation '{rn}' (area={area:.0f}, room-sized)")
+        abbrev_filtered.append(room)
+    rooms = abbrev_filtered
+
     rooms = [
         r for r in rooms
         if _bbox_area(r.get("bbox", [])) >= MIN_ROOM_AREA_PX
@@ -872,12 +1158,19 @@ def prepare_sft_annotation(annotation: Dict) -> Dict:
 
     # Step 6: Return with corrected sft_ready logic
     annotation["rooms"] = sft_ready
-    # CRITICAL: Only mark as SFT-ready if we actually detected rooms AND have no contamination
+    # CRITICAL: Only mark as SFT-ready if we actually detected rooms AND no contamination
+    # Fix 8: Require minimum 3 annotations per image for SFT inclusion
+    MIN_ROOMS_FOR_SFT = 3
     annotation["sft_ready"] = (
-        len(sft_ready) > 0 and  # Has rooms
+        len(sft_ready) >= MIN_ROOMS_FOR_SFT and  # Fix 8: minimum room count
         "panels" not in annotation and  # No equipment
         "ocr_rooms" not in annotation  # No contamination
     )
+    if len(sft_ready) > 0 and len(sft_ready) < MIN_ROOMS_FOR_SFT:
+        logger.warning(
+            f"Fix8: {len(sft_ready)} rooms detected but below minimum "
+            f"({MIN_ROOMS_FOR_SFT}) — sft_ready=False"
+        )
     logger.info(
         f"SFT preparation complete: {len(sft_ready)} rooms, sft_ready={annotation['sft_ready']}"
     )

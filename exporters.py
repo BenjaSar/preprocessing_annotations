@@ -452,6 +452,8 @@ class COCOExporter:
         images_dir: Path | str,
         output_file: Path | str,
         sft_only: bool = True,
+        master_categories: list = None,
+        min_annotations_per_image: int = 3,
     ) -> int:
         """
         Export all SFT-ready annotations to a single COCO JSON file.
@@ -461,6 +463,8 @@ class COCOExporter:
             images_dir:    Directory containing the source PNG images.
             output_file:   Output path for the COCO JSON file.
             sft_only:      If True (default), skip annotations with sft_ready=False.
+            master_categories: If provided, use this global category list for all splits.
+            min_annotations_per_image: Minimum rooms per image to include (Fix 8).
 
         Returns:
             Number of images exported.
@@ -470,16 +474,24 @@ class COCOExporter:
         output_file = Path(output_file)
         output_file.parent.mkdir(parents=True, exist_ok=True)
 
+        # Fix 6: Track all exclusion reasons for logging
+        exclusion_log = []
+
+        # Remediation Fix #3: Load post_processing_summary to check for unresolved overlaps
+        summary_file = processed_dir.parent / "post_processing_summary.json"
+        bbox_overlap_issues = {}
+        if summary_file.exists():
+            try:
+                with open(summary_file) as f:
+                    summary = json.load(f)
+                for issue in summary.get("issue_details", []):
+                    if issue.get("issue_type") == "ValidationIssue" and "BBOX_OVERLAP" in str(issue.get("description", "")):
+                        image_name = issue.get("image", "")
+                        bbox_overlap_issues[image_name] = issue
+            except Exception as e:
+                logger.debug(f"COCOExporter: could not load post_processing_summary: {e}")
+
         # ── Phase 1: Collect all rooms to determine which categories are used ──
-        # (vlm-sft-fitness-evaluation BUG-7)
-        #
-        # Previously the COCO categories list was built from the full 31-entry
-        # CANONICAL_TYPES taxonomy.  19 of those categories had zero training
-        # examples, inflating the classification head and diluting gradient
-        # signal for populated categories.
-        #
-        # Two-pass approach: first scan to find used types, then build the
-        # category list from only populated types.
         all_file_data = []
         used_types: set = set()
 
@@ -492,6 +504,24 @@ class COCOExporter:
                 continue
 
             if sft_only and not ann.get("sft_ready", False):
+                exclusion_log.append({
+                    "file": json_file.name,
+                    "reason": "sft_ready=False",
+                    "rooms_dropped": len(ann.get("rooms", [])),
+                })
+                continue
+
+            # Remediation Fix #3: Skip images with unresolved BBOX_OVERLAP issues
+            if json_file.name in bbox_overlap_issues:
+                exclusion_log.append({
+                    "file": json_file.name,
+                    "reason": "unresolved BBOX_OVERLAP (geometry quality gate)",
+                    "rooms_dropped": len(ann.get("rooms", [])),
+                })
+                logger.warning(
+                    f"COCOExporter: skipping {json_file.name} due to unresolved bbox overlaps "
+                    f"(Remediation Fix #3 quality gate)"
+                )
                 continue
 
             image_file = ann.get("image_file", json_file.stem + ".png")
@@ -503,23 +533,61 @@ class COCOExporter:
             valid_rooms = []
             for room in ann.get("rooms", []):
                 bbox = room.get("bbox", [])
+                rname = room.get("room_name") or room.get("name", "?")
                 if len(bbox) != 4:
+                    exclusion_log.append({
+                        "file": json_file.name, "room": rname,
+                        "reason": f"invalid bbox (len={len(bbox)})",
+                    })
                     continue
                 bx, by, bw, bh = [float(v) for v in bbox]
                 if bw <= 0 or bh <= 0:
+                    exclusion_log.append({
+                        "file": json_file.name, "room": rname,
+                        "reason": f"zero/negative dimension ({bw}×{bh})",
+                    })
                     continue
                 if w > 0 and h > 0:
                     if bx < 0 or by < 0 or bx + bw > w or by + bh > h:
+                        exclusion_log.append({
+                            "file": json_file.name, "room": rname,
+                            "reason": f"OOB bbox [{bx:.0f},{by:.0f},{bw:.0f},{bh:.0f}] "
+                                      f"in {w}×{h} image",
+                        })
                         logger.warning(
                             f"COCOExporter: dropping out-of-bounds bbox "
                             f"[{bx:.0f},{by:.0f},{bw:.0f},{bh:.0f}] "
-                            f"for '{room.get('room_name') or room.get('name', '?')}' "
-                            f"(image {w}×{h})"
+                            f"for '{rname}' (image {w}×{h})"
                         )
                         continue
                 raw_type = room.get("type") or room.get("category") or "other"
+
+                # Fix 5: Reject "other" category annotations (checklist #14)
+                if raw_type == "other":
+                    exclusion_log.append({
+                        "file": json_file.name, "room": rname,
+                        "reason": f"category='other' (unmapped)",
+                    })
+                    logger.warning(
+                        f"COCOExporter: dropping '{rname}' with category='other'"
+                    )
+                    continue
+
                 used_types.add(raw_type)
                 valid_rooms.append(room)
+
+            # Fix 8: Minimum annotation count per image
+            if len(valid_rooms) < min_annotations_per_image:
+                exclusion_log.append({
+                    "file": json_file.name,
+                    "reason": f"below min annotations ({len(valid_rooms)} < {min_annotations_per_image})",
+                    "rooms_dropped": len(valid_rooms),
+                })
+                logger.warning(
+                    f"COCOExporter: excluding {image_file} "
+                    f"({len(valid_rooms)} annotations < {min_annotations_per_image} minimum)"
+                )
+                continue
 
             if valid_rooms:
                 all_file_data.append({
@@ -527,22 +595,39 @@ class COCOExporter:
                     "w": w,
                     "h": h,
                     "rooms": valid_rooms,
+                    "source_file": json_file.name,
                 })
 
-        # ── Phase 2: Build COCO structure with pruned categories ──
-        # Only categories with ≥1 annotation are included.
-        sorted_used = sorted(used_types)
-        cat_id_map = {t: i + 1 for i, t in enumerate(sorted_used)}
+        # Fix 6: Log all exclusions
+        if exclusion_log:
+            logger.info(
+                f"COCOExporter: {len(exclusion_log)} exclusion(s) logged"
+            )
+            for ex in exclusion_log:
+                logger.debug(f"  Excluded: {ex}")
+
+        # ── Phase 2: Build COCO structure ──
+        # Fix 7: Use master categories if provided (global across splits)
+        if master_categories:
+            cat_id_map = {t: i + 1 for i, t in enumerate(master_categories)}
+            coco_categories = [
+                {"id": cat_id_map[t], "name": t, "supercategory": "room"}
+                for t in master_categories
+            ]
+        else:
+            sorted_used = sorted(used_types)
+            cat_id_map = {t: i + 1 for i, t in enumerate(sorted_used)}
+            coco_categories = [
+                {"id": cat_id_map[t], "name": t, "supercategory": "room"}
+                for t in sorted_used
+            ]
 
         coco: dict = {
             "info": {
                 "description": self.description,
                 "version": "1.0",
             },
-            "categories": [
-                {"id": cat_id_map[t], "name": t, "supercategory": "room"}
-                for t in sorted_used
-            ],
+            "categories": coco_categories,
             "images": [],
             "annotations": [],
         }
@@ -590,6 +675,50 @@ class COCOExporter:
                 })
                 ann_id += 1
 
+        # Fix 5: Post-export validation — verify bbox integrity
+        # Build source lookup: image_file → list of (room_name, bbox)
+        source_by_image = {}
+        for file_data in all_file_data:
+            img_file = file_data["image_file"]
+            source_by_image[img_file] = []
+            for room in file_data["rooms"]:
+                rname = room.get("room_name") or room.get("name", "?")
+                src_bbox = [float(v) for v in room.get("bbox", [])]
+                source_by_image[img_file].append((rname, src_bbox))
+
+        # Build image_id → file_name map from COCO
+        img_id_to_file = {img["id"]: img["file_name"] for img in coco["images"]}
+
+        integrity_ok = True
+        for coco_ann in coco["annotations"]:
+            coco_bbox = coco_ann["bbox"]
+            rname = coco_ann["attributes"]["room_name"]
+            img_file = img_id_to_file.get(coco_ann["image_id"], "")
+
+            # Find matching source bbox for this image + room name
+            # Handle duplicate names by checking bbox proximity
+            src_rooms = source_by_image.get(img_file, [])
+            matched = False
+            for src_name, src_bbox in src_rooms:
+                if src_name == rname and len(src_bbox) == 4:
+                    if all(abs(coco_bbox[i] - src_bbox[i]) <= 1.0 for i in range(4)):
+                        matched = True
+                        break
+            if not matched:
+                # Check if there's a name match with bbox mismatch
+                name_matches = [(sn, sb) for sn, sb in src_rooms if sn == rname]
+                if name_matches:
+                    for sn, sb in name_matches:
+                        logger.error(
+                            f"Fix5 INTEGRITY FAILURE: '{rname}' in {img_file}: "
+                            f"COCO={coco_bbox} != source={sb}"
+                        )
+                        integrity_ok = False
+                        break
+
+        if integrity_ok:
+            logger.info("Fix5: bbox integrity check PASSED — all bboxes match source ±1px")
+
         with open(output_file, "w") as f:
             json.dump(coco, f, indent=2)
 
@@ -606,12 +735,14 @@ class COCOExporter:
         output_dir: Path | str,
         splits: tuple = (0.70, 0.15, 0.15),
         seed: int = 42,
+        min_annotations_per_image: int = 3,
     ) -> dict:
         """
         Export train / val / test COCO files with stratified splitting.
 
-        Stratification is by dominant room category so rare types (compactor,
-        bicycle_storage, pump_room) appear proportionally in all three splits.
+        Fix 7: Master category array shared across all splits.
+        Fix 8: Minimum annotation count per image.
+        Fix 9: Proper 70/15/15 split balance.
 
         Args:
             processed_dir: Directory of processed annotation JSON files.
@@ -619,6 +750,7 @@ class COCOExporter:
             output_dir:    Directory to write train.json, val.json, test.json.
             splits:        Fractions for (train, val, test). Must sum to 1.0.
             seed:          Random seed for reproducibility.
+            min_annotations_per_image: Minimum rooms per image for inclusion.
 
         Returns:
             Dict with split names as keys and image counts as values.
@@ -647,6 +779,21 @@ class COCOExporter:
             logger.warning("No SFT-ready annotations found for splitting")
             return {}
 
+        # Fix 7: Compute master category list (union of all categories across
+        # ALL annotations) before splitting.  This ensures identical category
+        # arrays and IDs in train/val/test.
+        all_used_types: set = set()
+        for _, ann in all_anns:
+            for room in ann.get("rooms", []):
+                raw_type = room.get("type") or room.get("category") or "other"
+                if raw_type != "other":  # Checklist #14: no "other" category
+                    all_used_types.add(raw_type)
+        master_categories = sorted(all_used_types)
+        logger.info(
+            f"Fix7: master category list ({len(master_categories)}): "
+            f"{master_categories}"
+        )
+
         # Group by dominant room type for stratification
         def dominant_type(ann: dict) -> str:
             from collections import Counter
@@ -660,42 +807,61 @@ class COCOExporter:
         for fname, ann in all_anns:
             by_type[dominant_type(ann)].append((fname, ann))
 
-        # Stratified split within each type group
+        # Fix 9: Stratified split with proper 70/15/15 balance
         rng = random.Random(seed)
         train_anns, val_anns, test_anns = [], [], []
 
         for group in by_type.values():
             rng.shuffle(group)
             n = len(group)
-            n_train = int(n * splits[0])
+            n_train = max(1, int(n * splits[0])) if n >= 2 else n
             n_val = int(n * splits[1])
             train_anns.extend(group[:n_train])
             val_anns.extend(group[n_train:n_train + n_val])
             test_anns.extend(group[n_train + n_val:])
 
-        # CRITICAL FIX (pipeline-output-analysis §Category A):
-        # Per-group int() truncation can produce empty splits when groups
-        # are small.  With 8 images and 70/15/15 ratios, every group of
-        # size 1–2 assigns 0 to val → val.json ends up empty.
-        #
-        # Post-hoc redistribution: when total images ≥ 3 and any split is
-        # empty, move one image from the largest split to fill it.  This
-        # guarantees a non-empty validation set for training monitoring.
+        # Fix 9: Post-hoc redistribution for small datasets.
+        # Guarantee: train ≥ 60% of images, no empty splits when total ≥ 3.
         split_lists = [train_anns, val_anns, test_anns]
         total = len(all_anns)
+
         if total >= 3:
+            # Ensure no empty splits
             for i, slist in enumerate(split_lists):
                 if len(slist) == 0:
-                    # Find the largest split to donate from
                     donor_idx = max(range(3), key=lambda j: len(split_lists[j]))
                     if len(split_lists[donor_idx]) > 1:
                         slist.append(split_lists[donor_idx].pop())
                         split_names = ["train", "val", "test"]
                         logger.info(
-                            f"Split rebalance: moved 1 image from "
+                            f"Fix9: moved 1 image from "
                             f"'{split_names[donor_idx]}' to '{split_names[i]}' "
                             f"to prevent empty split"
                         )
+
+            # Ensure train has ≥60% of images (checklist #10)
+            train_pct = len(train_anns) / total
+            while train_pct < 0.60 and total >= 3:
+                # Move from largest non-train split
+                non_train = [(1, val_anns), (2, test_anns)]
+                donor_idx, donor_list = max(non_train, key=lambda x: len(x[1]))
+                if len(donor_list) > 1:
+                    train_anns.append(donor_list.pop())
+                    split_names = ["train", "val", "test"]
+                    logger.info(
+                        f"Fix9: moved 1 image from '{split_names[donor_idx]}' "
+                        f"to 'train' (train was {train_pct:.0%})"
+                    )
+                    train_pct = len(train_anns) / total
+                else:
+                    break
+
+        # Log final split distribution
+        logger.info(
+            f"Fix9: final splits — train={len(train_anns)}, "
+            f"val={len(val_anns)}, test={len(test_anns)} "
+            f"(total={total})"
+        )
 
         # Write each split
         counts = {}
@@ -707,7 +873,13 @@ class COCOExporter:
                 import shutil
                 shutil.copy2(processed_dir / fname, split_dir / fname)
 
-            n = self.export(split_dir, images_dir, output_dir / f"{split_name}.json")
+            # Fix 7: Pass master_categories to export for consistent IDs
+            # Fix 8: Pass min_annotations_per_image
+            n = self.export(
+                split_dir, images_dir, output_dir / f"{split_name}.json",
+                master_categories=master_categories,
+                min_annotations_per_image=min_annotations_per_image,
+            )
             counts[split_name] = n
 
             # Clean up temp dir

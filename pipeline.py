@@ -570,6 +570,8 @@ class AnnotationPipeline:
             "annotations_with_issues": 0,
             "total_issues": 0,
             "regions_extracted": 0,
+            # Fix 12: Per-annotation issue details for targeted debugging
+            "issue_details": [],
         }
 
         for ann_path in sorted(annotations_dir.glob("*.json")):
@@ -609,6 +611,15 @@ class AnnotationPipeline:
                     quality_summary["annotations_with_issues"] += 1
                     quality_summary["total_issues"] += len(issues)
 
+                    # Fix 12: Record per-annotation issue details
+                    for issue in issues:
+                        quality_summary["issue_details"].append({
+                            "image": ann_path.name,
+                            "issue_type": getattr(issue, "type", str(type(issue).__name__)),
+                            "description": str(issue),
+                            "resolution": "pending",
+                        })
+
                     # Save issue report
                     report = self.quality_checker.report(issues)
                     report_path = reports_dir / f"{ann_path.stem}_issues.txt"
@@ -639,11 +650,42 @@ class AnnotationPipeline:
                     )
 
                 # Step 4e: Save processed annotation
-                processed_path = processed_dir / ann_path.name
-                with open(processed_path, "w") as f:
-                    json.dump(annotation, f, indent=2)
+                # Remediation Fix #5: Skip writing empty annotations (sft_ready=false AND zero rooms)
+                # These are non-floorplan pages (cover sheets, title blocks, etc.) that should
+                # not clutter processed_annotations/ or inflate image counts.
+                room_count = len(annotation.get("rooms", []))
+                is_sft_ready = annotation.get("sft_ready", False)
 
-                quality_summary["total_annotations"] += 1
+                if not is_sft_ready and room_count == 0:
+                    # This is an empty annotation — move source image to skipped_pages/
+                    # for human review (may be cover page, title block, or OCR failure)
+                    image_file = None
+                    for _ext in self._IMAGE_EXTS:
+                        _candidate = images_dir / f"{ann_path.stem}{_ext}"
+                        if _candidate.exists():
+                            image_file = _candidate
+                            break
+
+                    if image_file:
+                        skipped_dir = output_dir / "skipped_pages"
+                        skipped_dir.mkdir(parents=True, exist_ok=True)
+                        try:
+                            import shutil
+                            shutil.move(str(image_file), str(skipped_dir / image_file.name))
+                            logger.warning(
+                                f"    {ann_path.name}: Moved to skipped_pages/ "
+                                f"(sft_ready=false, 0 rooms — non-floorplan page)"
+                            )
+                        except Exception as move_err:
+                            logger.warning(
+                                f"    {ann_path.name}: Failed to move to skipped_pages/: {move_err}"
+                            )
+                else:
+                    # Normal case: write processed annotation
+                    processed_path = processed_dir / ann_path.name
+                    with open(processed_path, "w") as f:
+                        json.dump(annotation, f, indent=2)
+                    quality_summary["total_annotations"] += 1
 
             except Exception as e:
                 logger.error(

@@ -123,6 +123,8 @@ CANONICAL_TYPES: Dict[str, List[str]] = {
         "BUILDING STORAGE", "COMMERCIAL STORAGE", "GENERAL STORAGE",
         "SUPPLY ROOM", "ARCHIVES", "FILE ROOM", "CLOSET",
         "LINEN CLOSET", "WALK-IN CLOSET",
+        # Fix 3: Compound slash-delimited names preserved intact
+        "IT/STORAGE/CONFERENCE", "IT/STORAGE",
     ],
     "bicycle_storage": [
         "BICYCLE STORAGE", "BICYCLE ROOM", "BICYCLE", "BIKE STORAGE",
