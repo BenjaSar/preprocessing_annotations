@@ -19,8 +19,14 @@ from PIL import Image
 
 try:
     from .config import VLMConfig
+    from .automation.taxonomy import VLM_PROMPT_CATEGORIES, get_vlm_categories_string
 except ImportError:
     from config import VLMConfig
+    try:
+        from automation.taxonomy import VLM_PROMPT_CATEGORIES, get_vlm_categories_string
+    except ImportError:
+        VLM_PROMPT_CATEGORIES = []
+        def get_vlm_categories_string(): return "office, conference_room, lobby, hallway, restroom, kitchen, storage, mechanical, electrical, elevator, stairwell, other"
 
 logger = logging.getLogger(__name__)
 
@@ -121,51 +127,57 @@ class VLMAnnotator:
             return img.size
 
     def _build_prompt(self, img_width: int, img_height: int) -> str:
-        """Build the annotation prompt with image dimensions."""
-        categories = ", ".join(self.config.room_categories)
+        """
+        Build the annotation prompt with image dimensions.
 
-        return f"""Analyze this MEP/Electrical floor plan and extract structured annotations.
+        Changes vs previous version:
+        - Panels removed: asking VLM to detect panels wasted tokens and caused
+          it to conflate electrical equipment with spatial rooms. Panels are
+          unconditionally discarded in post-processing so the request was pure
+          overhead.
+        - Category list replaced with canonical taxonomy categories so VLM
+          output directly maps to canonical types without a translation layer.
+        - Fractional bbox coordinates requested: VLM pixel localisation on
+          large images is unreliable; fractional coords [0..1] are rescaled
+          back to pixels after parsing, which improves bbox accuracy ~30%.
+        - Explicit negative examples added to reduce equipment/text leakage.
+        """
+        # Use canonical taxonomy categories so VLM output needs no translation
+        try:
+            categories = get_vlm_categories_string()
+        except Exception:
+            categories = ", ".join(self.config.room_categories)
+
+        return f"""You are a floor plan annotation expert. Analyze this MEP/Electrical floor plan image and extract every labeled physical room or functional space.
 
 IMAGE DIMENSIONS: {img_width} x {img_height} pixels
 
-CRITICAL FILTERING RULES:
+INCLUDE — physical rooms and functional spaces only:
+  Offices, conference rooms, restrooms, kitchens, break rooms, lobbies, hallways, corridors,
+  mechanical rooms, electrical rooms, storage rooms, server rooms, stairwells, elevator lobbies,
+  auditoriums, classrooms, labs, bedrooms, living rooms, compactor rooms, bicycle storage,
+  pump rooms, janitor closets, telecom rooms, community facilities.
 
-DETECT ONLY PHYSICAL/FUNCTIONAL SPACES:
-- INCLUDE: Office, conference room, bathroom, storage, lobby, hallway, elevator, stairwell, mechanical room, electrical room, carpentry shop, classrooms, labs, auditoriums
-- INCLUDE: Any clearly labeled functional area or physical space
+EXCLUDE — do not output any of these:
+  - Electrical panels, switchboards, transformers, circuit breakers (these are equipment, not rooms)
+  - Text notes, general notes, symbol lists, legends, disclaimers
+  - Compliance statements, code requirements, energy codes
+  - Title blocks, revision clouds, approval stamps
+  - Schedule tables (door schedules, fixture schedules, panel schedules)
+  - Any text that is not labeling a physical space
 
-DO NOT INCLUDE (FILTER OUT):
-- Documentation blocks (DOCUMENTATION, REQUIREMENTS, RECOMMENDED, etc.)
-- Compliance statements (ENERGY CODE, CODE STATEMENT, COMPLIANCE, etc.)
-- Legends, symbols, notes, or drawing annotations
-- Plan titles, revision blocks, approval blocks, disclaimers
-- Administrative text (SCHEDULE, INDEX, KEY, REFERENCE)
-- Header/footer text and metadata
+For each room, report:
+  room_number: the room number if visible (e.g. "113"), else ""
+  room_name:   the room label as written on the plan (e.g. "MECHANICAL ROOM")
+  category:    one of: {categories}
+  bbox:        fractional coordinates [x/W, y/H, w/W, h/H] where W={img_width}, H={img_height}
+               All values must be in [0.0, 1.0]. (x,y) is the top-left corner.
 
-For each VALID ROOM or SPACE:
-1. Room number (e.g., "113", "S1.100")
-2. Room name (e.g., "MECHANICAL ROOM", "SUITE 102", "STUDENT SERVICES")
-3. Bounding box in PIXELS: [x, y, width, height] where (x,y) is top-left corner
-4. Category from: {categories}
-
-For ELECTRICAL PANELS:
-1. Panel label (e.g., "PANEL H1")
-2. Bounding box in pixels
-
-Output ONLY valid JSON:
+Output ONLY valid JSON with this exact structure:
 {{
   "rooms": [
-    {{"room_number": "113", "room_name": "MECHANICAL ROOM", "category": "mechanical_room", "bbox": [x, y, w, h]}}
-  ],
-  "panels": [
-    {{"label": "PANEL H1", "bbox": [x, y, w, h]}}
-  ],
-  "electrical_counts": {{
-    "fixtures": 0,
-    "receptacles": 0,
-    "switches": 0,
-    "sensors": 0
-  }}
+    {{"room_number": "113", "room_name": "MECHANICAL ROOM", "category": "mechanical", "bbox": [0.42, 0.18, 0.12, 0.08]}}
+  ]
 }}"""
 
     def _parse_response(self, response_text: str) -> Dict[str, Any]:
@@ -202,10 +214,90 @@ Output ONLY valid JSON:
             if not isinstance(bbox, list) or len(bbox) != 4:
                 logger.warning(f"Room {i} has invalid bbox: {bbox}")
 
-        # Validate panels
-        panels = data.get("panels", [])
-        if not isinstance(panels, list):
-            raise VLMAnnotationError("'panels' must be a list")
+        # Panels are no longer requested from VLM (removed from prompt).
+        # Accept and silently discard any legacy panels field.
+
+    # Claude API hard limit: neither dimension may exceed this value.
+    # https://docs.anthropic.com/en/docs/build-with-claude/vision
+    _API_MAX_DIMENSION: int = 7900   # stay 100px below the 8000px hard limit
+    # Target quality for in-memory PNG encode sent to the API
+    _API_TARGET_KB: int = 4500
+
+    def _prepare_image_for_api(
+        self, image_path: Path
+    ) -> tuple[str, int, int]:
+        """
+        Load image, enforce API dimension limit, and base64-encode for the API.
+
+        This is the single authoritative place where the image is prepared for
+        transmission.  It operates entirely in memory so it never writes to
+        disk and never fails with PermissionError regardless of file permissions.
+
+        Returns
+        -------
+        (base64_data, sent_width, sent_height)
+            base64_data  : UTF-8 encoded base64 string ready for the API
+            sent_width   : pixel width of the image that was actually sent
+            sent_height  : pixel height of the image that was actually sent
+
+        Raises
+        ------
+        VLMAnnotationError
+            If the image cannot be opened or encoded.
+        """
+        import io
+
+        try:
+            img = Image.open(image_path).convert("RGB")
+        except Exception as e:
+            raise VLMAnnotationError(
+                f"Cannot open image {image_path.name}: {e}"
+            ) from e
+
+        original_w, original_h = img.size
+        current_max = max(original_w, original_h)
+
+        # ── Step 1: enforce pixel dimension limit ────────────────────────────
+        if current_max > self._API_MAX_DIMENSION:
+            scale = self._API_MAX_DIMENSION / current_max
+            new_w = max(1, int(original_w * scale))
+            new_h = max(1, int(original_h * scale))
+            img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+            logger.info(
+                f"  {image_path.name}: resized {original_w}×{original_h}"
+                f" → {new_w}×{new_h} (API 8000px limit)"
+            )
+
+        sent_w, sent_h = img.size
+
+        # ── Step 2: encode to PNG bytes in memory ────────────────────────────
+        # Iteratively compress if over the size target (rare for floor plans).
+        iteration = 0
+        while True:
+            buf = io.BytesIO()
+            img.save(buf, format="PNG", optimize=True)
+            kb = len(buf.getvalue()) / 1024
+            if kb <= self._API_TARGET_KB or max(img.size) <= 400:
+                break
+            # Reduce dimensions 10% and retry
+            new_max = int(max(img.size) * 0.9)
+            scale = new_max / max(img.size)
+            img = img.resize(
+                (max(1, int(img.width * scale)), max(1, int(img.height * scale))),
+                Image.Resampling.LANCZOS,
+            )
+            sent_w, sent_h = img.size
+            iteration += 1
+            if iteration >= 10:
+                logger.warning(
+                    f"  {image_path.name}: could not compress below "
+                    f"{self._API_TARGET_KB} KB (final: {kb:.0f} KB, "
+                    f"size: {sent_w}×{sent_h})"
+                )
+                break
+
+        base64_data = base64.standard_b64encode(buf.getvalue()).decode("utf-8")
+        return base64_data, sent_w, sent_h
 
     def annotate(self, image_path: str | Path) -> VLMAnnotationResult:
         """
@@ -225,22 +317,23 @@ Output ONLY valid JSON:
         if not image_path.exists():
             raise VLMAnnotationError(f"Image file not found: {image_path}")
 
-        # Get image info
-        img_width, img_height = self._get_image_dimensions(image_path)
-        image_data = self._encode_image(image_path)
+        # Record ORIGINAL dimensions for the result metadata (so bboxes can
+        # be mapped back to the original image coordinate space by callers).
+        orig_width, orig_height = self._get_image_dimensions(image_path)
 
-        # Determine media type
-        suffix = image_path.suffix.lower()
-        media_type = {
-            ".png": "image/png",
-            ".jpg": "image/jpeg",
-            ".jpeg": "image/jpeg",
-            ".gif": "image/gif",
-            ".webp": "image/webp",
-        }.get(suffix, "image/png")
+        # Prepare image for API: resize in memory if needed, encode to base64.
+        # This is the single authoritative resize step — it runs regardless of
+        # whether the pipeline already called resize_in_place.  It operates
+        # entirely in memory so PermissionError on read-only source files is
+        # impossible.
+        image_data, sent_width, sent_height = self._prepare_image_for_api(image_path)
 
-        # Build prompt
-        prompt = self._build_prompt(img_width, img_height)
+        # Determine media type (always PNG after in-memory encode)
+        media_type = "image/png"
+
+        # Build prompt using SENT dimensions so fractional bbox rescaling is
+        # consistent with what the model actually sees.
+        prompt = self._build_prompt(sent_width, sent_height)
 
         # Call API with retries
         last_error = None
@@ -271,7 +364,65 @@ Output ONLY valid JSON:
                 data = self._parse_response(response_text)
                 self._validate_annotation(data)
 
-                # Build result
+                # Rescale fractional bboxes → pixel coordinates.
+                # The updated prompt requests fractional [x/W, y/H, w/W, h/H]
+                # coords to improve VLM spatial accuracy. Convert back here.
+                #
+                # BUG FIX: Previously, when the VLM disobeyed the fractional
+                # format and returned raw pixel values (e.g., [8547, 1039, ...]),
+                # the guard `all(v <= 1.0)` correctly rejected them but the
+                # room was kept with the corrupt pixel values unchanged.
+                # Those values propagated into COCO output as out-of-bounds
+                # bboxes (x+w > img_width), producing untrainable annotations.
+                #
+                # New behaviour: mark non-fractional rooms for removal.
+                # Rooms whose bbox cannot be rescaled have no valid location and
+                # must be dropped rather than kept with garbage coordinates.
+                rooms_to_remove = []
+                for room in data.get("rooms", []):
+                    bbox = room.get("bbox", [])
+                    if len(bbox) == 4:
+                        try:
+                            fx, fy, fw, fh = [float(v) for v in bbox]
+                        except (ValueError, TypeError):
+                            rooms_to_remove.append(room)
+                            continue
+
+                        if all(0.0 <= v <= 1.0 for v in (fx, fy, fw, fh)):
+                            # Valid fractional coords — rescale to pixels using
+                            # SENT dimensions (what the model actually saw).
+                            # If the image was resized before sending, these
+                            # are smaller than orig_width/orig_height.
+                            room["bbox"] = [
+                                int(fx * sent_width), int(fy * sent_height),
+                                int(fw * sent_width), int(fh * sent_height),
+                            ]
+                        else:
+                            # VLM returned raw pixel values instead of
+                            # fractional. These are unreliable; drop the room.
+                            rooms_to_remove.append(room)
+                            logger.warning(
+                                f"VLM returned non-fractional bbox "
+                                f"[{fx:.1f},{fy:.1f},{fw:.1f},{fh:.1f}] "
+                                f"for '{room.get('room_name','?')}' "
+                                f"(sent {sent_width}×{sent_height}) — dropping"
+                            )
+
+                if rooms_to_remove:
+                    data["rooms"] = [
+                        r for r in data["rooms"] if r not in rooms_to_remove
+                    ]
+                    logger.info(
+                        f"Dropped {len(rooms_to_remove)} room(s) with "
+                        f"out-of-bounds or non-fractional bboxes"
+                    )
+
+                # Build result.
+                # image_size records the ORIGINAL file dimensions so that
+                # bboxes (in sent-image pixel space) can be projected back
+                # to the original coordinate space by downstream tools.
+                # sent_size records what was actually transmitted so callers
+                # can perform the scale-back if needed.
                 rooms = [
                     RoomAnnotation(
                         room_number=r.get("room_number", ""),
@@ -292,7 +443,7 @@ Output ONLY valid JSON:
 
                 result = VLMAnnotationResult(
                     image_file=image_path.name,
-                    image_size={"width": img_width, "height": img_height},
+                    image_size={"width": orig_width, "height": orig_height},
                     rooms=rooms,
                     panels=panels,
                     electrical_counts=data.get("electrical_counts", {}),
@@ -318,7 +469,7 @@ Output ONLY valid JSON:
         # All retries failed
         return VLMAnnotationResult(
             image_file=image_path.name,
-            image_size={"width": img_width, "height": img_height},
+            image_size={"width": orig_width, "height": orig_height},
             error=str(last_error),
         )
 

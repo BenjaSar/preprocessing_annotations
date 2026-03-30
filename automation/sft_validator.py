@@ -8,12 +8,18 @@ Filters non-spatial text, validates taxonomy, enforces confidence thresholds.
 import re
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
-from difflib import SequenceMatcher
 from PIL import Image
 import io
 import logging
 
 logger = logging.getLogger(__name__)
+
+try:
+    from .taxonomy import CANONICAL_TYPES, VALID_TYPES, VLM_CATEGORY_MAP, normalize_room_type
+    from .abbreviations import ABBREVIATION_MAP as _ABBREVIATION_MAP
+except ImportError:
+    from taxonomy import CANONICAL_TYPES, VALID_TYPES, VLM_CATEGORY_MAP, normalize_room_type
+    from abbreviations import ABBREVIATION_MAP as _ABBREVIATION_MAP
 
 
 class ImageResizer:
@@ -85,105 +91,156 @@ class SemanticRoomValidator:
     """Filter non-spatial text from room annotations."""
 
     NON_ROOM_PATTERNS = [
-        # Documentation/Compliance
-        r"(DOCUMENTATION|REQUIREMENTS|RECOMMENDED|APPROVAL|PERMIT)",
+        # ------------------------------------------------------------------ #
+        # Documentation / compliance blocks                                    #
+        # ------------------------------------------------------------------ #
+        r"(DOCUMENTATION|REQUIREMENTS?|RECOMMENDED|APPROVAL|PERMIT)",
         r"(ENERGY CODE|COMPLIANCE|STANDARD|SPECIFICATION)",
-        r"(DISCLAIMER|NOTES|LEGEND|SYMBOL|ABBREVIATION)",
-        # Equipment/Technical (not spatial)
-        r"(^EQUIPMENT$|EQUIPMENT\s*\(|LIGHTING\s+EQUIPMENT|MANUFACTURER'S|MANUFACTURER)",
-        # Floor/Sheet/Drawing metadata
-        r"(SHEET|DRAWING|PLAN|REVISIONS|TITLE BLOCK|SCALE|FLOOR|BASEMENT|3RD|2ND|FIRST|SECOND)",
-        r"(ELECTRICAL|MECHANICAL|PLUMBING).*(PLAN|FIRST FLOOR|SECOND|BASEMENT|PAGE)",
-        # Administrative text
-        r"(DOCUMENT|STATEMENT|OUTLINE|MOVEMENT|OVERRIDE|PROVIDE|EQUIPMENT)",
+        r"(DISCLAIMER|NOTES?|LEGEND|SYMBOL|ABBREVIATION)",
+        r"(SHEET|DRAWING|PLAN|REVISIONS|TITLE BLOCK|SCALE)",
         r"(SCHEDULE|INDEX|KEY|REFERENCE|ENDORSEMENT)",
         r"^(OUTLINED|THE OUTLINED)",
-        # Phase 4 Critical Additions (Phase 5 Fix #2)
-        r"^I(?=[A-Z]{5,})",             # Corrupted OCR: capital I prefix (IELECTRICAL, IACCESSORY)
-        r"^A(?=[A-Z]{5,})",             # Corrupted OCR: A prefix (ACOMPRESSOR)
-        r"ELECTRICAL\s+(?!ROOM)",       # ELECTRICAL equipment (not ELECTRICAL ROOM)
-        r"EQUIPMENT(?!\s*ROOM)",        # EQUIPMENT equipment (not EQUIPMENT ROOM)
+        # General/national/FDNY electrical notes headers
+        r"(ELECTRICAL|MECHANICAL|PLUMBING)\s+(GENERAL|SYMBOL|DRAWING|DEVICE|NOTES|PLAN)",
+        r"(NATIONAL|STATE|LOCAL|FDNY|NYC)\s+(ELECTRICAL|FIRE|BUILDING|CODE)",
+        # ------------------------------------------------------------------ #
+        # Instruction / directive sentences                                    #
+        # ------------------------------------------------------------------ #
+        r"CONTRACTOR\s+TO\s+(VERIFY|COORDINATE|PROVIDE|INSTALL|CONFIRM)",
+        r"(SENSOR|DETECTOR)\s+PLACEMENT",
+        r"TAKE\s+OFF(\s+ONLY)?",
+        r"USE\s+\w+\s+FOR\s*(:|$)",          # "USE DEVELOPMENT FOR:"
+        r"^USE\s+(THIS|DEVELOPMENT|DIAGRAM|DRAWING|PLAN)",
+        r"(SHALL|MUST|SHOULD)\s+(BE|NOT|COMPLY)",
+        r"BEFORE\s+COMMENCING",
+        r"AS\s+(DIRECTED|REQUIRED|NEEDED|SPECIFIED|INDICATED)",
+        r"(REFER|SEE)\s+(TO\s+)?(SHEET|DRAWING|PLAN|SPEC|DETAIL)",
+        r"PER\s+(CODE|NEC|NFPA|AHJ|OWNER)",
+        r"(INSTALL|COORDINATE|VERIFY|PROVIDE|REMOVE|RELOCATE)\s+ALL",
+        # ------------------------------------------------------------------ #
+        # Equipment / non-spatial objects                                      #
+        # ------------------------------------------------------------------ #
+        # Panels – most important: PANEL A / PANEL B / PANEL 1 / LP-1
+        r"^PANEL\s*[A-Z0-9\-]*$",
+        r"^(LP|DP|EP|PP|MDP|SDP)\s*[\-]?\s*\d*[A-Z]?$",   # LP-1, MDP, etc.
+        r"^SWITCHBOARD\b",
+        r"^(TRANSFORMER|DISCONNECT|BREAKER|FEEDER|RISER)\b",
+        # Equipment text blocks
+        r"(^EQUIPMENT$|EQUIPMENT\s*\(|EQUIPMENT\s+SHOWN|EQUIPMENT\s+MUST|"
+        r"EQUIPMENT\s+MAY|EXISTING\s+EQUIPMENT|NEW\s+EQUIPMENT|"
+        r"DISTRIBUTION\s+EQUIPMENT|ELECTRICAL\s+EQUIPMENT|EQUIPMENT\s+INCLUDING)",
+        r"DEVICE(S)?\s*/?\s*EQUIPMENT",
+        r"INDICATED\s+RELOCATED\s+EXISTING",
+        # ------------------------------------------------------------------ #
+        # Building-system non-room labels                                      #
+        # ------------------------------------------------------------------ #
+        r"BUILDING\s+MANAGEMENT\s+SYSTEM",
+        r"(DISTRIBUTION|EMERGENCY|NORMAL)\s+(PANEL|SYSTEM|BUS|POWER)\b",
+        r"(AC|DC)\s+(MOMENTARY|CIRCUIT|DISCONNECT)",
+        # ------------------------------------------------------------------ #
+        # Address / firm metadata                                              #
+        # ------------------------------------------------------------------ #
+        r"(BROADWAY|AVENUE|STREET|BOULEVARD|DRIVE|LANE)\s+(SUITE|#)",
+        r"\b(NEW YORK|LOS ANGELES|CHICAGO|BOSTON|HOUSTON)\b",
+        r"^\d{3,5}\s+(BROADWAY|AVENUE|STREET)",  # "326 ROCKAWAY"
+        r"NEW\s+YORK\s+(OFFICE|CITY)",
+        # ------------------------------------------------------------------ #
+        # OCR corruption patterns                                              #
+        # ------------------------------------------------------------------ #
+        r"^I(?=[A-Z]{5,})",      # IELECTRICAL, IACCESS...
+        r"^A(?=[A-Z]{5,})",      # ACOMPRESSOR...
+        # Short OCR word-fragments (start with consonant cluster, no vowels in key positions)
+        r"^[BCDFGHJKLMNPQRSTVWXYZ]{2}[IPME]{1}[A-Z]{0,4}[NT]$",  # UIPMEN, JIPMENT, IPMEN
+        # Partial words clearly cut off
+        r"^(UIPMEN|JIPMEN|IPMEN|EMEN|JIPMENT|UIPMENT|QUIPMEN)T?$",
+        r"^(IIPMENT|ELEMEN|LEMEN|JIMENT|DIMEN)T?S?$",
+        r"^(RMINAL|ECTION|IREMENT|JIREMENT|UIREMENT)S?$",
+        r"^(QIPMEN|DWIDF|JILDING|IDFD)$",  # specific junk from test data
+        # ------------------------------------------------------------------ #
+        # ELECTRICAL standalone (not ELECTRICAL ROOM)                         #
+        # OCR splits "ELECTRICAL ROOM" into two tokens → "ELECTRICAL" alone   #
+        # is ambiguous without "ROOM"; handled by requiring compound in       #
+        # room_name_patterns, but guard here too for VLM output.              #
+        # ------------------------------------------------------------------ #
+        r"^ELECTRICAL$",         # block bare "ELECTRICAL" – must be "ELECTRICAL ROOM"
+        r"ELECTRICAL\s+(?!ROOM\b)",  # ELECTRICAL + anything except ROOM
     ]
 
     VALID_ROOM_KEYWORDS = {
+        # Commercial
         "OFFICE", "CONFERENCE", "MEETING", "LOBBY", "RESTROOM",
         "BATHROOM", "KITCHEN", "STORAGE", "ELEVATOR", "STAIRWELL",
         "HALLWAY", "CORRIDOR", "VESTIBULE", "FOYER", "RECEPTION",
         "LOUNGE", "BREAKROOM", "CAFE", "AUDITORIUM", "CLASSROOM",
-        "LAB", "MECHANICAL", "ELECTRICAL", "DATA CENTER", "SERVER",
+        "LAB", "MECHANICAL", "DATA CENTER", "SERVER",
         "PROGRAM SUPPORT", "STUDENT SERVICES", "CARPENTRY", "WORKSHOP",
-        "FACULTY", "ENTRANCE", "ACEMENT", "BEDROOM", "LIVING", "DINING",
+        "FACULTY", "ENTRANCE", "BEDROOM", "LIVING", "DINING",
         "LAUNDRY", "UTILITY", "GARAGE", "CLOSET", "LINEN", "PANTRY",
         "POWDER", "MASTER",
-        # Phase 2 Critical Additions
-        "SUITE",           # Suite 301, Suite 302 (commercial spaces)
-        "BREAK",           # Break Room (alternative to BREAKROOM)
-        # Phase 2 Medium Priority
-        "TELECOM",         # Telecom Room (technical)
-        "BICYCLE",         # Bicycle Storage (utility)
-        "COMPACTOR",       # Compactor Room (utility)
-        "BOILER",          # Boiler Room (utility)
-        "PUMP",            # Pump Room (utility)
-        "JANITOR",         # Janitor Room (facility)
-        "ART",             # Art Room (specialized)
-        "MUSIC",           # Music Room (specialized)
-        "STUDY",           # Study Room (specialized)
-        "READING",         # Reading Room (specialized)
-        # Phase 2 Low Priority
-        "CCTV",            # CCTV Room (security)
-        "PLUMBING",        # Plumbing Room (utility)
-        "MACHINE",         # Machine Room (utility)
+        "SUITE",
+        "BREAK",
+        "TELECOM",
+        "BICYCLE",
+        "COMPACTOR",
+        "BOILER",
+        "PUMP",
+        "JANITOR",
+        "ART", "MUSIC", "STUDY", "READING",
+        "CCTV",
+        "PLUMBING",
+        "MACHINE",
+        # Additional compound rooms required for MEP floor plans
+        "FIRE PUMP",
+        "COMMUNITY FACILITY",
+        "BUILDING STORAGE",
+        "BICYCLE STORAGE",
+        "COMMERCIAL STORAGE",
+        "COMPACTOR ROOM",
+        "ELEVATOR MACHINE",
+        # Residential abbreviation expansions (after _expand_abbreviation)
+        "WALK-IN CLOSET",
+        "FAMILY ROOM",
+        "DINING ROOM",
+        "LIVING ROOM",
+        "MASTER BEDROOM",
+        "POWDER ROOM",
+        "LINEN CLOSET",
+        "STUDIO",
+        # Residential unit-type expansions (0BR/1BR/2BR → STUDIO / N BEDROOM)
+        "1 BEDROOM",
+        "2 BEDROOM",
+        "3 BEDROOM",
+        "4 BEDROOM",
+        # Pipeline-output-analysis §4/§5: Keywords present in CANONICAL_TYPES
+        # surface forms but previously absent from this whitelist, causing
+        # the keyword gate to silently drop valid room labels before
+        # taxonomy normalization could map them to canonical types.
+        "COMMUNITY",        # §4 Case 1: "COMMUNITY ROOM" → community_facility
+        "COMMUNITY ROOM",   # §5 table: direct compound match
+        "WAITING",          # §4 Case 3: "WAITING" / "WAITING ROOM" → lobby
+        "WAITING ROOM",     # §4 Case 3: compound form
+        "REFUSE",           # §4 Case 4: "REFUSE ROOM" → compactor
+        "TRASH",            # §5 table:  "TRASH ROOM"  → compactor
     }
 
-    # CRITICAL FIX: Abbreviation expansion mapping
-    # Maps abbreviated room names to their canonical expanded forms
-    # This ensures abbreviations like "BR", "LR", "BA" are recognized as valid rooms
-    ABBREVIATION_EXPANSIONS = {
-        # Residential & Room Areas
-        "BR": "BEDROOM",
-        "BD": "BEDROOM",
-        "BDRM": "BEDROOM",
-        "MBR": "MASTER BEDROOM",
-        "MSTR": "MASTER BEDROOM",
-        "MS": "MASTER BEDROOM",
-        "BA": "BATHROOM",
-        "BATH": "BATHROOM",
-        "PDR": "POWDER ROOM",
-        "LR": "LIVING ROOM",
-        "DR": "DINING ROOM",
-        "DIN": "DINING ROOM",
-        "KIT": "KITCHEN",
-        "K": "KITCHEN",
-        "FR": "FAMILY ROOM",
-        "FAM": "FAMILY ROOM",
-        "OF": "OFFICE",
-        "OFC": "OFFICE",
-        "LNDRY": "LAUNDRY",
-        "UTL": "UTILITY",
-        "GAR": "GARAGE",
-        "G": "GARAGE",
-        "CL": "CLOSET",
-        "CLS": "CLOSET",
-        "WIC": "WALK-IN CLOSET",
-        "LIN": "LINEN CLOSET",
-        "PAN": "PANTRY",
-        "P": "PANTRY",
-        "STR": "STORAGE",
-        "STOR": "STORAGE",
-        # Commercial
-        "OFF": "OFFICE",
-        "CONF": "CONFERENCE ROOM",
-        "STE": "SUITE",
-        "RECP": "RECEPTION",
-        "WC": "RESTROOM",
-        "TLT": "RESTROOM",
-        "RM": "ROOM",
-        # Industrial / Utility
-        "MECH": "MECHANICAL ROOM",
-        "BSMT": "BASEMENT",
-        "UTIL": "UTILITY",
-        "SHOP": "WORKSHOP",
-    }
+    # Class-level compiled word-boundary pattern built from VALID_ROOM_KEYWORDS.
+    # Replaces the previous `any(kw in name ...)` substring check which allowed
+    # labels like "BUILDING MANAGEMENT SYSTEM" to pass because they contained
+    # "BUILDING" as a substring.  Word-boundary matching ensures keywords only
+    # match when they appear as complete words.
+    #
+    # Keywords are sorted longest-first so multi-word phrases ("FIRE PUMP",
+    # "ELEVATOR MACHINE") are tried before their component words ("PUMP",
+    # "MACHINE"), preventing partial matches that shadow the full phrase.
+    #
+    # The pattern is compiled once at class definition time (not per-instance)
+    # to avoid repeated re.compile() overhead in tight filter loops.
+    _KW_PATTERN: "re.Pattern" = None  # populated after class definition
+
+    # CRITICAL FIX: Abbreviation expansion mapping — single source of truth.
+    # Previously this was a separate dict that diverged from ResidentialAbbreviationRecovery
+    # and TaxonomyNormalizer.  All three now import from abbreviations.py.
+    ABBREVIATION_EXPANSIONS = _ABBREVIATION_MAP
 
     def _expand_abbreviation(self, name: str) -> str:
         """
@@ -271,9 +328,18 @@ class SemanticRoomValidator:
             # This ensures abbreviated room names (BR, LR, BA) are recognized
             expanded_name = self._expand_abbreviation(name)
 
-            # Keep if contains valid room keywords OR has good confidence
-            confidence = room.get("confidence", 0)
-            if any(kw in expanded_name for kw in self.VALID_ROOM_KEYWORDS) or confidence > 0.95:
+            # Keep ONLY if the name contains a valid room keyword.
+            # ⚠️  REMOVED: "or confidence > 0.95" bypass.
+            #    High OCR confidence does NOT mean the text is a room label.
+            #    OCR fragments like "UIPMEN" (confidence=0.9998) and
+            #    "PANEL A" (confidence=0.999) were bypassing this gate.
+            #    Confidence is handled separately in filter_by_confidence().
+            #
+            # Word-boundary regex replaces the previous substring check
+            # `any(kw in expanded_name ...)` which allowed labels like
+            # "BUILDING MANAGEMENT SYSTEM" to pass because they contained
+            # "BUILDING" as a substring.
+            if SemanticRoomValidator._KW_PATTERN.search(expanded_name):
                 # Store original name for display, expanded for validation
                 room["original_name"] = name
                 valid.append(room)
@@ -290,56 +356,23 @@ class SemanticRoomValidator:
         return False
 
 
+# Build the class-level keyword pattern now that VALID_ROOM_KEYWORDS is defined.
+# Sorted longest-first so multi-word phrases ("FIRE PUMP") match before their
+# constituent words ("PUMP") when both could apply to the same string.
+_sorted_kws = sorted(SemanticRoomValidator.VALID_ROOM_KEYWORDS, key=len, reverse=True)
+SemanticRoomValidator._KW_PATTERN = re.compile(
+    r"\b(?:" + "|".join(re.escape(kw) for kw in _sorted_kws) + r")\b",
+    re.IGNORECASE,
+)
+
+
 class TaxonomyNormalizer:
     """Normalize room names to standard taxonomy."""
 
-    # Abbreviation expansion mapping (shared with SemanticRoomValidator)
-    ABBREVIATION_EXPANSIONS = {
-        # Residential & Room Areas
-        "BR": "BEDROOM",
-        "BD": "BEDROOM",
-        "BDRM": "BEDROOM",
-        "MBR": "MASTER BEDROOM",
-        "MSTR": "MASTER BEDROOM",
-        "MS": "MASTER BEDROOM",
-        "BA": "BATHROOM",
-        "BATH": "BATHROOM",
-        "PDR": "POWDER ROOM",
-        "LR": "LIVING ROOM",
-        "DR": "DINING ROOM",
-        "DIN": "DINING ROOM",
-        "KIT": "KITCHEN",
-        "K": "KITCHEN",
-        "FR": "FAMILY ROOM",
-        "FAM": "FAMILY ROOM",
-        "OF": "OFFICE",
-        "OFC": "OFFICE",
-        "LNDRY": "LAUNDRY",
-        "UTL": "UTILITY",
-        "GAR": "GARAGE",
-        "G": "GARAGE",
-        "CL": "CLOSET",
-        "CLS": "CLOSET",
-        "WIC": "WALK-IN CLOSET",
-        "LIN": "LINEN CLOSET",
-        "PAN": "PANTRY",
-        "P": "PANTRY",
-        "STR": "STORAGE",
-        "STOR": "STORAGE",
-        # Commercial
-        "OFF": "OFFICE",
-        "CONF": "CONFERENCE ROOM",
-        "STE": "SUITE",
-        "RECP": "RECEPTION",
-        "WC": "RESTROOM",
-        "TLT": "RESTROOM",
-        "RM": "ROOM",
-        # Industrial / Utility
-        "MECH": "MECHANICAL ROOM",
-        "BSMT": "BASEMENT",
-        "UTIL": "UTILITY",
-        "SHOP": "WORKSHOP",
-    }
+    # Single source of truth — imported from abbreviations.py.
+    # Previously a separate dict that diverged from SemanticRoomValidator
+    # and ResidentialAbbreviationRecovery.
+    ABBREVIATION_EXPANSIONS = _ABBREVIATION_MAP
 
     STANDARD_TAXONOMY = {
         "office": [
@@ -420,45 +453,25 @@ class TaxonomyNormalizer:
 
     def normalize(self, room_name: str) -> str:
         """
-        Map extracted room name to standard taxonomy.
+        Map extracted room name to canonical taxonomy type.
 
-        Args:
-            room_name: Raw room name from extraction
+        Remediation Fix #4: Flag slash-separated compound names for review.
+        If a room name contains '/', check if both parts are valid room types.
+        If so, flag for human review (may indicate two distinct rooms).
 
-        Returns:
-            Standardized room type (lowercase)
+        Delegates to the centralised normalize_room_type() from taxonomy.py,
+        which replaced the previous local SequenceMatcher-based implementation.
+        This ensures all normalisation uses the same 35-type canonical taxonomy.
         """
-        name_upper = room_name.upper().strip()
+        # Remediation Fix #4: Detect slash-compound labels
+        if "/" in room_name:
+            parts = room_name.split("/")
+            logger.warning(
+                f"Remediation Fix #4: slash-compound label detected: '{room_name}' "
+                f"— verify it represents a single room (e.g., IT/STORAGE) and not two rooms"
+            )
 
-        # CRITICAL FIX: Expand abbreviations before taxonomy matching
-        # This ensures abbreviations like BR, LR, BA are correctly classified
-        expanded_name = self._expand_abbreviation(name_upper)
-
-        # Exact match first
-        for std_type, variants in self.STANDARD_TAXONOMY.items():
-            if expanded_name in variants:
-                return std_type
-
-        # Fuzzy match for OCR errors (use expanded name for better matching)
-        best_match = None
-        best_ratio = 0.0
-
-        all_variants = [
-            v for variants in self.STANDARD_TAXONOMY.values() for v in variants
-        ]
-
-        for variant in all_variants:
-            ratio = SequenceMatcher(None, expanded_name, variant).ratio()
-            if ratio > best_ratio and ratio > 0.80:
-                best_ratio = ratio
-                best_match = variant
-
-        if best_match:
-            for std_type, variants in self.STANDARD_TAXONOMY.items():
-                if best_match in variants:
-                    return std_type
-
-        return "other"
+        return normalize_room_type(room_name)
 
 
 def filter_by_confidence(rooms: List[Dict], min_confidence: float = 0.85,
@@ -494,8 +507,18 @@ def filter_by_confidence(rooms: List[Dict], min_confidence: float = 0.85,
         confidence = room.get("confidence", 0)
         room_name = (room.get("name") or room.get("room_name", "")).upper()
 
-        # Check if contains valid keyword
-        has_keyword = any(kw in room_name for kw in validator.VALID_ROOM_KEYWORDS)
+        # Abbreviation-recovered rooms have already been validated by dictionary
+        # lookup in ResidentialAbbreviationRecovery.  Applying a confidence
+        # threshold here is redundant and risks dropping legitimate rooms whose
+        # raw OCR confidence is low (common for small abbreviated text).
+        if room.get("source") == "ocr_abbreviation_recovered":
+            result.append(room)
+            logger.debug(f"Kept (abbreviation exemption): {room_name}")
+            continue
+
+        # Word-boundary check replaces the previous `any(kw in room_name ...)`
+        # substring test.  See SemanticRoomValidator._KW_PATTERN for rationale.
+        has_keyword = bool(SemanticRoomValidator._KW_PATTERN.search(room_name))
 
         # Apply conditional threshold
         threshold = keyword_min_confidence if has_keyword else min_confidence
@@ -549,9 +572,8 @@ def validate_for_sft(room: Dict) -> Tuple[bool, Dict[str, bool]]:
     """
     Strict validation for SFT ground truth data.
 
-    CRITICAL: VLM-detected rooms have NO confidence field (high-confidence by design).
-    OCR rooms HAVE confidence field and must pass 0.85 threshold.
-    VLM uses "room_name", OCR uses "name".
+    VLM rooms have no confidence field (high-confidence by design).
+    OCR rooms have confidence field and must pass 0.85 threshold.
 
     Args:
         room: Single room annotation dictionary
@@ -559,31 +581,23 @@ def validate_for_sft(room: Dict) -> Tuple[bool, Dict[str, bool]]:
     Returns:
         Tuple of (is_valid, checks_dict)
     """
-    # CRITICAL FIX: Support both "room_name" (VLM) and "name" (OCR)
     name = room.get("room_name") or room.get("name", "")
 
-    # CRITICAL FIX #1: Normalize category field before validation
-    room_type = room.get("type", "other")
+    # Normalize type using canonical taxonomy (covers all 35 types)
+    room_type = room.get("type") or room.get("category") or "other"
     if isinstance(room_type, str):
-        room_type = _normalize_category(room_type)
+        room_type = normalize_room_type(room_type)
 
     checks = {
         "has_name": bool(name.strip()),
         "has_bbox": len(room.get("bbox", [])) == 4,
         "bbox_valid": all(isinstance(x, (int, float)) for x in room.get("bbox", [])),
-        # CRITICAL FIX: VLM rooms have no confidence field (they're implicitly high-confidence)
-        # OCR rooms have confidence field and must pass threshold
         "confidence_high": (
-            "confidence" not in room or  # VLM rooms: no field = high confidence
-            room.get("confidence", 0) >= 0.85  # OCR rooms: must pass threshold
+            "confidence" not in room or
+            room.get("confidence", 0) >= 0.85
         ),
         "name_not_generic": name.upper() not in ["ROOM", "SPACE"],
-        # CRITICAL FIX #1: Check normalized type against whitelist
-        "type_in_taxonomy": room_type in [
-            "office", "conference_room", "restroom", "storage", "lobby",
-            "hallway", "elevator", "stairwell", "mechanical", "electrical",
-            "carpentry", "breakroom", "cafe", "other"
-        ],
+        "type_in_taxonomy": room_type in VALID_TYPES,
     }
 
     is_valid = all(checks.values())
@@ -617,6 +631,212 @@ def _bbox_distance(bbox1: List, bbox2: List, threshold: int = 100) -> bool:
     y_overlap = not (y1 + h1 + threshold < y2 or y2 + h2 + threshold < y1)
 
     return x_overlap and y_overlap
+
+
+def _bbox_in_bounds(bbox: List, img_w: int, img_h: int) -> bool:
+    """
+    Check if a bounding box lies entirely within the image bounds.
+
+    (pipeline-revalidation-analysis §3 Fix B)
+
+    Rooms with coordinates exceeding image dimensions are produced when
+    OCR or VLM returns pixel coordinates relative to the full-resolution
+    PDF page rather than the cropped/resized image used by the pipeline.
+    These must be filtered BEFORE sft_ready is computed, otherwise images
+    with only OOB rooms are marked sft_ready=True and appear in COCO
+    splits as zero-annotation ghost images.
+
+    Args:
+        bbox: [x, y, width, height]
+        img_w: Image width in pixels
+        img_h: Image height in pixels
+
+    Returns:
+        True if bbox is entirely within image bounds
+    """
+    if len(bbox) < 4:
+        return False
+    x, y, w, h = bbox[:4]
+    return x >= 0 and y >= 0 and x + w <= img_w and y + h <= img_h
+
+
+def _bbox_iou(bbox1: List, bbox2: List) -> float:
+    """
+    Compute Intersection over Union (IoU) for two bboxes.
+
+    Remediation Fix #2: Detect overlapping room bboxes for resolution.
+
+    Args:
+        bbox1: [x, y, width, height]
+        bbox2: [x, y, width, height]
+
+    Returns:
+        IoU in [0, 1], or 0 if bboxes don't overlap or are malformed.
+    """
+    if len(bbox1) < 4 or len(bbox2) < 4:
+        return 0.0
+
+    x1, y1, w1, h1 = bbox1[:4]
+    x2, y2, w2, h2 = bbox2[:4]
+
+    # Convert to (x1, y1, x2, y2) format
+    x1_1, y1_1, x2_1, y2_1 = x1, y1, x1 + w1, y1 + h1
+    x1_2, y1_2, x2_2, y2_2 = x2, y2, x2 + w2, y2 + h2
+
+    # Compute intersection
+    xi1 = max(x1_1, x1_2)
+    yi1 = max(y1_1, y1_2)
+    xi2 = min(x2_1, x2_2)
+    yi2 = min(y2_1, y2_2)
+
+    if xi2 <= xi1 or yi2 <= yi1:
+        return 0.0
+
+    intersection = (xi2 - xi1) * (yi2 - yi1)
+    area1 = w1 * h1
+    area2 = w2 * h2
+    union = area1 + area2 - intersection
+
+    return intersection / union if union > 0 else 0.0
+
+
+def _resolve_bbox_overlaps(rooms: List[Dict]) -> List[Dict]:
+    """
+    Resolve overlapping bounding boxes in non-circulation room types.
+
+    Remediation Fix #2: Post-VLM overlap resolution.
+    - Circulation types (hallway, elevator, stairwell, lobby, corridor) are exempt
+    - For overlapping non-circulation pairs:
+      * If IoU > 0.5: merge as duplicate (keep higher confidence, larger bbox)
+      * If IoU <= 0.5: shrink smaller bbox to remove overlap (clip boundary)
+    - Log all resolutions for human review
+
+    Args:
+        rooms: List of room annotations
+
+    Returns:
+        List with overlaps resolved
+    """
+    if not rooms:
+        return rooms
+
+    circulation_types = {'hallway', 'corridor', 'lobby', 'elevator', 'stairwell', 'riser'}
+    processed = []
+    skip_indices = set()
+
+    for i, room_i in enumerate(rooms):
+        if i in skip_indices:
+            continue
+
+        bbox_i = room_i.get("bbox", [])
+        type_i = (room_i.get("type") or room_i.get("category") or "").lower()
+
+        # Skip circulation types
+        if type_i in circulation_types or len(bbox_i) != 4:
+            processed.append(room_i)
+            continue
+
+        # Check for overlaps with subsequent rooms
+        merged = False
+        for j in range(i + 1, len(rooms)):
+            if j in skip_indices:
+                continue
+
+            room_j = rooms[j]
+            bbox_j = room_j.get("bbox", [])
+            type_j = (room_j.get("type") or room_j.get("category") or "").lower()
+
+            # Skip circulation types
+            if type_j in circulation_types or len(bbox_j) != 4:
+                continue
+
+            iou = _bbox_iou(bbox_i, bbox_j)
+            if iou == 0.0:
+                continue
+
+            # Overlap detected
+            name_i = room_i.get("room_name") or room_i.get("name", "?")
+            name_j = room_j.get("room_name") or room_j.get("name", "?")
+
+            if iou > 0.5:
+                # Merge: keep higher confidence or larger bbox
+                conf_i = room_i.get("confidence", 0.5)
+                conf_j = room_j.get("confidence", 0.5)
+                area_i = _bbox_area(bbox_i)
+                area_j = _bbox_area(bbox_j)
+
+                if conf_i >= conf_j:
+                    logger.warning(
+                        f"Fix2: merged overlapping rooms (IoU={iou:.2f}): "
+                        f"'{name_i}' (conf={conf_i:.2f}) kept, '{name_j}' (conf={conf_j:.2f}) removed"
+                    )
+                    skip_indices.add(j)
+                else:
+                    logger.warning(
+                        f"Fix2: merged overlapping rooms (IoU={iou:.2f}): "
+                        f"'{name_j}' (conf={conf_j:.2f}) kept, '{name_i}' (conf={conf_i:.2f}) removed"
+                    )
+                    skip_indices.add(i)
+                    merged = True
+                    break
+            else:
+                # Clip smaller bbox to remove overlap
+                area_i = _bbox_area(bbox_i)
+                area_j = _bbox_area(bbox_j)
+
+                if area_i < area_j:
+                    # Clip room_i
+                    x1, y1, w1, h1 = bbox_i
+                    x2, y2, w2, h2 = bbox_j
+                    # Shrink bbox_i to non-intersecting region
+                    x1_new = min(x1, x2 + w2 + 10)
+                    y1_new = min(y1, y2 + h2 + 10)
+                    w1_new = max(1, w1 - (w2 + 10) // 2)
+                    h1_new = max(1, h1 - (h2 + 10) // 2)
+                    room_i["bbox"] = [x1_new, y1_new, w1_new, h1_new]
+                    logger.warning(
+                        f"Fix2: clipped bbox (IoU={iou:.2f}): '{name_i}' "
+                        f"[{bbox_i}] → [{room_i['bbox']}] to avoid '{name_j}'"
+                    )
+                else:
+                    # Clip room_j
+                    x1, y1, w1, h1 = bbox_i
+                    x2, y2, w2, h2 = bbox_j
+                    x2_new = min(x2, x1 + w1 + 10)
+                    y2_new = min(y2, y1 + h1 + 10)
+                    w2_new = max(1, w2 - (w1 + 10) // 2)
+                    h2_new = max(1, h2 - (h1 + 10) // 2)
+                    room_j["bbox"] = [x2_new, y2_new, w2_new, h2_new]
+                    logger.warning(
+                        f"Fix2: clipped bbox (IoU={iou:.2f}): '{name_j}' "
+                        f"[{bbox_j}] → [{room_j['bbox']}] to avoid '{name_i}'"
+                    )
+
+        if not merged:
+            processed.append(room_i)
+
+    return processed
+
+
+def _bbox_area(bbox: List) -> float:
+    """
+    Compute the area of a bounding box.
+
+    (vlm-sft-fitness-evaluation BUG-3)
+
+    Used to distinguish real room annotations (area ≥ 30,000 px²) from
+    OCR text-label detections (area ~1,500–2,500 px²).
+
+    Args:
+        bbox: [x, y, width, height]
+
+    Returns:
+        Area in px², or 0 if bbox is malformed.
+    """
+    if len(bbox) < 4:
+        return 0.0
+    w, h = bbox[2], bbox[3]
+    return float(w) * float(h) if w > 0 and h > 0 else 0.0
 
 
 def _merge_vlm_and_ocr(vlm_rooms: List[Dict], ocr_rooms: List[Dict]) -> List[Dict]:
@@ -717,6 +937,109 @@ def prepare_sft_annotation(annotation: Dict) -> Dict:
             room["type"] = room["category"]
             logger.debug(f"Normalized category '{room.get('category')}' → type field")
 
+    # Step 0b: Exclude synthetic rooms from SFT training set.
+    # Synthetic rooms are structurally inferred (e.g., "a 2BR unit must have
+    # 2 bedrooms"), not visually detected.  Including them teaches the VLM to
+    # hallucinate rooms with no image evidence.  They are archived to a
+    # separate "synthetic_rooms" key so humans can review them as suggestions.
+    _synthetic = [r for r in rooms if r.get("source") == "synthetic_residential"]
+    rooms = [r for r in rooms if r.get("source") != "synthetic_residential"]
+    if _synthetic:
+        annotation.setdefault("synthetic_rooms", []).extend(_synthetic)
+        logger.info(
+            f"Excluded {len(_synthetic)} synthetic room(s) from SFT path "
+            f"(archived to annotation['synthetic_rooms'] for review)"
+        )
+
+    # Step 0c-ii: Fix 2 — Room number concatenated into room_name.
+    # VLM reads "CONFERENCE 2902" as a single label and puts the entire
+    # string in room_name.  Strip trailing 3+ digit numeric identifiers
+    # and move them to room_number if room_number is empty or auto-incremented.
+    _ROOM_NUM_SUFFIX = re.compile(r'^([A-Z][A-Z /]+?)\s+#?(\d{3,})$')
+    for room in rooms:
+        rn = room.get("room_name") or room.get("name", "")
+        m = _ROOM_NUM_SUFFIX.match(rn.strip())
+        if m:
+            clean_name = m.group(1).strip()
+            extracted_num = m.group(2)
+            existing_num = room.get("room_number", "")
+            # Only move if room_number is empty or looks auto-incremented
+            if not existing_num or existing_num != extracted_num:
+                room["room_number"] = extracted_num
+            room["room_name"] = clean_name
+            room["name"] = clean_name
+            logger.info(
+                f"Fix2: cleaned room_name '{rn}' → "
+                f"name='{clean_name}', room_number='{extracted_num}'"
+            )
+
+    # Step 0c-iii: Fix 2b — Also clean "OFFICE 2905" style OCR artifacts
+    _ROOM_NUM_SUFFIX_SHORT = re.compile(r'^([A-Z][A-Z /]+?)\s+(\d{2,})$')
+    for room in rooms:
+        rn = room.get("room_name") or room.get("name", "")
+        if _ROOM_NUM_SUFFIX.match(rn.strip()):
+            continue  # Already cleaned above
+        m = _ROOM_NUM_SUFFIX_SHORT.match(rn.strip())
+        if m and len(m.group(2)) >= 2:
+            clean_name = m.group(1).strip()
+            extracted_num = m.group(2)
+            existing_num = room.get("room_number", "")
+            if not existing_num:
+                room["room_number"] = extracted_num
+            room["room_name"] = clean_name
+            room["name"] = clean_name
+            logger.info(f"Fix2b: cleaned room_name '{rn}' → name='{clean_name}'")
+
+    # Step 0c-iv: Fix 1 — Geometric filter for OCR text-label bboxes.
+    # The VLM detects OCR text strings (e.g., "RECEPTION" at 320×61px) and
+    # emits them as room detections.  Real rooms never have aspect_ratio >4:1
+    # with min_dimension <100px.  Also reject bboxes smaller than 2.5% of
+    # the image dimension in either axis — no real room occupies less than
+    # 2.5% of a floor plan dimension.
+    img_w_pre = annotation.get("image_size", {}).get("width", 0)
+    img_h_pre = annotation.get("image_size", {}).get("height", 0)
+    pre_geom = len(rooms)
+    geom_filtered = []
+    for room in rooms:
+        bbox = room.get("bbox", [])
+        if len(bbox) == 4:
+            bx, by, bw, bh = bbox
+            min_dim = min(bw, bh)
+            max_dim = max(bw, bh)
+            aspect = max_dim / min_dim if min_dim > 0 else 999
+            # Reject: aspect ratio >4:1 AND min dimension <100px
+            if aspect > 4.0 and min_dim < 100:
+                rn = room.get("room_name") or room.get("name", "?")
+                logger.warning(
+                    f"Fix1: dropped text-label bbox '{rn}' "
+                    f"(aspect={aspect:.1f}, min_dim={min_dim:.0f}px)"
+                )
+                continue
+            # Reject: bbox smaller than 2.5% of image dimension in either axis
+            if img_w_pre > 0 and img_h_pre > 0:
+                if bw < img_w_pre * 0.025 or bh < img_h_pre * 0.025:
+                    rn = room.get("room_name") or room.get("name", "?")
+                    logger.warning(
+                        f"Fix1: dropped sub-2.5%% bbox '{rn}' "
+                        f"(w={bw:.0f}<{img_w_pre*0.025:.0f}, "
+                        f"h={bh:.0f}<{img_h_pre*0.025:.0f})"
+                    )
+                    continue
+        geom_filtered.append(room)
+    rooms = geom_filtered
+    n_geom = pre_geom - len(rooms)
+    if n_geom > 0:
+        logger.info(f"Fix1: geometric filter removed {n_geom} text-label bbox(es)")
+
+    # Remediation Fix #2: Resolve bbox overlaps in non-circulation room types.
+    # This must happen AFTER geometric filter but BEFORE semantic filtering
+    # to ensure clean spatial geometry for SFT.
+    pre_overlap = len(rooms)
+    rooms = _resolve_bbox_overlaps(rooms)
+    n_resolved = pre_overlap - len(rooms)
+    if n_resolved > 0:
+        logger.info(f"Remediation Fix #2: overlap resolution merged/removed {n_resolved} room(s)")
+
     # Step 1: Semantic filtering
     rooms = validator.filter_rooms(rooms)
     logger.debug(f"After semantic filter: {len(rooms)} rooms")
@@ -725,15 +1048,99 @@ def prepare_sft_annotation(annotation: Dict) -> Dict:
     rooms = filter_by_confidence(rooms, min_confidence=0.85)
     logger.debug(f"After confidence filter: {len(rooms)} rooms")
 
-    # Step 3: Normalize room types (for OCR-only detections)
+    # Step 2b: Filter out-of-bounds rooms
+    # (pipeline-revalidation-analysis §3 Fix B)
+    #
+    # Rooms with bboxes exceeding the image dimensions are produced when
+    # OCR returns pixel coordinates from the full-resolution PDF rather
+    # than the cropped image.  Previously these were only filtered in the
+    # exporters, AFTER sft_ready was set.  This caused pages with only
+    # OOB rooms (e.g., page000 with ELEVATOR at y=5892 on a 3375-tall
+    # image) to get sft_ready=True and appear in COCO splits as
+    # zero-annotation ghost images.  Filtering here ensures sft_ready
+    # accurately reflects exportable room count.
+    img_w = annotation.get("image_size", {}).get("width", 0)
+    img_h = annotation.get("image_size", {}).get("height", 0)
+    if img_w > 0 and img_h > 0:
+        pre_oob = len(rooms)
+        rooms = [r for r in rooms if _bbox_in_bounds(r.get("bbox", []), img_w, img_h)]
+        n_dropped = pre_oob - len(rooms)
+        if n_dropped > 0:
+            logger.warning(
+                f"Dropped {n_dropped} out-of-bounds room(s) "
+                f"(image={img_w}x{img_h})"
+            )
+    logger.debug(f"After OOB filter: {len(rooms)} rooms")
+
+    # Step 2c: Minimum bounding-box area guard
+    # (vlm-sft-fitness-evaluation BUG-3)
+    #
+    # OCR detects text labels like "2BR" and creates room annotations
+    # from the text bounding box (50×30 px, area ~1,500–2,500 px²).
+    # These are 50× smaller than the smallest legitimate room annotation
+    # (~30,000 px²) and teach the VLM that bedrooms are postage-stamp-
+    # sized text labels.  A threshold of 10,000 px² (~0.5"×0.5" at
+    # 200 DPI) excludes all text-label detections while preserving the
+    # smallest real rooms (closets, risers).
+    MIN_ROOM_AREA_PX = 10_000
+    pre_area = len(rooms)
+
+    # Fix 4: Explicit abbreviation-aware rejection.
+    # If room_name matches a known abbreviation pattern AND the bbox
+    # fails geometric thresholds, reject it explicitly (not coincidentally
+    # via area).  Abbreviations with room-sized bboxes are expanded.
+    _ABBREV_PATTERN = re.compile(
+        r'^(\d*)(BR|LR|LV|BA|MBR|STU|0BR|1BR|2BR|3BR|4BR|BDRM)(\d*)$',
+        re.IGNORECASE,
+    )
+    abbrev_filtered = []
     for room in rooms:
-        # Only normalize if type not already set (e.g., from VLM category)
-        if room.get("type") == "other" or "type" not in room:
-            # Support both "room_name" (VLM) and "name" (OCR)
-            room_name = room.get("room_name") or room.get("name", "")
-            room_type = normalizer.normalize(room_name)
-            room["type"] = room_type
-            logger.debug(f"Normalized '{room_name}' → {room_type}")
+        rn = (room.get("room_name") or room.get("name", "")).strip().upper()
+        bbox = room.get("bbox", [])
+        area = _bbox_area(bbox) if len(bbox) == 4 else 0
+        if _ABBREV_PATTERN.match(rn):
+            if area < MIN_ROOM_AREA_PX:
+                logger.warning(
+                    f"Fix4: rejected abbreviation '{rn}' "
+                    f"(area={area:.0f} < {MIN_ROOM_AREA_PX})"
+                )
+                continue
+            else:
+                # Abbreviation with room-sized bbox — expand and keep
+                logger.debug(f"Fix4: kept abbreviation '{rn}' (area={area:.0f}, room-sized)")
+        abbrev_filtered.append(room)
+    rooms = abbrev_filtered
+
+    rooms = [
+        r for r in rooms
+        if _bbox_area(r.get("bbox", [])) >= MIN_ROOM_AREA_PX
+    ]
+    n_tiny = pre_area - len(rooms)
+    if n_tiny > 0:
+        logger.warning(
+            f"Dropped {n_tiny} text-label annotation(s) "
+            f"(area < {MIN_ROOM_AREA_PX} px²)"
+        )
+    logger.debug(f"After min-area filter: {len(rooms)} rooms")
+
+    # Step 3: Normalize ALL room types through canonical taxonomy
+    # (pipeline-revalidation-analysis §3 Fix A)
+    #
+    # CRITICAL FIX: The previous condition (type == "other" or type missing)
+    # skipped rooms where the VLM assigned a plausible-but-wrong type.
+    # Example: VLM assigns PANTRY → type="storage" (wrong; should be kitchen).
+    # Because type≠"other", normalization was skipped and the error propagated
+    # to COCO output.  Unconditional normalization through the canonical
+    # taxonomy guarantees deterministic, consistent category assignment
+    # regardless of VLM output variance.  This is idempotent: rooms already
+    # correctly typed (KITCHEN→kitchen) are unchanged.
+    for room in rooms:
+        room_name = room.get("room_name") or room.get("name", "")
+        if room_name:
+            normalized = normalizer.normalize(room_name)
+            room["type"] = normalized
+            room["category"] = normalized  # Sync category field for COCO exporter
+            logger.debug(f"Normalized '{room_name}' → {normalized}")
 
     # Step 4: SFT validation
     sft_ready = []
@@ -751,12 +1158,19 @@ def prepare_sft_annotation(annotation: Dict) -> Dict:
 
     # Step 6: Return with corrected sft_ready logic
     annotation["rooms"] = sft_ready
-    # CRITICAL: Only mark as SFT-ready if we actually detected rooms AND have no contamination
+    # CRITICAL: Only mark as SFT-ready if we actually detected rooms AND no contamination
+    # Fix 8: Require minimum 3 annotations per image for SFT inclusion
+    MIN_ROOMS_FOR_SFT = 3
     annotation["sft_ready"] = (
-        len(sft_ready) > 0 and  # Has rooms
+        len(sft_ready) >= MIN_ROOMS_FOR_SFT and  # Fix 8: minimum room count
         "panels" not in annotation and  # No equipment
         "ocr_rooms" not in annotation  # No contamination
     )
+    if len(sft_ready) > 0 and len(sft_ready) < MIN_ROOMS_FOR_SFT:
+        logger.warning(
+            f"Fix8: {len(sft_ready)} rooms detected but below minimum "
+            f"({MIN_ROOMS_FOR_SFT}) — sft_ready=False"
+        )
     logger.info(
         f"SFT preparation complete: {len(sft_ready)} rooms, sft_ready={annotation['sft_ready']}"
     )

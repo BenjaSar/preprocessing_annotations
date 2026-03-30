@@ -71,24 +71,66 @@ class OCRConfig:
     room_number_pattern: str = r"^(\d{3}[A-Z]?|\d{2,3})$"
 
     # Room name patterns to detect
+    # Room name patterns to detect.
+    # CRITICAL: All patterns must be anchored (^...$) so they match the
+    # complete OCR token, not a substring. Un-anchored patterns like
+    # r"ELECTRICAL\s*(ROOM)?" would match "ELECTRICAL GENERAL NOTES" and
+    # cause documentation text to leak into room candidates.
     room_name_patterns: List[str] = field(
         default_factory=lambda: [
-            r"(SUITE|OFFICE|ROOM)\s*\d*",
-            r"MECHANICAL\s*(ROOM)?",
-            r"ELECTRICAL\s*(ROOM)?",
-            r"ELEVATOR",
-            r"STAIR",
-            r"CUSTODIAL",
-            r"(MEN|WOMEN|RESTROOM)",
-            r"ENTRANCE|ENTRY|LOBBY",
-            r"CORRIDOR|HALLWAY",
-            r"RISER",
-            r"STORAGE",
-            r"CONFERENCE",
-            r"BREAK\s*ROOM",
-            r"KITCHEN",
-            r"SERVER\s*ROOM",
-            r"IDF|MDF",
+            # --- Commercial / office spaces ---
+            r"^(SUITE|OFFICE|CONFERENCE(\s+ROOM)?|MEETING(\s+ROOM)?)\s*\d*$",
+            # --- Utility / MEP rooms (require ROOM suffix or exact standalone) ---
+            r"^MECHANICAL(\s+ROOM)?$",
+            r"^ELECTRICAL(\s+ROOM)?$",
+            r"^MECHANICAL/ELECTRICAL(\s+ROOM)?$",
+            r"^SERVER(\s+ROOM)?$",
+            r"^BREAK(\s+ROOM)?$",
+            r"^MACHINE(\s+ROOM)?$",
+            r"^BOILER(\s+ROOM)?$",
+            r"^PUMP(\s+ROOM)?$",
+            r"^COMPACTOR(\s+ROOM)?$",
+            r"^FIRE\s+PUMP(\s+ROOM)?$",
+            r"^ELEVATOR(\s+MACHINE(\s+ROOM)?)?$",
+            r"^STAIR(WELL|CASE|S)?$",
+            r"^CUSTODIAL(\s+CLOSET)?$",
+            r"^JANITOR(\s+ROOM)?$",
+            # --- Sanitary / amenities ---
+            r"^(MEN|WOMEN)('?S)?\s*(RESTROOM|BATHROOM|LOCKER)?$",
+            r"^RESTROOM$",
+            r"^BATHROOM$",
+            # --- Circulation / entry ---
+            r"^(ENTRANCE|ENTRY|LOBBY|FOYER|VESTIBULE|RECEPTION)(\s+(AREA|HALL))?$",
+            r"^(CORRIDOR|HALLWAY|PASSAGE)$",
+            # --- Storage variants ---
+            r"^RISER(\s+ROOM)?$",
+            r"^STORAGE(\s+ROOM)?$",
+            r"^(BUILDING|BICYCLE|COMMERCIAL|GENERAL)\s+STORAGE$",
+            r"^(BICYCLE\s+STORAGE|BICYCLE)$",
+            # --- Telecom / data ---
+            r"^(IDF|MDF|TELECOM)(\s+ROOM)?$",
+            r"^CARPENTRY(\s+SHOP)?$",
+            r"^COMMUNITY\s+FACILITY$",
+            r"^KITCHEN$",
+            # --- Residential abbreviations (full-token only) ---
+            r"^(BR|BD|BDRM|MBR|MSTR)\s*\d?$",    # bedroom
+            r"^(0BR|1BR|2BR|3BR)$",                # unit type
+            r"^(LR|LV)$",                           # living room
+            r"^(DR|DIN)$",                          # dining room
+            r"^(KIT|K)$",                           # kitchen
+            r"^(BA|BATH|MB|PB|PDR)$",              # bathroom
+            r"^WIC$",                                # walk-in closet
+            r"^(STOR|UTIL|GAR)$",                   # storage/utility/garage
+            # --- Abbreviations present in ABBREVIATION_MAP but previously ---
+            # --- missing here, causing them to be dropped at the OCR gate ---
+            # Without these patterns, find_room_candidates() discards the token
+            # before it ever reaches AbbreviationOCRRecovery or SemanticRoomValidator.
+            r"^(FR|FAM)$",                           # family room
+            r"^(OF|OFC|OFF)$",                       # office
+            r"^(CL|CLS)$",                           # closet
+            r"^PDR$",                                 # powder room
+            r"^(CONF|STE|RECP|WC|TLT|RM)$",         # commercial
+            r"^(MECH|BSMT|UTL|LNDRY)$",             # building services
         ]
     )
 

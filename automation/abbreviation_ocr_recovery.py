@@ -4,7 +4,12 @@ Layer 2: OCR Abbreviation Recovery
 Recovers bedroom and room abbreviations from small text in apartment units.
 Uses image preprocessing (crop, enhance, upscale) to improve OCR accuracy.
 
-Targets abbreviations: BR, BR1, BR2, LR, KIT, BA, WIC, etc.
+Targets abbreviations: BR, BR1, BR2, LR, KIT, BA, WIC, FR, FAM, OF, CL, etc.
+
+The abbreviation dictionary is sourced from automation/abbreviations.py —
+the single source of truth shared with sft_validator.py.  Previously this
+class maintained its own divergent copy that was missing FR, FAM, OF, OFC,
+CL, CLS, and PDR, causing those room types to be silently dropped.
 """
 
 import logging
@@ -15,47 +20,20 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
+try:
+    from .abbreviations import ABBREVIATION_MAP
+except ImportError:
+    from abbreviations import ABBREVIATION_MAP
+
 
 class ResidentialAbbreviationRecovery:
     """Recover residential abbreviations from floor plan images."""
 
-    # Standard residential abbreviations to search for
-    RESIDENTIAL_ABBREVIATIONS = {
-        "BR": "BEDROOM",
-        "BD": "BEDROOM",
-        "BDRM": "BEDROOM",
-        "MBR": "MASTER BEDROOM",
-        "MSTR": "MASTER BEDROOM",
-        "MS": "MASTER BEDROOM",
-        "BR 1": "BEDROOM 1",
-        "BR 2": "BEDROOM 2",
-        "BR 3": "BEDROOM 3",
-        "BR1": "BEDROOM 1",
-        "BR2": "BEDROOM 2",
-        "BR3": "BEDROOM 3",
-        "1BR": "1 BEDROOM",
-        "2BR": "2 BEDROOM",
-        "3BR": "3 BEDROOM",
-        "0BR": "STUDIO",
-        "LR": "LIVING ROOM",
-        "LV": "LIVING ROOM",
-        "DR": "DINING ROOM",
-        "DIN": "DINING ROOM",
-        "KIT": "KITCHEN",
-        "K": "KITCHEN",
-        "BA": "BATHROOM",
-        "BATH": "BATHROOM",
-        "MB": "MASTER BATHROOM",
-        "PB": "POWDER BATHROOM",
-        "WIC": "WALK-IN CLOSET",
-        "LIN": "LINEN",
-        "PAN": "PANTRY",
-        "P": "PANTRY",
-        "GAR": "GARAGE",
-        "G": "GARAGE",
-        "STOR": "STORAGE",
-        "UTIL": "UTILITY",
-    }
+    # Single source of truth — imported from automation/abbreviations.py.
+    # All entries in ABBREVIATION_MAP are valid abbreviations; the name
+    # RESIDENTIAL_ABBREVIATIONS is kept for backward compatibility with
+    # callers that reference it directly (e.g., pipeline.py Step 2).
+    RESIDENTIAL_ABBREVIATIONS = ABBREVIATION_MAP
 
     @staticmethod
     def is_residential_abbreviation(text: str) -> bool:
