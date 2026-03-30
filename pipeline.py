@@ -1032,11 +1032,14 @@ class AnnotationPipeline:
         config_dict = {
             "pdf": {"dpi": self.config.pdf.dpi},
             "ocr": {
+                "backend": self.config.ocr.backend,
                 "confidence_threshold": self.config.ocr.confidence_threshold,
                 "preprocess": self.config.ocr.preprocess,
             },
             "vlm": {
+                "backend": self.config.vlm.backend,
                 "model": self.config.vlm.model,
+                "qwen_model": self.config.vlm.qwen_model,
                 "max_tokens": self.config.vlm.max_tokens,
             },
             "sam": {
@@ -1045,6 +1048,7 @@ class AnnotationPipeline:
             "pipeline": {
                 "use_vlm": self.config.use_vlm,
                 "use_sam": self.config.use_sam,
+                "use_semantic_reconciliation": self.config.use_semantic_reconciliation,
             },
         }
 
@@ -1158,6 +1162,12 @@ Examples:
              "(requires: pip install transformers torch torchvision)",
     )
     parser.add_argument(
+        "--qwen-model",
+        default="Qwen/Qwen2.5-VL-7B-Instruct",
+        help="HuggingFace model ID for Qwen2.5-VL backend "
+             "(default: Qwen/Qwen2.5-VL-7B-Instruct)",
+    )
+    parser.add_argument(
         "--use-sam", action="store_true", help="Use SAM for boundary refinement"
     )
     parser.add_argument(
@@ -1199,6 +1209,7 @@ Examples:
     config.ocr.backend = args.ocr_backend
     config.use_semantic_reconciliation = args.use_semantic_reconciliation
     config.vlm.backend = args.vlm_backend
+    config.vlm.qwen_model = args.qwen_model
 
     if args.dpi:
         config.pdf.dpi = args.dpi

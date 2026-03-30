@@ -191,7 +191,7 @@ class VLMConfig:
        - claude-opus-4-6 - Most capable (expensive)
 
     Qwen2.5-VL models:
-       - qwen/Qwen2.5-VL-7B (local, requires ~6GB VRAM at 4-bit quantization)
+       - Qwen/Qwen2.5-VL-7B-Instruct (default, local, requires ~6GB VRAM at 4-bit)
     """
 
     # VLM backend: 'claude' (API) or 'qwen' (local inference)
@@ -216,6 +216,10 @@ class VLMConfig:
 
     # Device for Qwen2.5-VL inference (auto-detected if None)
     qwen_device: Optional[str] = None
+
+    # HuggingFace model ID for Qwen2.5-VL (only used when backend='qwen')
+    # Override via --qwen-model CLI flag or set directly
+    qwen_model: str = "Qwen/Qwen2.5-VL-7B-Instruct"
 
     def __post_init__(self):
         if self.qwen_device is None:

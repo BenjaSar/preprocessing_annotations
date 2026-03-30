@@ -232,7 +232,21 @@ class Qwen2_5VLBackend(VLMBackend):
             import torch
             
             # Load model with quantization if configured
-            model_id = self.config.model or "qwen/Qwen2.5-VL-7B"
+            # Resolve model ID: prefer dedicated qwen_model field, fall back to generic model
+            # (only if it's not a Claude model ID), otherwise use default
+            _DEFAULT_QWEN_MODEL = "Qwen/Qwen2.5-VL-7B-Instruct"
+            
+            model_id = None
+            # First priority: dedicated qwen_model field (if present via Fix B)
+            if hasattr(self.config, 'qwen_model') and self.config.qwen_model:
+                model_id = self.config.qwen_model
+            # Second priority: generic model field (only if not a Claude model ID)
+            elif self.config.model and not self.config.model.startswith("claude"):
+                model_id = self.config.model
+            # Last resort: use default Qwen model
+            else:
+                model_id = _DEFAULT_QWEN_MODEL
+                logger.info(f"Using default Qwen model: {model_id}")
             
             # Configure quantization
             quantization_config = None
