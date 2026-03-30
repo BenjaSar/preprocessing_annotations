@@ -194,6 +194,7 @@ class SemanticReconciler:
         except Exception as e:
             logger.warning(f"Failed to create polygon for room {room.room_id}: {e}")
             # Fallback: return room with no matched text
+            ocr_backend = self.config.backend if self.config and hasattr(self.config, 'backend') else "unknown"
             return ReconciledRoom(
                 room_id=room.room_id,
                 polygon=room.polygon,
@@ -204,7 +205,7 @@ class SemanticReconciler:
                 confidence=room.vlm_confidence,
                 text_labels=[],
                 ocr_confidences=[],
-                provenance={"vlm": "qwen2.5-vl-7b"}
+                provenance={"ocr": ocr_backend, "vlm": "qwen2.5-vl-7b"}
             )
         
         # Find all OCR texts with centroids inside the polygon
@@ -228,6 +229,7 @@ class SemanticReconciler:
         ocr_avg_conf = sum(matched_confidences) / len(matched_confidences) if matched_confidences else 0.5
         combined_confidence = min(room.vlm_confidence, ocr_avg_conf)
         
+        ocr_backend = self.config.backend if self.config and hasattr(self.config, 'backend') else "unknown"
         return ReconciledRoom(
             room_id=room.room_id,
             polygon=room.polygon,
@@ -239,7 +241,7 @@ class SemanticReconciler:
             text_labels=matched_texts,
             ocr_confidences=matched_confidences,
             provenance={
-                "ocr": "paddleocr",
+                "ocr": ocr_backend,
                 "vlm": "qwen2.5-vl-7b",
                 "reconciler": "spatial_containment"
             }

@@ -4,10 +4,10 @@ Pillow>=9.0.0
 opencv-python>=4.6.0
 numpy>=1.21.0
 
-# OCR
-easyocr>=1.6.0
-paddlepaddle>=2.5.0  # PaddleOCR backend
-paddleocr>=2.7.0.3   # PaddleOCR wrapper
+# OCR (PaddleOCR is the default backend for better accuracy)
+paddlepaddle>=2.5.0  # PaddleOCR engine (default backend)
+paddleocr>=2.7.0.3   # PaddleOCR wrapper (default backend)
+easyocr>=1.6.0       # Optional: legacy backend (use --ocr-backend easyocr to switch)
 
 # VLM (Claude + Qwen2.5-VL)
 anthropic>=0.7.0

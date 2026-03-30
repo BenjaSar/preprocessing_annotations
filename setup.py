@@ -14,12 +14,18 @@ setup(
         "Pillow>=9.0.0",
         "opencv-python>=4.6.0",
         "numpy>=1.21.0",
-        "easyocr>=1.6.0",
+        # OCR backends
+        "paddlepaddle>=2.5.0",  # PaddleOCR engine (default OCR backend)
+        "paddleocr>=2.7.0.3",   # PaddleOCR wrapper (default OCR backend)
+        # VLM and other dependencies
         "anthropic>=0.7.0",
         "segment-anything>=1.0",
         "torch>=2.0.0",
         "torchvision>=0.15.0",
     ],
+    extras_require={
+        "easyocr": ["easyocr>=1.6.0"],  # Optional: legacy OCR backend
+    },
     entry_points={
         "console_scripts": [
             "annotate-pipeline=preprocessing_annotations.pipeline:main",

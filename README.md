@@ -5,7 +5,7 @@ A comprehensive Python package for extracting, annotating, and processing MEP (M
 ## Features
 
 - **PDF Extraction**: High-resolution rasterization (150-300 DPI) of floor plan PDFs
-- **OCR Text Detection**: Extract room labels and text using EasyOCR with preprocessing
+- **OCR Text Detection**: Extract room labels and text using PaddleOCR (default) or EasyOCR (legacy) with preprocessing
 - **Template Matching**: Multi-scale, rotation-invariant detection of electrical symbols
 - **VLM Annotation**: Zero-shot annotation using Claude (Vision Language Model)
 - **SAM Segmentation**: Precise room boundary refinement using Segment Anything Model

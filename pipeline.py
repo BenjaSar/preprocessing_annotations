@@ -415,7 +415,7 @@ class AnnotationPipeline:
             try:
                 # 2a: Standard OCR room detection (compound merging + number linking built-in).
                 # extract_and_find_rooms now returns (candidates, raw_detections) to avoid
-                # running EasyOCR twice — raw_detections are reused for abbreviation recovery.
+                # running OCR twice — raw_detections are reused for abbreviation recovery.
                 rooms, raw_detections = self.ocr_extractor.extract_and_find_rooms(img_path)
                 recovered_abbrevs: List[RoomCandidate] = []
                 for det in raw_detections:
@@ -1144,9 +1144,9 @@ Examples:
     parser.add_argument(
         "--ocr-backend",
         choices=["easyocr", "paddleocr"],
-        default="easyocr",
-        help="OCR backend to use. Default: easyocr. Use 'paddleocr' for improved "
-             "accuracy (requires: pip install paddlepaddle paddleocr)",
+        default="paddleocr",
+        help="OCR backend to use. Default: paddleocr. Use 'easyocr' for legacy "
+             "backend (requires: pip install easyocr)",
     )
     parser.add_argument(
         "--use-semantic-reconciliation",

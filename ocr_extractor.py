@@ -2,7 +2,8 @@
 OCR text extraction module for MEP floor plans.
 
 This module extracts room labels, panel identifiers, and other text
-from floor plan images using EasyOCR with optional preprocessing.
+from floor plan images using a configurable OCR backend (PaddleOCR by default)
+with optional preprocessing. Supports both PaddleOCR (default) and EasyOCR (legacy).
 """
 
 import logging

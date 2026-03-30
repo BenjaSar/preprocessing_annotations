@@ -60,10 +60,10 @@ class PDFConfig:
 class OCRConfig:
     """Configuration for OCR text extraction."""
 
-    # OCR backend selection: 'easyocr' (default) or 'paddleocr' (recommended)
-    # 'easyocr' is the default for backward compatibility (already in requirements.txt)
-    # 'paddleocr' uses PaddleOCR v3 for better accuracy and speed (opt-in via --ocr-backend)
-    backend: str = "easyocr"
+    # OCR backend selection: 'paddleocr' (default) or 'easyocr' (legacy)
+    # 'paddleocr' is the default for better accuracy and speed
+    # 'easyocr' is available as a legacy option via --ocr-backend easyocr
+    backend: str = "paddleocr"
 
     # Languages for OCR
     languages: List[str] = field(default_factory=lambda: ["en"])
