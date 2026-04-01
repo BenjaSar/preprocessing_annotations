@@ -27,7 +27,8 @@ try:
     from .automation import (
         LabelNormalizer, QualityChecker, RegionExtractor,
         ImageResizer, SemanticRoomValidator, TaxonomyNormalizer,
-        filter_by_confidence, validate_for_sft, prepare_sft_annotation
+        filter_by_confidence, validate_for_sft, prepare_sft_annotation,
+        SFTAnnotationBuilder, build_annotation_json
     )
     from .automation.abbreviation_ocr_recovery import (
         AbbreviationOCRRecovery, ResidentialAbbreviationRecovery
@@ -44,7 +45,8 @@ except ImportError:
     from automation import (
         LabelNormalizer, QualityChecker, RegionExtractor,
         ImageResizer, SemanticRoomValidator, TaxonomyNormalizer,
-        filter_by_confidence, validate_for_sft, prepare_sft_annotation
+        filter_by_confidence, validate_for_sft, prepare_sft_annotation,
+        SFTAnnotationBuilder, build_annotation_json
     )
     from automation.abbreviation_ocr_recovery import (
         AbbreviationOCRRecovery, ResidentialAbbreviationRecovery
@@ -121,6 +123,9 @@ class AnnotationPipeline:
         self._label_normalizer = None
         self._quality_checker = None
         self._region_extractor = None
+        
+        # Initialize SFT annotation builder (used for mandatory schema output)
+        self.sft_builder = SFTAnnotationBuilder()
 
     @property
     def pdf_extractor(self) -> PDFExtractor:
