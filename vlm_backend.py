@@ -160,25 +160,39 @@ class ClaudeBackend(VLMBackend):
             return []
     
     def _build_room_detection_prompt(self) -> str:
-        """Build prompt for room detection."""
-        return """Analyze this architectural floor plan and identify all rooms and spaces.
+        """
+        Build prompt for room detection using mandatory SFT taxonomy.
+        
+        Uses VLM_PROMPT_CATEGORIES from automation.taxonomy for consistent
+        room type vocabulary across all VLM backends.
+        """
+        from automation.taxonomy import VLM_PROMPT_CATEGORIES, get_vlm_categories_string
+        
+        categories_str = get_vlm_categories_string()
+        
+        return f"""Analyze this architectural floor plan and identify all rooms and spaces.
 
 For each room or space visible, return a JSON object with:
-{
+{{
     "room_id": "unique identifier like room_0, room_1",
-    "room_type": "bedroom | bathroom | kitchen | living_room | dining_room | office | mechanical | electrical | storage | corridor | lobby | laundry | closet | garage | other",
-    "room_name": "extracted room name or label, expand abbreviations",
+    "room_type": "{categories_str}",
+    "room_name": "extracted room name or label from the plan",
     "bbox": [x1, y1, x2, y2] as percentage of image dimensions (0-100),
     "confidence": 0.0-1.0 confidence in detection,
-    "metadata": {}
-}
+    "metadata": {{}}
+}}
 
-Rules:
-- Only include rooms/spaces/areas. Exclude legends, title blocks, schedules, notes.
-- Expand all abbreviations using architectural conventions (BR→Bedroom, KIT→Kitchen).
+Office Classification Rules:
+- For office spaces: classify as PRIVATE OFFICE if visually enclosed with walls/doors, 
+  or OPEN OFFICE if it's part of an open floor plan with shared/common areas.
+- If unclear, assume OPEN OFFICE (more common in modern designs).
+
+General Rules:
+- Only include rooms/spaces/areas. Exclude legends, title blocks, schedules, notes, and title sheets.
+- Preserve original room labels and numbers from the plan (do NOT expand abbreviations).
 - Return valid JSON array only, no markdown or explanation.
 
-Return ONLY a JSON array, e.g.: [{"room_id": "room_0", "room_type": "bedroom", ...}, ...]"""
+Return ONLY a JSON array, e.g.: [{"room_id": "room_0", "room_type": "CONFERENCE", ...}, ...]"""
     
     def _parse_room_response(self, response_text: str) -> List[Dict[str, Any]]:
         """Parse JSON response from Claude."""
@@ -326,27 +340,40 @@ class Qwen2_5VLBackend(VLMBackend):
             rooms = self._parse_room_response(response_text)
             return rooms
             
-        except Exception as e:
+         except Exception as e:
             logger.error(f"Qwen2.5-VL inference failed: {e}")
             return []
-    
+     
     def _build_room_detection_prompt(self) -> str:
-        """Build prompt for room detection."""
-        return """Analyze this architectural floor plan image and identify all rooms and spaces.
+        """
+        Build prompt for room detection using mandatory SFT taxonomy.
+        
+        Uses VLM_PROMPT_CATEGORIES from automation.taxonomy for consistent
+        room type vocabulary across all VLM backends.
+        """
+        from automation.taxonomy import VLM_PROMPT_CATEGORIES, get_vlm_categories_string
+        
+        categories_str = get_vlm_categories_string()
+        
+        return f"""Analyze this architectural floor plan image and identify all rooms and spaces.
 
 For each room, extract:
-- room_type: bedroom, bathroom, kitchen, living_room, dining_room, office, mechanical, electrical, storage, corridor, lobby, laundry, closet, garage, other
-- room_name: extracted label, expand abbreviations (BR→Bedroom, KIT→Kitchen)
+- room_type: {categories_str}
+- room_name: extracted label from the plan (preserve original, do NOT expand)
 - approximate bbox coordinates as [x1, y1, x2, y2] where 0-100 is image dimensions
 
+Office Classification:
+- PRIVATE OFFICE: visually enclosed spaces with walls/doors for individual use
+- OPEN OFFICE: shared open floor plans without individual enclosures
+
 Return ONLY a JSON array, no markdown:
-[{"room_id": "room_0", "room_type": "bedroom", "room_name": "Bedroom 1", "bbox": [10, 20, 40, 50], "confidence": 0.95}, ...]
+[{{"room_id": "room_0", "room_type": "CONFERENCE", "room_name": "Conf Rm A", "bbox": [10, 20, 40, 50], "confidence": 0.95}}, ...]
 
 Rules:
-- Only rooms/spaces; exclude legends, notes, schedules
-- Expand all abbreviations
+- Only rooms/spaces; exclude legends, notes, schedules, title blocks
+- Preserve original labels; do NOT expand abbreviations
 - Return valid JSON only"""
-    
+     
     def _parse_room_response(self, response_text: str) -> List[Dict[str, Any]]:
         """Parse JSON response from Qwen2.5-VL."""
         try:
@@ -536,25 +563,38 @@ class UnslothQwenBackend(VLMBackend):
             rooms = self._parse_room_response(response_text)
             return rooms
         
-        except Exception as e:
+         except Exception as e:
             logger.error(f"Unsloth Qwen inference failed: {e}")
             return []
-    
+     
     def _build_room_detection_prompt(self) -> str:
-        """Build prompt for room detection."""
-        return """Analyze this architectural floor plan image and identify all rooms and spaces.
+        """
+        Build prompt for room detection using mandatory SFT taxonomy.
+        
+        Uses VLM_PROMPT_CATEGORIES from automation.taxonomy for consistent
+        room type vocabulary across all VLM backends.
+        """
+        from automation.taxonomy import VLM_PROMPT_CATEGORIES, get_vlm_categories_string
+        
+        categories_str = get_vlm_categories_string()
+        
+        return f"""Analyze this architectural floor plan image and identify all rooms and spaces.
 
 For each room, extract:
-- room_type: bedroom, bathroom, kitchen, living_room, dining_room, office, mechanical, electrical, storage, corridor, lobby, laundry, closet, garage, other
-- room_name: extracted label, expand abbreviations (BR→Bedroom, KIT→Kitchen)
+- room_type: {categories_str}
+- room_name: extracted label from the plan (preserve original, do NOT expand)
 - approximate bbox coordinates as [x1, y1, x2, y2] where 0-100 is image dimensions
 
+Office Classification:
+- PRIVATE OFFICE: visually enclosed spaces with walls/doors for individual use
+- OPEN OFFICE: shared open floor plans without individual enclosures
+
 Return ONLY a JSON array, no markdown:
-[{"room_id": "room_0", "room_type": "bedroom", "room_name": "Bedroom 1", "bbox": [10, 20, 40, 50], "confidence": 0.95}, ...]
+[{{"room_id": "room_0", "room_type": "CONFERENCE", "room_name": "Conf Rm A", "bbox": [10, 20, 40, 50], "confidence": 0.95}}, ...]
 
 Rules:
-- Only rooms/spaces; exclude legends, notes, schedules
-- Expand all abbreviations
+- Only rooms/spaces; exclude legends, notes, schedules, title blocks
+- Preserve original labels; do NOT expand abbreviations
 - Return valid JSON only"""
     
     def _parse_room_response(self, response_text: str) -> List[Dict[str, Any]]:

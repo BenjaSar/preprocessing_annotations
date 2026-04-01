@@ -339,29 +339,14 @@ class AbbreviationOCRRecovery:
 
     @staticmethod
     def _map_category(room_name: str) -> str:
-        """Map expanded room name to standard category."""
-        name_upper = room_name.upper()
-
-        if "BEDROOM" in name_upper:
-            return "bedroom"
-        elif "LIVING" in name_upper:
-            return "living_room"
-        elif "DINING" in name_upper:
-            return "dining_room"
-        elif "KITCHEN" in name_upper:
-            return "kitchen"
-        elif "BATHROOM" in name_upper or "BATH" in name_upper:
-            return "restroom"
-        elif "CLOSET" in name_upper:
-            return "closet"
-        elif "PANTRY" in name_upper:
-            return "pantry"
-        elif "GARAGE" in name_upper:
-            return "garage"
-        elif "STUDIO" in name_upper:
-            return "studio"
-        else:
-            return "other"
+        """
+        Map expanded room name to mandatory SFT category.
+        
+        Uses the new taxonomy.normalize_to_mandatory() function
+        to ensure consistent classification across the pipeline.
+        """
+        from automation.taxonomy import normalize_to_mandatory
+        return normalize_to_mandatory(room_name)
 
 
 if __name__ == "__main__":

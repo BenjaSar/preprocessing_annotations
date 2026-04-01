@@ -367,64 +367,12 @@ SemanticRoomValidator._KW_PATTERN = re.compile(
 
 
 class TaxonomyNormalizer:
-    """Normalize room names to standard taxonomy."""
+     """Normalize room names to SFT mandatory taxonomy."""
 
     # Single source of truth — imported from abbreviations.py.
     # Previously a separate dict that diverged from SemanticRoomValidator
     # and ResidentialAbbreviationRecovery.
     ABBREVIATION_EXPANSIONS = _ABBREVIATION_MAP
-
-    STANDARD_TAXONOMY = {
-        "office": [
-            "OFFICE", "EXECUTIVE OFFICE", "INDIVIDUAL OFFICE", "OFFICE SUITE"
-        ],
-        "conference_room": [
-            "CONFERENCE ROOM", "CONFERENCE", "MEETING ROOM", "MEETING"
-        ],
-        "restroom": [
-            "BATHROOM", "RESTROOM", "MEN'S BATHROOM", "WOMEN'S BATHROOM",
-            "MEN'S FACULTY", "WOMEN'S FACULTY", "TOILET", "WC", "MEN'S BATHROO",
-            "POWDER ROOM"  # From abbreviation PDR
-        ],
-        "storage": ["STORAGE", "STORAGE ROOM", "STORE"],
-        "lobby": [
-            "LOBBY", "RECEPTION", "ENTRANCE", "FOYER", "RECEPTION AREA",
-            "ENTRANCE VESTIBULE"
-        ],
-        "hallway": [
-            "HALLWAY", "CORRIDOR", "PASSAGE", "WALK", "THE OUTLINED CORRIDOR"
-        ],
-        "elevator": ["ELEVATOR", "LIFT"],
-        "stairwell": ["STAIRWELL", "STAIRS", "STAIR", "STAIRCASE"],
-        "mechanical": ["MECHANICAL ROOM", "MECHANICAL", "MECH ROOM"],
-        "electrical": ["ELECTRICAL ROOM", "ELECTRICAL"],
-        "carpentry": ["CARPENTRY", "CARPENTRY SHOP", "WOOD SHOP"],
-        "bedroom": ["BEDROOM", "MASTER BEDROOM"],  # From abbreviations BR, BDRM, MBR
-        "living_room": ["LIVING ROOM"],  # From abbreviation LR
-        "dining_room": ["DINING ROOM"],  # From abbreviations DR, DIN
-        "kitchen": ["KITCHEN"],  # From abbreviations KIT, K
-        "family_room": ["FAMILY ROOM"],  # From abbreviations FR, FAM
-        "laundry": ["LAUNDRY", "UTILITY"],  # From abbreviations LNDRY, UTL
-        "garage": ["GARAGE"],  # From abbreviations GAR, G
-        "closet": ["CLOSET", "WALK-IN CLOSET", "LINEN CLOSET"],  # From abbreviations CL, WIC, LIN
-        "pantry": ["PANTRY"],  # From abbreviation PAN, P
-        "workshop": ["WORKSHOP", "SHOP"],  # From abbreviation SHOP
-        # Phase 3 Fix #5: New room types for Phase 2 keywords
-        "suite": ["SUITE"],
-        "telecom": ["TELECOM", "TELECOM ROOM"],
-        "machine_room": ["MACHINE", "MACHINE ROOM"],
-        "boiler": ["BOILER", "BOILER ROOM"],
-        "pump_room": ["PUMP", "PUMP ROOM"],
-        "janitor": ["JANITOR", "JANITOR ROOM"],
-        "bicycle_storage": ["BICYCLE", "BICYCLE STORAGE"],
-        "compactor": ["COMPACTOR", "COMPACTOR ROOM"],
-        "cctv": ["CCTV", "CCTV ROOM"],
-        "art_room": ["ART", "ART ROOM"],
-        "music_room": ["MUSIC", "MUSIC ROOM"],
-        "study_room": ["STUDY", "STUDY ROOM"],
-        "reading_room": ["READING", "READING ROOM"],
-        "other": ["ROOM", "SPACE", "AREA", "ACEMENT"]
-    }
 
     def _expand_abbreviation(self, name: str) -> str:
         """
@@ -534,38 +482,6 @@ def filter_by_confidence(rooms: List[Dict], min_confidence: float = 0.85,
             )
 
     return result
-
-
-def _normalize_category(category: str) -> str:
-    """
-    Normalize VLM category names to canonical forms.
-
-    CRITICAL FIX #1: VLM outputs full category names with suffixes (mechanical_room, electrical_room, etc.)
-    but validation expects short canonical forms (mechanical, electrical, etc.).
-    This normalization ensures VLM output matches the validation whitelist.
-
-    Args:
-        category: Raw category from VLM or taxonomy normalizer
-
-    Returns:
-        Normalized category name matching whitelist
-    """
-    category_normalization = {
-        # VLM full names → canonical forms
-        "mechanical_room": "mechanical",
-        "electrical_room": "electrical",
-        "hallway_corridor": "hallway",
-        "lobby_reception": "lobby",
-        "elevator_lift": "elevator",
-        "stairwell_stairs": "stairwell",
-        "storage_room": "storage",
-        "break_room": "breakroom",
-        "cafeteria": "cafe",
-        "administrative": "office",
-    }
-    normalized = category_normalization.get(category.lower(), category.lower())
-    logger.debug(f"Normalized category: '{category}' → '{normalized}'")
-    return normalized
 
 
 def validate_for_sft(room: Dict) -> Tuple[bool, Dict[str, bool]]:

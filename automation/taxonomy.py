@@ -1,101 +1,162 @@
 """
-Canonical Room Taxonomy — Single Source of Truth.
+Mandatory SFT Taxonomy — Single Source of Truth.
 
-ALL room type lists, normalisation maps, and category whitelists in the
-pipeline import from here.  This eliminates the four previously diverging
-independent lists that caused:
-  - 25 types produced by TaxonomyNormalizer not recognised by QualityChecker
-  - 13 VLM output categories silently collapsing to "other"
-  - LabelNormalizer using "mechanical_room" while TaxonomyNormalizer used "mechanical"
+Implements the standardized 31-class room taxonomy required for Vision-Language
+Model fine-tuning, while preserving fine-grained residential/utility classification
+via extended_type for non-SFT use cases.
+
+ALL room type mappings throughout the pipeline import from here.
+
+Window/skylight/opening variants (e.g., "CONFERENCE w/ windows") are NOT
+determined by text matching — they are computed by spatial intersection of
+detected windows with room bboxes (see window_detector.py).
 
 Usage
 -----
-    from automation.taxonomy import CANONICAL_TYPES, VALID_TYPES, VLM_CATEGORY_MAP, normalize_room_type
+    from automation.taxonomy import MANDATORY_CLASSES, VALID_TYPES, EXTENDED_TYPES
+    from automation.taxonomy import normalize_to_mandatory, get_extended_type
+
+    # For SFT output (mandatory taxonomy only)
+    mandatory_type = normalize_to_mandatory("CONFERENCE ROOM")  # → "CONFERENCE"
+
+    # For extended classification (backward compatibility)
+    extended_type = get_extended_type("CONFERENCE ROOM")  # → "conference_room"
 """
 
-from typing import Dict, List, Set, Optional
-import re
+from typing import Dict, List, Set, Optional, NamedTuple
 import logging
 
 logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Master taxonomy
+# Mandatory Taxonomy: Base Classes for SFT Training
 # ---------------------------------------------------------------------------
-# Key   = canonical type name (used in all annotation JSON files as "type")
-# Value = list of surface-form strings that map to this canonical type.
-#         Matching is case-insensitive exact match first, then fuzzy fallback.
+# These are the ONLY types allowed in the "type" field of SFT-ready output.
+# Window/skylight/opening variants are applied as post-processing suffixes.
 # ---------------------------------------------------------------------------
-CANONICAL_TYPES: Dict[str, List[str]] = {
-    # ── Commercial / office ─────────────────────────────────────────────────
-    "office": [
-        "OFFICE", "EXECUTIVE OFFICE", "INDIVIDUAL OFFICE", "PRIVATE OFFICE",
-        "OFFICE SUITE", "OFFICE SPACE", "WORK SPACE", "WORKSTATION",
-        "OPEN PLAN WORKSPACE", "OPEN OFFICE", "CUBICLE", "CUBICLE WORKSTATION",
-        "ADMINISTRATIVE", "FACULTY OFFICE",
+
+MANDATORY_CLASSES: Dict[str, List[str]] = {
+    # ── Office ──────────────────────────────────────────────────────────────
+    "PRIVATE OFFICE": [
+        "PRIVATE OFFICE", "PRIVATE", "INDIVIDUAL OFFICE",
+        "EXECUTIVE OFFICE", "FACULTY OFFICE", "PERSONAL OFFICE",
     ],
-    "conference_room": [
-        "CONFERENCE ROOM", "CONFERENCE", "MEETING ROOM", "MEETING",
-        "BOARDROOM", "BOARD ROOM", "TRAINING ROOM", "BREAKOUT SPACE",
-        "BREAKOUT ROOM", "CONF ROOM",
-    ],
-    "suite": [
-        "SUITE", "OFFICE SUITE",
+    "OPEN OFFICE": [
+        "OPEN OFFICE", "OPEN PLAN", "OPEN PLAN WORKSPACE",
+        "OPEN WORKSPACE", "BULLPEN", "OPEN FLOOR",
     ],
 
-    # ── Circulation ──────────────────────────────────────────────────────────
-    "lobby": [
-        "LOBBY", "RECEPTION", "RECEPTION AREA", "ENTRANCE", "ENTRY",
-        "ENTRANCE VESTIBULE", "ENTRY AREA", "FOYER", "VESTIBULE",
-        "LOBBY RECEPTION",
-        # Elevator lobby is a waiting area adjacent to elevator shafts,
-        # not an elevator shaft itself. Moved from "elevator" per BUG-4.
-        "ELEVATOR LOBBY",
-        # Waiting areas are functionally reception/lobby spaces
-        # (common in supportive housing, medical offices, government buildings)
-        "WAITING ROOM", "WAITING", "WAITING AREA",
+    # ── Meeting/Conference ──────────────────────────────────────────────────
+    "CONFERENCE": [
+        "CONFERENCE ROOM", "CONFERENCE", "BOARDROOM", "BOARD ROOM",
     ],
-    "hallway": [
-        "HALLWAY", "CORRIDOR", "PASSAGE", "WALKWAY", "CIRCULATION",
-        "HALLWAY/CORRIDOR", "HALL",
+    "MEETING": [
+        "MEETING ROOM", "MEETING", "BREAKOUT ROOM", "BREAKOUT SPACE",
     ],
-    "elevator": [
-        "ELEVATOR", "ELEVATOR CORE", "ELEVATOR AREA",
-        "LIFT", "ELEVATOR MACHINE ROOM",
+    "MULTIPURPOSE ROOM": [
+        "MULTIPURPOSE ROOM", "MULTI-PURPOSE", "COMMUNITY ROOM",
+        "AMENITY ROOM", "FLEXIBLE SPACE", "WORKSHOP",
     ],
-    "stairwell": [
+
+    # ── Education ───────────────────────────────────────────────────────────
+    "CLASSROOM": [
+        "CLASSROOM", "CLASS ROOM", "LAB", "LABORATORY",
+        "COMPUTER LAB", "SCIENCE LAB",
+    ],
+    "LECTURE HALL": [
+        "LECTURE HALL", "AUDITORIUM", "THEATER", "THEATRE",
+        "ASSEMBLY ROOM",
+    ],
+    "TRAINING ROOM": [
+        "TRAINING ROOM", "TRAINING", "INSTRUCTION ROOM",
+    ],
+
+    # ── Food Service ────────────────────────────────────────────────────────
+    "RESTAURANT": [
+        "RESTAURANT", "DINING HALL", "DINING ROOM", "DINING",
+        "RESTAURANT DINING",
+    ],
+    "CAFETERIA": [
+        "CAFETERIA", "CAFE", "BREAK ROOM", "BREAKROOM",
+        "KITCHEN", "KITCHENETTE", "PANTRY", "BREAK AREA",
+    ],
+
+    # ── Retail ──────────────────────────────────────────────────────────────
+    "RETAIL": [
+        "RETAIL", "RETAIL SPACE", "SHOP", "STORE",
+        "COMMERCIAL SPACE", "SHOWROOM",
+    ],
+
+    # ── Circulation ─────────────────────────────────────────────────────────
+    "LOBBY": [
+        "LOBBY", "RECEPTION", "FOYER", "VESTIBULE", "ENTRANCE",
+        "ENTRY", "ENTRY AREA", "ENTRANCE VESTIBULE",
+        "WAITING ROOM", "WAITING AREA",
+    ],
+    "CORRIDOR": [
+        "CORRIDOR", "HALLWAY", "PASSAGE", "WALKWAY", "HALL",
+        "CIRCULATION", "HALLWAY/CORRIDOR",
+    ],
+
+    # ── Sanitary ────────────────────────────────────────────────────────────
+    "RESTROOM": [
+        "RESTROOM", "BATHROOM", "TOILET", "WC", "LAVATORY",
+        "POWDER ROOM", "MEN'S RESTROOM", "WOMEN'S RESTROOM",
+    ],
+
+    # ── Vertical Circulation ────────────────────────────────────────────────
+    "STAIRWELL": [
         "STAIRWELL", "STAIR", "STAIRS", "STAIRCASE",
         "EMERGENCY STAIRS", "EXIT STAIRS", "FIRE STAIR",
     ],
 
-    # ── Sanitary ─────────────────────────────────────────────────────────────
-    "restroom": [
-        "RESTROOM", "BATHROOM", "MEN'S RESTROOM", "WOMEN'S RESTROOM",
-        "MEN'S BATHROOM", "WOMEN'S BATHROOM", "MEN'S LOCKER",
-        "WOMEN'S LOCKER", "TOILET", "WC", "POWDER ROOM", "LAVATORY",
-        "MEN'S BATHROO",  # common OCR truncation
+    # ── Storage ─────────────────────────────────────────────────────────────
+    "STORAGE ROOM": [
+        "STORAGE", "STORAGE ROOM", "STOREROOM", "STORE ROOM",
+        "SUPPLY ROOM", "ARCHIVES", "FILE ROOM",
+    ],
+    "JANITOR CLOSET": [
+        "JANITOR", "JANITOR CLOSET", "JANITOR ROOM",
+        "CUSTODIAL CLOSET", "CLEANING CLOSET", "CUSTODIAN",
     ],
 
-    # ── Food / break ─────────────────────────────────────────────────────────
-    "kitchen": [
-        "KITCHEN", "BREAK ROOM", "BREAKROOM", "KITCHEN BREAK ROOM",
-        "KITCHENETTE", "PANTRY", "CAFE", "CAFETERIA", "DINING",
-        "DINING ROOM",
+    # ── MEP ─────────────────────────────────────────────────────────────────
+    "ELECTRICAL ROOM": [
+        "ELECTRICAL ROOM", "ELECTRICAL", "ELECTRIC ROOM",
+        "ELECTRICAL/MECHANICAL ROOM", "TELECOM ROOM", "RISER",
+        "SERVER ROOM", "DATA CENTER", "NETWORK ROOM",
     ],
 
-    # ── Utility / MEP rooms ──────────────────────────────────────────────────
+    # ── Athletic ────────────────────────────────────────────────────────────
+    "GYMNASIUM": [
+        "GYMNASIUM", "GYM", "FITNESS CENTER", "EXERCISE ROOM",
+    ],
+
+    # ── Parking ─────────────────────────────────────────────────────────────
+    "PARKING GARAGE": [
+        "PARKING GARAGE", "PARKING", "GARAGE", "PARKING STRUCTURE",
+    ],
+
+    # ── Industrial ──────────────────────────────────────────────────────────
+    "WAREHOUSE": [
+        "WAREHOUSE", "LOADING DOCK", "RECEIVING", "WAREHOUSE SPACE",
+    ],
+}
+
+# ---------------------------------------------------------------------------
+# Extended Taxonomy: Fine-grained room types for non-SFT output
+# ---------------------------------------------------------------------------
+# These types are used when preserving backward compatibility or detailed
+# classification beyond the SFT mandatory set (e.g., for internal analytics).
+# These are NOT allowed in the "type" field of SFT-ready output.
+# ---------------------------------------------------------------------------
+
+EXTENDED_TYPES: Dict[str, List[str]] = {
+    # ── MEP (not in mandatory taxonomy) ──────────────────────────────────────
     "mechanical": [
-        "MECHANICAL ROOM", "MECHANICAL", "MECH ROOM", "MECHANICAL/ELECTRICAL ROOM",
-        "HVAC ROOM", "BUILDING SYSTEMS",
-    ],
-    "electrical": [
-        "ELECTRICAL ROOM", "ELECTRICAL", "ELECTRICAL/MECHANICAL ROOM",
-        "ELECTRIC ROOM",
-    ],
-    "server_room": [
-        "SERVER ROOM", "SERVER", "DATA CENTER", "IDF", "MDF",
-        "TELECOM ROOM", "TELECOM", "NETWORK ROOM", "IT ROOM",
+        "MECHANICAL ROOM", "MECHANICAL", "MECH ROOM",
+        "MECHANICAL/ELECTRICAL ROOM", "HVAC ROOM", "BUILDING SYSTEMS",
     ],
     "machine_room": [
         "MACHINE ROOM", "MACHINE", "ELEVATOR MACHINE ROOM",
@@ -109,54 +170,26 @@ CANONICAL_TYPES: Dict[str, List[str]] = {
     "compactor": [
         "COMPACTOR ROOM", "COMPACTOR", "TRASH ROOM", "REFUSE ROOM",
     ],
-    "custodial": [
-        "CUSTODIAL", "CUSTODIAL CLOSET", "JANITOR", "JANITOR ROOM",
-        "JANITOR CLOSET", "CLEANING CLOSET",
-    ],
     "riser": [
-        "RISER ROOM", "RISER", "PIPE CHASE",
+        "RISER ROOM", "PIPE CHASE",
     ],
 
-    # ── Storage ──────────────────────────────────────────────────────────────
-    "storage": [
-        "STORAGE", "STORAGE ROOM", "STORE ROOM", "STOREROOM",
-        "BUILDING STORAGE", "COMMERCIAL STORAGE", "GENERAL STORAGE",
-        "SUPPLY ROOM", "ARCHIVES", "FILE ROOM", "CLOSET",
-        "LINEN CLOSET", "WALK-IN CLOSET",
-        # Fix 3: Compound slash-delimited names preserved intact
-        "IT/STORAGE/CONFERENCE", "IT/STORAGE",
+    # ── Circulation (not in mandatory taxonomy) ──────────────────────────────
+    "elevator": [
+        "ELEVATOR", "ELEVATOR CORE", "ELEVATOR AREA",
+        "LIFT", "ELEVATOR MACHINE ROOM",
     ],
+
+    # ── Storage variants (beyond mandatory) ──────────────────────────────────
     "bicycle_storage": [
         "BICYCLE STORAGE", "BICYCLE ROOM", "BICYCLE", "BIKE STORAGE",
         "BIKE ROOM",
     ],
 
-    # ── Specialised commercial ────────────────────────────────────────────────
-    "auditorium": [
-        "AUDITORIUM", "LECTURE HALL", "THEATER", "THEATRE",
-        "ASSEMBLY ROOM",
-    ],
-    "classroom": [
-        "CLASSROOM", "CLASS ROOM", "LAB", "LABORATORY",
-        "COMPUTER LAB", "SCIENCE LAB",
-    ],
-    "carpentry": [
-        "CARPENTRY", "CARPENTRY SHOP", "WORKSHOP", "WOOD SHOP", "SHOP",
-    ],
-    "community_facility": [
-        "COMMUNITY FACILITY", "COMMUNITY ROOM", "AMENITY",
-    ],
-    "cctv": [
-        "CCTV ROOM", "CCTV", "SECURITY ROOM", "SECURITY",
-    ],
-
-    # ── Residential ──────────────────────────────────────────────────────────
+    # ── Residential (not in mandatory taxonomy) ─────────────────────────────
     "bedroom": [
         "BEDROOM", "MASTER BEDROOM", "BEDROOM 1", "BEDROOM 2", "BEDROOM 3",
         "1 BEDROOM", "2 BEDROOM", "3 BEDROOM",
-        # Abbreviations — declared here so _SURFACE_TO_CANONICAL catches them
-        # at Step 3 (exact match) BEFORE the substring scan reaches
-        # conference_room, whose surface form "BREAKOUT SPACE" contains "BR".
         "BR", "BR1", "BR2", "BR3",
         "MBR", "MSTR BR", "MSTR", "BDRM",
         "1BR", "2BR", "3BR", "4BR",
@@ -165,7 +198,6 @@ CANONICAL_TYPES: Dict[str, List[str]] = {
     ],
     "living_room": [
         "LIVING ROOM", "LIVING", "GREAT ROOM", "FAMILY ROOM",
-        # Abbreviations
         "LR", "LV", "LVG",
         "LIVING RM", "LIV ROOM",
     ],
@@ -177,11 +209,21 @@ CANONICAL_TYPES: Dict[str, List[str]] = {
     ],
     "studio": [
         "STUDIO", "STUDIO APARTMENT",
-        # 0-bedroom unit = studio
         "0BR", "0 BR",
     ],
 
-    # ── Catch-all ─────────────────────────────────────────────────────────────
+    # ── Specialized (not in mandatory taxonomy) ──────────────────────────────
+    "carpentry": [
+        "CARPENTRY", "CARPENTRY SHOP", "WOOD SHOP", "SHOP",
+    ],
+    "community_facility": [
+        "COMMUNITY FACILITY", "COMMUNITY CENTER",
+    ],
+    "cctv": [
+        "CCTV ROOM", "CCTV", "SECURITY ROOM", "SECURITY",
+    ],
+
+    # ── Fallback ────────────────────────────────────────────────────────────
     "other": [
         "ROOM", "SPACE", "AREA", "MISC", "OTHER",
         "UNKNOWN", "UNDEFINED",
@@ -189,172 +231,336 @@ CANONICAL_TYPES: Dict[str, List[str]] = {
 }
 
 # ---------------------------------------------------------------------------
-# Derived lookup structures (computed once at import time)
+# Lookup structures (computed at import time)
 # ---------------------------------------------------------------------------
 
-# Flat set of all valid canonical type names — used by QualityChecker whitelist
-VALID_TYPES: Set[str] = set(CANONICAL_TYPES.keys())
+# Flat set of valid mandatory class names (for SFT output validation)
+VALID_TYPES: Set[str] = set(MANDATORY_CLASSES.keys())
 
-# Reverse map: surface form (uppercase) → canonical type
-_SURFACE_TO_CANONICAL: Dict[str, str] = {}
-for _canonical, _variants in CANONICAL_TYPES.items():
+# Flat set of valid extended class names
+EXTENDED_ONLY_TYPES: Set[str] = set(EXTENDED_TYPES.keys())
+
+# Reverse map: surface form (uppercase) → mandatory class
+_SURFACE_TO_MANDATORY: Dict[str, str] = {}
+for _mandatory, _variants in MANDATORY_CLASSES.items():
     for _v in _variants:
-        _SURFACE_TO_CANONICAL[_v.upper()] = _canonical
+        _SURFACE_TO_MANDATORY[_v.upper()] = _mandatory
+
+# Reverse map: surface form (uppercase) → extended class
+_SURFACE_TO_EXTENDED: Dict[str, str] = {}
+for _extended, _variants in EXTENDED_TYPES.items():
+    for _v in _variants:
+        _SURFACE_TO_EXTENDED[_v.upper()] = _extended
 
 # ---------------------------------------------------------------------------
-# VLM output category → canonical type
+# VLM output category → mandatory type mapping
 # ---------------------------------------------------------------------------
-# Claude's VLM prompt uses its own category vocabulary.  This map translates
-# VLM outputs to canonical types so they survive normalisation unchanged.
+# Translates VLM outputs (which may use architectural convenience names)
+# to mandatory SFT types.
+# ---------------------------------------------------------------------------
+
 VLM_CATEGORY_MAP: Dict[str, str] = {
-    # VLM name                  → canonical
-    "office":                     "office",
-    "open_plan_workspace":        "office",
-    "executive_office":           "office",
-    "cubicle_workstation":        "office",
-    "conference_room":            "conference_room",
-    "meeting_room":               "conference_room",
-    "training_room":              "conference_room",
-    "breakout_space":             "conference_room",
-    "lobby_reception":            "lobby",
-    "hallway_corridor":           "hallway",
-    "restroom":                   "restroom",
-    "kitchen_break_room":         "kitchen",
-    "dining_room":                "kitchen",
-    "family_room":                "living_room",
-    "janitor":                    "custodial",
-    "closet":                     "storage",
-    # Residential unit-type abbreviations used in residential floor plans
-    "0br":                        "studio",
-    "1br":                        "bedroom",
-    "2br":                        "bedroom",
-    "3br":                        "bedroom",
-    "4br":                        "bedroom",
-    "br":                         "bedroom",
-    "lr":                         "living_room",
-    "lv":                         "living_room",
-    "mbr":                        "bedroom",
-    "storage":                    "storage",
-    "mechanical_room":            "mechanical",
-    "mechanical":                 "mechanical",
-    "electrical_room":            "electrical",
-    "electrical":                 "electrical",
-    "elevator":                   "elevator",
-    "elevator_lift":              "elevator",
-    "stairwell":                  "stairwell",
-    "stairwell_stairs":           "stairwell",
-    "auditorium":                 "auditorium",
-    "data_center":                "server_room",
-    "server_room":                "server_room",
-    "carpentry":                  "carpentry",
-    "storage_room":               "storage",
-    "break_room":                 "kitchen",
-    "cafeteria":                  "kitchen",
-    "administrative":             "office",
-    "hallway":                    "hallway",
-    "lobby":                      "lobby",
-    "kitchen":                    "kitchen",
-    "other":                      "other",
+    # Offices
+    "office": "PRIVATE OFFICE",
+    "open_plan_workspace": "OPEN OFFICE",
+    "executive_office": "PRIVATE OFFICE",
+    "cubicle_workstation": "OPEN OFFICE",
+    "private_office": "PRIVATE OFFICE",
+
+    # Conference/Meeting
+    "conference_room": "CONFERENCE",
+    "meeting_room": "MEETING",
+    "training_room": "TRAINING ROOM",
+    "breakout_space": "MEETING",
+
+    # Circulation
+    "lobby_reception": "LOBBY",
+    "lobby": "LOBBY",
+    "hallway_corridor": "CORRIDOR",
+    "hallway": "CORRIDOR",
+    "corridor": "CORRIDOR",
+
+    # Sanitary
+    "restroom": "RESTROOM",
+    "bathroom": "RESTROOM",
+
+    # Food Service
+    "kitchen_break_room": "CAFETERIA",
+    "kitchen": "CAFETERIA",
+    "break_room": "CAFETERIA",
+    "dining_room": "RESTAURANT",
+    "cafeteria": "CAFETERIA",
+
+    # Vertical circulation
+    "stairwell": "STAIRWELL",
+    "stairwell_stairs": "STAIRWELL",
+    "elevator": "CORRIDOR",  # Elevator shafts are circulation, not a mandatory class
+
+    # Storage
+    "storage": "STORAGE ROOM",
+    "storage_room": "STORAGE ROOM",
+    "closet": "STORAGE ROOM",
+
+    # Janitor
+    "janitor": "JANITOR CLOSET",
+    "custodial": "JANITOR CLOSET",
+
+    # Education
+    "classroom": "CLASSROOM",
+    "auditorium": "LECTURE HALL",
+    "lecture_hall": "LECTURE HALL",
+
+    # Sports
+    "gymnasium": "GYMNASIUM",
+    "gym": "GYMNASIUM",
+
+    # Parking
+    "parking_garage": "PARKING GARAGE",
+    "parking": "PARKING GARAGE",
+    "garage": "PARKING GARAGE",
+
+    # Warehouse
+    "warehouse": "WAREHOUSE",
+
+    # Retail
+    "retail": "RETAIL",
+
+    # Multipurpose
+    "multipurpose_room": "MULTIPURPOSE ROOM",
+    "community_room": "MULTIPURPOSE ROOM",
+
+    # Fallback
+    "other": "STORAGE ROOM",  # Default to least-intrusive class
+    "unknown": "STORAGE ROOM",
 }
 
 # ---------------------------------------------------------------------------
-# VLM prompt category list
+# VLM prompt category list (mandatory classes for prompt)
 # ---------------------------------------------------------------------------
-# Flat list of categories sent to Claude in the VLM prompt.
-# Using canonical names so VLM output directly maps to canonical types
-# without an intermediate translation step.
+# Sent to VLM to constrain its output to mandatory taxonomy.
+# Used in vlm_backend.py prompts.
+# ---------------------------------------------------------------------------
+
 VLM_PROMPT_CATEGORIES: List[str] = [
-    "office",
-    "conference_room",
-    "lobby",
-    "hallway",
-    "restroom",
-    "kitchen",
-    "storage",
-    "mechanical",
-    "electrical",
-    "server_room",
-    "elevator",
-    "stairwell",
-    "auditorium",
-    "classroom",
-    "carpentry",
-    "bedroom",
-    "living_room",
-    "bicycle_storage",
-    "compactor",
-    "pump_room",
-    "machine_room",
-    "custodial",
-    "community_facility",
-    "other",
+    "PRIVATE OFFICE",
+    "OPEN OFFICE",
+    "CONFERENCE",
+    "MEETING",
+    "MULTIPURPOSE ROOM",
+    "CLASSROOM",
+    "LECTURE HALL",
+    "TRAINING ROOM",
+    "RESTAURANT",
+    "CAFETERIA",
+    "RETAIL",
+    "LOBBY",
+    "CORRIDOR",
+    "RESTROOM",
+    "STAIRWELL",
+    "STORAGE ROOM",
+    "JANITOR CLOSET",
+    "ELECTRICAL ROOM",
+    "GYMNASIUM",
+    "PARKING GARAGE",
+    "WAREHOUSE",
 ]
 
+# Window-eligible classes (all others get a base type without window suffix)
+# Classes that can have windows: offices, classrooms, conference, meeting, etc.
+WINDOW_ELIGIBLE: Set[str] = {
+    "PRIVATE OFFICE",
+    "OPEN OFFICE",
+    "CONFERENCE",
+    "MEETING",
+    "MULTIPURPOSE ROOM",
+    "CLASSROOM",
+    "LECTURE HALL",
+    "TRAINING ROOM",
+    "LOBBY",
+    "RESTAURANT",
+    "CAFETERIA",
+    # RETAIL can have windows
+    # GYMNASIUM, PARKING GARAGE are usually skylights, not windows
+}
+
+SKYLIGHT_ELIGIBLE: Set[str] = {
+    "GYMNASIUM",
+    "WAREHOUSE",
+    "PARKING GARAGE",
+}
+
+OPENING_ELIGIBLE: Set[str] = {
+    "PARKING GARAGE",
+}
+
+
 # ---------------------------------------------------------------------------
-# Normalisation function
+# Normalization functions
 # ---------------------------------------------------------------------------
 
-def normalize_room_type(raw: str) -> str:
+class NormalizationResult(NamedTuple):
+    """Result of room type normalization."""
+    mandatory_type: str  # Always one of VALID_TYPES (for SFT output)
+    extended_type: Optional[str] = None  # One of EXTENDED_ONLY_TYPES if applicable
+
+
+def normalize_to_mandatory(raw: str) -> str:
     """
-    Normalise any raw room type string to a canonical type.
+    Normalize any raw room type string to a mandatory SFT class.
 
     Resolution order:
-    1. Already a canonical type → return as-is.
+    1. Already a mandatory type → return as-is.
     2. VLM category map → translate directly.
-    3. Surface-form exact match (case-insensitive) → map to canonical.
-    4. Substring match → return first canonical type whose surface forms
-       contain the raw string as a substring.
-    5. Fallback → "other".
+    3. Surface-form exact match (case-insensitive) → map to mandatory.
+    4. Substring match in mandatory classes.
+    5. Substring match in extended classes → map to nearest mandatory.
+    6. Fallback → "STORAGE ROOM" (least-intrusive default).
 
     Args:
-        raw: Raw room type string from any source.
+        raw: Raw room type string from any source (OCR, VLM, abbreviation, etc.)
 
     Returns:
-        Canonical type name from VALID_TYPES.
+        Mandatory class name from VALID_TYPES, guaranteed to be SFT-compliant.
     """
     if not raw:
-        return "other"
+        return "STORAGE ROOM"
 
     raw_stripped = raw.strip()
     raw_lower = raw_stripped.lower()
     raw_upper = raw_stripped.upper()
 
-    # 1. Already canonical
-    if raw_lower in VALID_TYPES:
-        return raw_lower
+    # 1. Already a mandatory type
+    if raw_upper in VALID_TYPES:
+        return raw_upper
 
     # 2. VLM category map (exact, case-insensitive)
     if raw_lower in VLM_CATEGORY_MAP:
         return VLM_CATEGORY_MAP[raw_lower]
 
-    # 3. Surface-form exact match
-    if raw_upper in _SURFACE_TO_CANONICAL:
-        return _SURFACE_TO_CANONICAL[raw_upper]
+    # 3. Surface-form exact match (mandatory)
+    if raw_upper in _SURFACE_TO_MANDATORY:
+        return _SURFACE_TO_MANDATORY[raw_upper]
 
-    # 3b. Short-token guard: tokens of ≤4 characters that are not in the
-    #     exact map cannot be reliably resolved by substring containment.
-    #     The scan was designed for partial-word fuzzy matching of full phrases
-    #     ("MECH ROOM" vs "MECHANICAL"), not two-letter abbreviations.
-    #     Without this guard, "BR" matches "BREAKOUT SPACE" (conference_room)
-    #     because Python's `"BR" in "BREAKOUT SPACE"` is True.
-    #     Any abbreviation that should be recognized MUST be added to
-    #     CANONICAL_TYPES surface forms above so it is caught at Step 3.
+    # 3b. Short-token guard (same logic as before)
     if len(raw_upper) <= 4:
-        logger.debug(f"Short token '{raw}' not in exact map → 'other' (add to CANONICAL_TYPES if needed)")
-        return "other"
+        logger.debug(f"Short token '{raw}' not in exact map → STORAGE ROOM")
+        return "STORAGE ROOM"
 
-    # 4. Substring containment: check if any canonical surface form is
-    #    contained in raw_upper OR raw_upper is contained in a surface form.
-    for canonical, variants in CANONICAL_TYPES.items():
+    # 4. Substring containment in mandatory classes
+    for mandatory, variants in MANDATORY_CLASSES.items():
         for variant in variants:
             if variant in raw_upper or raw_upper in variant:
-                logger.debug(f"Substring match: '{raw}' → '{canonical}' via '{variant}'")
-                return canonical
+                logger.debug(f"Substring match (mandatory): '{raw}' → '{mandatory}'")
+                return mandatory
 
-    logger.debug(f"No match for room type: '{raw}' → 'other'")
-    return "other"
+    # 5. Check extended classes for fallback mapping
+    for extended, variants in EXTENDED_TYPES.items():
+        for variant in variants:
+            if variant in raw_upper or raw_upper in variant:
+                logger.debug(
+                    f"Substring match (extended): '{raw}' → '{extended}', "
+                    f"mapping to nearest mandatory"
+                )
+                # Map extended types to nearest mandatory equivalents
+                fallback_map = {
+                    "mechanical": "ELECTRICAL ROOM",
+                    "machine_room": "ELECTRICAL ROOM",
+                    "boiler": "ELECTRICAL ROOM",
+                    "pump_room": "ELECTRICAL ROOM",
+                    "compactor": "STORAGE ROOM",
+                    "riser": "ELECTRICAL ROOM",
+                    "elevator": "CORRIDOR",
+                    "bicycle_storage": "STORAGE ROOM",
+                    "bedroom": "STORAGE ROOM",
+                    "living_room": "MULTIPURPOSE ROOM",
+                    "laundry": "STORAGE ROOM",
+                    "garage": "PARKING GARAGE",
+                    "studio": "STORAGE ROOM",
+                    "carpentry": "MULTIPURPOSE ROOM",
+                    "community_facility": "MULTIPURPOSE ROOM",
+                    "cctv": "ELECTRICAL ROOM",
+                    "other": "STORAGE ROOM",
+                }
+                return fallback_map.get(extended, "STORAGE ROOM")
+
+    logger.debug(f"No match for room type: '{raw}' → STORAGE ROOM (fallback)")
+    return "STORAGE ROOM"
+
+
+def get_extended_type(raw: str) -> Optional[str]:
+    """
+    Get the fine-grained extended type classification.
+
+    This is used for backward compatibility and non-SFT output only.
+    For SFT, always use normalize_to_mandatory().
+
+    Args:
+        raw: Raw room type string.
+
+    Returns:
+        Extended class name from EXTENDED_ONLY_TYPES, or None if not found.
+    """
+    if not raw:
+        return None
+
+    raw_stripped = raw.strip()
+    raw_lower = raw_stripped.lower()
+    raw_upper = raw_stripped.upper()
+
+    # 1. Already an extended type
+    if raw_lower in EXTENDED_ONLY_TYPES:
+        return raw_lower
+
+    # 2. Surface-form exact match (extended)
+    if raw_upper in _SURFACE_TO_EXTENDED:
+        return _SURFACE_TO_EXTENDED[raw_upper]
+
+    # 3. Short-token guard
+    if len(raw_upper) <= 4:
+        return None
+
+    # 4. Substring match in extended
+    for extended, variants in EXTENDED_TYPES.items():
+        for variant in variants:
+            if variant in raw_upper or raw_upper in variant:
+                logger.debug(f"Extended substring match: '{raw}' → '{extended}'")
+                return extended
+
+    return None
 
 
 def get_vlm_categories_string() -> str:
     """Return comma-separated VLM prompt categories."""
     return ", ".join(VLM_PROMPT_CATEGORIES)
+
+
+def add_window_suffix(
+    base_type: str, has_windows: bool = False, has_skylights: bool = False,
+    has_openings: bool = False
+) -> str:
+    """
+    Apply window/skylight/opening suffix to a mandatory type.
+
+    These suffixes are determined by spatial detection, not text matching.
+
+    Args:
+        base_type: Mandatory class name (must be in VALID_TYPES).
+        has_windows: True if detected windows intersect this room.
+        has_skylights: True if detected skylights intersect this room.
+        has_openings: True if detected side openings exist (PARKING GARAGE).
+
+    Returns:
+        Suffixed type string (e.g., "CONFERENCE w/ windows").
+    """
+    if not base_type or base_type not in VALID_TYPES:
+        return base_type
+
+    # Priority: skylights > openings > windows > base
+    if has_skylights and base_type in SKYLIGHT_ELIGIBLE:
+        return f"{base_type} w/ skylights"
+    if has_openings and base_type in OPENING_ELIGIBLE:
+        return f"{base_type} w/ side openings"
+    if has_windows and base_type in WINDOW_ELIGIBLE:
+        return f"{base_type} w/ windows"
+
+    return base_type
