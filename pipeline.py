@@ -30,6 +30,7 @@ try:
         filter_by_confidence, validate_for_sft, prepare_sft_annotation,
         SFTAnnotationBuilder, build_annotation_json
     )
+    from .automation.taxonomy import normalize_to_mandatory, get_extended_type
     from .automation.abbreviation_ocr_recovery import (
         AbbreviationOCRRecovery, ResidentialAbbreviationRecovery
     )
@@ -48,6 +49,7 @@ except ImportError:
         filter_by_confidence, validate_for_sft, prepare_sft_annotation,
         SFTAnnotationBuilder, build_annotation_json
     )
+    from automation.taxonomy import normalize_to_mandatory, get_extended_type
     from automation.abbreviation_ocr_recovery import (
         AbbreviationOCRRecovery, ResidentialAbbreviationRecovery
     )
@@ -971,9 +973,13 @@ class AnnotationPipeline:
         """
         Save VLM annotation result, merging with OCR data.
         
+        Outputs both legacy format ("rooms", "ocr_rooms") and SFT format ("roomsRecognized")
+        for backward compatibility during gradual migration.
+        
         CRITICAL: room_name field is IMMUTABLE — original OCR/VLM label preserved.
         name_expanded field tracks abbreviation expansions separately.
         """
+        # Build legacy format (for backward compatibility)
         data = {
             "image_file": result.image_file,
             "image_size": result.image_size,
@@ -981,7 +987,7 @@ class AnnotationPipeline:
                 {
                     "room_number": r.room_number,
                     "room_name": r.room_name,  # ← UNCHANGED from OCR/VLM
-                    "name_expanded": r.get("name_expanded"),  # ← Expansion if available
+                    "name_expanded": getattr(r, 'name_expanded', None),  # ← Expansion if available
                     "category": r.category,
                     "bbox": r.bbox,
                 }
@@ -993,7 +999,7 @@ class AnnotationPipeline:
                 {
                     "room_number": r.room_number,
                     "room_name": r.room_name,  # ← UNCHANGED
-                    "name_expanded": r.get("name_expanded"),  # ← Expansion if available
+                    "name_expanded": r.name_expanded,  # ← Expansion if available
                     "bbox": list(r.bbox),
                     "confidence": r.confidence,
                 }
@@ -1004,6 +1010,41 @@ class AnnotationPipeline:
         if result.error:
             data["vlm_error"] = result.error
 
+        # Build SFT format ("roomsRecognized" key)
+        sft_rooms = []
+        for idx, vlm_room in enumerate(result.rooms, start=1):
+            # Normalize category to mandatory class
+            mandatory_type = normalize_to_mandatory(vlm_room.category)
+            extended_type = get_extended_type(vlm_room.category)
+            
+            # Convert bbox from [x, y, w, h] to [x1, y1, x2, y2]
+            bbox = vlm_room.bbox
+            if len(bbox) == 4:
+                x, y, w, h = bbox
+                bbox_x1y1x2y2 = [x, y, x + w, y + h]
+            else:
+                bbox_x1y1x2y2 = bbox
+            
+            # Build SFT room with VLM source
+            sft_room = self.sft_builder.build_room(
+                room_id=idx,
+                mandatory_type=mandatory_type,
+                original_name=vlm_room.room_name,
+                room_number=vlm_room.room_number,
+                bbox=bbox_x1y1x2y2,
+                detection_score=0.9,  # VLM default
+                classification_match_type="vlm",  # VLM classification
+                ocr_confidence=1.0,  # VLM-generated, no OCR uncertainty
+                source="vlm_only",
+                extended_type=extended_type,
+                detection_method="vlm",
+                detection_model=self.config.vlm.backend,
+            )
+            sft_rooms.append(self.sft_builder.to_dict(sft_room))
+        
+        # Add roomsRecognized to data
+        data["roomsRecognized"] = sft_rooms
+
         with open(output_path, "w") as f:
             json.dump(data, f, indent=2)
 
@@ -1012,6 +1053,9 @@ class AnnotationPipeline:
     ) -> None:
         """
         Save OCR-only annotation.
+        
+        Outputs both legacy format ("rooms") and SFT format ("roomsRecognized")
+        for backward compatibility during gradual migration.
         
         CRITICAL: room_name field is IMMUTABLE — original OCR label preserved.
         name_expanded field tracks abbreviation expansions separately.
@@ -1028,7 +1072,7 @@ class AnnotationPipeline:
                 {
                     "room_number": r.room_number,
                     "room_name": r.room_name,  # ← UNCHANGED from OCR
-                    "name_expanded": r.get("name_expanded"),  # ← Expansion if available
+                    "name_expanded": r.name_expanded,  # ← Expansion if available
                     "category": "unknown",
                     "bbox": list(r.bbox),
                     "confidence": r.confidence,
@@ -1039,6 +1083,44 @@ class AnnotationPipeline:
             "electrical_counts": {},
             "source": "ocr_only",
         }
+
+        # Build SFT format ("roomsRecognized" key)
+        sft_rooms = []
+        for idx, ocr_room in enumerate(rooms, start=1):
+            # Normalize room name to mandatory class
+            # For OCR-only, we don't have VLM classification, so use the name itself
+            mandatory_type = normalize_to_mandatory(ocr_room.room_name)
+            extended_type = get_extended_type(ocr_room.room_name)
+            
+            # Convert bbox from (x, y, w, h) tuple to [x1, y1, x2, y2] list
+            bbox = ocr_room.bbox
+            if isinstance(bbox, (tuple, list)) and len(bbox) == 4:
+                x, y, w, h = bbox
+                bbox_x1y1x2y2 = [x, y, x + w, y + h]
+            else:
+                bbox_x1y1x2y2 = list(bbox) if isinstance(bbox, tuple) else bbox
+            
+            # Build SFT room with OCR source
+            sft_room = self.sft_builder.build_room(
+                room_id=idx,
+                mandatory_type=mandatory_type,
+                original_name=ocr_room.room_name,
+                room_number=ocr_room.room_number,
+                bbox=bbox_x1y1x2y2,
+                detection_score=0.95,  # OCR bbox is high confidence
+                classification_match_type="exact" if mandatory_type else "fallback",
+                ocr_confidence=ocr_room.confidence,  # From PaddleOCR
+                source="ocr_only",
+                extended_type=extended_type,
+                name_expanded=ocr_room.name_expanded,
+                detection_method="ocr",
+                detection_model="PaddleOCR",
+                ocr_backend="PaddleOCR",
+            )
+            sft_rooms.append(self.sft_builder.to_dict(sft_room))
+        
+        # Add roomsRecognized to data
+        data["roomsRecognized"] = sft_rooms
 
         output_path = annotations_dir / f"{img_path.stem}.json"
         with open(output_path, "w") as f:

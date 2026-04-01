@@ -41,6 +41,7 @@ MANDATORY_CLASSES: Dict[str, List[str]] = {
     "PRIVATE OFFICE": [
         "PRIVATE OFFICE", "PRIVATE", "INDIVIDUAL OFFICE",
         "EXECUTIVE OFFICE", "FACULTY OFFICE", "PERSONAL OFFICE",
+        "OFFICE", "OFFICE ROOM", "SINGLE OFFICE",
     ],
     "OPEN OFFICE": [
         "OPEN OFFICE", "OPEN PLAN", "OPEN PLAN WORKSPACE",
@@ -50,6 +51,7 @@ MANDATORY_CLASSES: Dict[str, List[str]] = {
     # ── Meeting/Conference ──────────────────────────────────────────────────
     "CONFERENCE": [
         "CONFERENCE ROOM", "CONFERENCE", "BOARDROOM", "BOARD ROOM",
+        "CONF RM", "CONF ROOM", "CONF",
     ],
     "MEETING": [
         "MEETING ROOM", "MEETING", "BREAKOUT ROOM", "BREAKOUT SPACE",
@@ -96,7 +98,7 @@ MANDATORY_CLASSES: Dict[str, List[str]] = {
     ],
     "CORRIDOR": [
         "CORRIDOR", "HALLWAY", "PASSAGE", "WALKWAY", "HALL",
-        "CIRCULATION", "HALLWAY/CORRIDOR",
+        "CIRCULATION", "HALLWAY/CORRIDOR", "CORR",
     ],
 
     # ── Sanitary ────────────────────────────────────────────────────────────
