@@ -963,14 +963,20 @@ class AnnotationPipeline:
     def _save_annotation(
         self, result, output_path: Path, ocr_rooms: List[RoomCandidate]
     ) -> None:
-        """Save VLM annotation result, merging with OCR data."""
+        """
+        Save VLM annotation result, merging with OCR data.
+        
+        CRITICAL: room_name field is IMMUTABLE — original OCR/VLM label preserved.
+        name_expanded field tracks abbreviation expansions separately.
+        """
         data = {
             "image_file": result.image_file,
             "image_size": result.image_size,
             "rooms": [
                 {
                     "room_number": r.room_number,
-                    "room_name": r.room_name,
+                    "room_name": r.room_name,  # ← UNCHANGED from OCR/VLM
+                    "name_expanded": r.get("name_expanded"),  # ← Expansion if available
                     "category": r.category,
                     "bbox": r.bbox,
                 }
@@ -981,7 +987,8 @@ class AnnotationPipeline:
             "ocr_rooms": [
                 {
                     "room_number": r.room_number,
-                    "room_name": r.room_name,
+                    "room_name": r.room_name,  # ← UNCHANGED
+                    "name_expanded": r.get("name_expanded"),  # ← Expansion if available
                     "bbox": list(r.bbox),
                     "confidence": r.confidence,
                 }
@@ -998,7 +1005,12 @@ class AnnotationPipeline:
     def _save_ocr_annotation(
         self, img_path: Path, rooms: List[RoomCandidate], annotations_dir: Path
     ) -> None:
-        """Save OCR-only annotation."""
+        """
+        Save OCR-only annotation.
+        
+        CRITICAL: room_name field is IMMUTABLE — original OCR label preserved.
+        name_expanded field tracks abbreviation expansions separately.
+        """
         from PIL import Image
 
         with Image.open(img_path) as img:
@@ -1010,7 +1022,8 @@ class AnnotationPipeline:
             "rooms": [
                 {
                     "room_number": r.room_number,
-                    "room_name": r.room_name,
+                    "room_name": r.room_name,  # ← UNCHANGED from OCR
+                    "name_expanded": r.get("name_expanded"),  # ← Expansion if available
                     "category": "unknown",
                     "bbox": list(r.bbox),
                     "confidence": r.confidence,

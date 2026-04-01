@@ -15,10 +15,10 @@ import logging
 logger = logging.getLogger(__name__)
 
 try:
-    from .taxonomy import CANONICAL_TYPES, VALID_TYPES, VLM_CATEGORY_MAP, normalize_room_type
+    from .taxonomy import MANDATORY_CLASSES, VALID_TYPES, normalize_to_mandatory, get_extended_type
     from .abbreviations import ABBREVIATION_MAP as _ABBREVIATION_MAP
 except ImportError:
-    from taxonomy import CANONICAL_TYPES, VALID_TYPES, VLM_CATEGORY_MAP, normalize_room_type
+    from taxonomy import MANDATORY_CLASSES, VALID_TYPES, normalize_to_mandatory, get_extended_type
     from abbreviations import ABBREVIATION_MAP as _ABBREVIATION_MAP
 
 
@@ -367,7 +367,7 @@ SemanticRoomValidator._KW_PATTERN = re.compile(
 
 
 class TaxonomyNormalizer:
-     """Normalize room names to SFT mandatory taxonomy."""
+    """Normalize room names to SFT mandatory taxonomy."""
 
     # Single source of truth — imported from abbreviations.py.
     # Previously a separate dict that diverged from SemanticRoomValidator
@@ -401,15 +401,14 @@ class TaxonomyNormalizer:
 
     def normalize(self, room_name: str) -> str:
         """
-        Map extracted room name to canonical taxonomy type.
+        Map extracted room name to mandatory SFT taxonomy type.
 
         Remediation Fix #4: Flag slash-separated compound names for review.
         If a room name contains '/', check if both parts are valid room types.
         If so, flag for human review (may indicate two distinct rooms).
 
-        Delegates to the centralised normalize_room_type() from taxonomy.py,
-        which replaced the previous local SequenceMatcher-based implementation.
-        This ensures all normalisation uses the same 35-type canonical taxonomy.
+        Delegates to the centralised normalize_to_mandatory() from taxonomy.py,
+        which ensures all normalisation uses the mandatory SFT taxonomy.
         """
         # Remediation Fix #4: Detect slash-compound labels
         if "/" in room_name:
@@ -419,7 +418,7 @@ class TaxonomyNormalizer:
                 f"— verify it represents a single room (e.g., IT/STORAGE) and not two rooms"
             )
 
-        return normalize_room_type(room_name)
+        return normalize_to_mandatory(room_name)
 
 
 def filter_by_confidence(rooms: List[Dict], min_confidence: float = 0.85,
@@ -499,10 +498,10 @@ def validate_for_sft(room: Dict) -> Tuple[bool, Dict[str, bool]]:
     """
     name = room.get("room_name") or room.get("name", "")
 
-    # Normalize type using canonical taxonomy (covers all 35 types)
-    room_type = room.get("type") or room.get("category") or "other"
+    # Normalize type using mandatory SFT taxonomy
+    room_type = room.get("type") or room.get("category") or "STORAGE ROOM"
     if isinstance(room_type, str):
-        room_type = normalize_room_type(room_type)
+        room_type = normalize_to_mandatory(room_type)
 
     checks = {
         "has_name": bool(name.strip()),

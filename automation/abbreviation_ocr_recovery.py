@@ -310,6 +310,9 @@ class AbbreviationOCRRecovery:
         """
         Convert recovered abbreviations to room annotations.
 
+        CRITICAL: Preserves original abbreviation in room_name field (immutable).
+        Expansions are tracked separately in name_expanded field.
+
         Args:
             abbreviations: List of recovered abbreviations
             base_confidence_boost: Confidence boost for OCR-recovered items
@@ -321,15 +324,17 @@ class AbbreviationOCRRecovery:
 
         for abbrev in abbreviations:
             annotation = {
-                "room_name": abbrev["expanded"],
-                "name": abbrev["expanded"],
-                "abbreviation": abbrev["abbreviation"],
+                # IMMUTABLE: Original abbreviation (e.g., "BR", "MBR", "KIT")
+                "room_name": abbrev["abbreviation"],
+                "name": abbrev["abbreviation"],
+                # TRACKED: Expansion for audit trail (e.g., "BR" → "BEDROOM")
+                "name_expanded": abbrev["expanded"],
+                # Classification based on expanded form
                 "category": self._map_category(abbrev["expanded"]),
                 "type": self._map_category(abbrev["expanded"]),
                 "unit_id": abbrev.get("unit_id", "unknown"),
                 "confidence": min(1.0, abbrev.get("confidence", 0.5) + base_confidence_boost),
                 "source": "ocr_abbreviation_recovered",
-                "original_abbrev": abbrev["abbreviation"]
             }
 
             annotations.append(annotation)

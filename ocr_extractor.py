@@ -114,19 +114,27 @@ class RoomCandidate:
     """
     Represents a detected room label from OCR.
 
+    IMMUTABILITY CONTRACT: room_name field is IMMUTABLE. It contains the original
+    detected text from OCR and must NEVER be modified by downstream stages.
+    
+    If abbreviations are expanded (e.g., "BR" → "BEDROOM"), the expansion is
+    tracked in the name_expanded field, not in room_name.
+
     Attributes:
         bbox: Bounding box as (x, y, width, height).
         room_number: Detected room number (e.g., "113", "S1.100").
-        room_name: Detected room name (e.g., "MECHANICAL ROOM").
+        room_name: Detected room name (e.g., "BR", "MECH RM A") — IMMUTABLE.
         confidence: OCR confidence score (0.0 to 1.0).
         raw_text: Original text before classification.
+        name_expanded: Abbreviation expansion if applicable (e.g., "BR" → "BEDROOM").
     """
 
     bbox: Tuple[int, int, int, int]
     room_number: str
-    room_name: str
+    room_name: str  # ← IMMUTABLE — original OCR text only
     confidence: float
     raw_text: str = ""
+    name_expanded: Optional[str] = None  # ← Expansion tracking only
 
 
 @dataclass

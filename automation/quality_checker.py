@@ -45,12 +45,13 @@ class ValidationIssue:
 
 
 class QualityChecker:
-    """Validate annotation quality and consistency."""
+    """Validate annotation quality and consistency against mandatory SFT taxonomy."""
 
     MIN_BBOX_AREA: int = 2500
-    VALID_ROOM_TYPES: Set[str] = VALID_TYPES
+    VALID_ROOM_TYPES: Set[str] = VALID_TYPES  # Mandatory classes only (21 types)
+    # Circulation types exempt from overlap checks (adjacency overlaps are expected)
     OVERLAP_EXEMPT_CATEGORIES: Set[str] = {
-        "hallway", "corridor", "lobby", "elevator", "stairwell", "riser",
+        "CORRIDOR", "LOBBY", "STAIRWELL",  # Mandatory class names
     }
 
     def __init__(self, min_bbox_area: int = 2500, allow_overlaps: bool = False):
@@ -141,8 +142,8 @@ class QualityChecker:
             bbox_i = room_i.get("bbox")
             if not bbox_i or len(bbox_i) != 4:
                 continue
-            # FIX 4: exempt circulation types
-            type_i = (_get_room_type(room_i) or "").lower()
+            # FIX 4: exempt circulation types (mandatory class names are uppercase)
+            type_i = _get_room_type(room_i) or ""
             if type_i in self.OVERLAP_EXEMPT_CATEGORIES:
                 continue
             try:
@@ -156,7 +157,7 @@ class QualityChecker:
                 bbox_j = room_j.get("bbox")
                 if not bbox_j or len(bbox_j) != 4:
                     continue
-                type_j = (_get_room_type(room_j) or "").lower()
+                type_j = _get_room_type(room_j) or ""
                 if type_j in self.OVERLAP_EXEMPT_CATEGORIES:
                     continue
                 try:
