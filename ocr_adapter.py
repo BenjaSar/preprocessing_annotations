@@ -181,14 +181,13 @@ class PaddleOCRBackend(OCRBackend):
         try:
             from paddleocr import PaddleOCR
             
-            # Initialize PaddleOCR with device and language settings
-            use_gpu = self.config.device == "cuda"
+            # Initialize PaddleOCR with minimal parameters (latest versions are strict about params)
+            # Only use parameters that are widely supported
             self.ocr = PaddleOCR(
                 use_angle_cls=True,  # Enable rotated text detection
-                lang='en' if 'en' in self.config.languages else 'ch',
-                use_gpu=use_gpu,
-                show_log=False  # Suppress verbose logging
+                lang='en' if 'en' in self.config.languages else 'ch'
             )
+            
             self.initialized = True
             logger.info(f"PaddleOCR initialized on device: {self.config.device}")
         except ImportError:
@@ -221,7 +220,12 @@ class PaddleOCRBackend(OCRBackend):
             image_input = str(image_source)
         
         try:
-            results = self.ocr.ocr(image_input, cls=True)
+            # Try with cls parameter first (older versions), then without (newer versions)
+            try:
+                results = self.ocr.ocr(image_input, cls=True)
+            except TypeError:
+                # Newer paddleocr versions don't accept cls parameter
+                results = self.ocr.ocr(image_input)
             
             detections = []
             # PaddleOCR returns a list of result lines (one per detected region)

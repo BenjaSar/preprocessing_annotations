@@ -178,9 +178,10 @@ class TemplateConfig:
 class VLMConfig:
     """Configuration for VLM (Vision Language Model) annotation.
 
-    Supports two backends:
+    Supports three backends:
     1. Claude (Anthropic API) - Requires ANTHROPIC_API_KEY
     2. Qwen2.5-VL (Local inference) - Requires transformers + qwen_vl_utils
+    3. Unsloth (Optimized local inference) - ~2x faster, ~70% less VRAM (requires unsloth)
 
     Backend can be selected via backend field (default: 'claude').
     Model can be set via VLM_MODEL environment variable.
@@ -192,9 +193,13 @@ class VLMConfig:
 
     Qwen2.5-VL models:
        - Qwen/Qwen2.5-VL-7B-Instruct (default, local, requires ~6GB VRAM at 4-bit)
+
+    Unsloth models (use backend='unsloth', configure via unsloth_model):
+       - "qwen2.5-vl-7b" (default) - Optimized Qwen2.5-VL-7B-Instruct
+       - "qwen3-vl-2b", "qwen3-vl-4b", "qwen3-vl-8b" - Qwen3-VL variants
     """
 
-    # VLM backend: 'claude' (API) or 'qwen' (local inference)
+    # VLM backend: 'claude' (API), 'qwen' (local), or 'unsloth' (optimized local)
     backend: str = "claude"
 
     # Model to use for annotation (reads from VLM_MODEL env var)
@@ -220,6 +225,11 @@ class VLMConfig:
     # HuggingFace model ID for Qwen2.5-VL (only used when backend='qwen')
     # Override via --qwen-model CLI flag or set directly
     qwen_model: str = "Qwen/Qwen2.5-VL-7B-Instruct"
+
+    # Unsloth model key (only used when backend='unsloth')
+    # Options: "qwen2.5-vl-7b" (default), "qwen3-vl-2b", "qwen3-vl-4b", "qwen3-vl-8b"
+    # Override via --unsloth-model CLI flag
+    unsloth_model: str = "qwen2.5-vl-7b"
 
     def __post_init__(self):
         if self.qwen_device is None:

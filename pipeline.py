@@ -1156,16 +1156,22 @@ Examples:
     )
     parser.add_argument(
         "--vlm-backend",
-        choices=["claude", "qwen"],
+        choices=["claude", "qwen", "unsloth"],
         default="claude",
-        help="VLM backend. Default: claude. Use 'qwen' for local Qwen2.5-VL inference "
-             "(requires: pip install transformers torch torchvision)",
+        help="VLM backend. Options: 'claude' (API, default), 'qwen' (local inference), "
+             "'unsloth' (optimized local, ~2x faster, requires: pip install unsloth)",
     )
     parser.add_argument(
         "--qwen-model",
         default="Qwen/Qwen2.5-VL-7B-Instruct",
-        help="HuggingFace model ID for Qwen2.5-VL backend "
+        help="HuggingFace model ID for 'qwen' backend "
              "(default: Qwen/Qwen2.5-VL-7B-Instruct)",
+    )
+    parser.add_argument(
+        "--unsloth-model",
+        default="qwen2.5-vl-7b",
+        help="Model key for 'unsloth' backend. Options: qwen2.5-vl-7b (default), "
+             "qwen3-vl-2b, qwen3-vl-4b, qwen3-vl-8b",
     )
     parser.add_argument(
         "--use-sam", action="store_true", help="Use SAM for boundary refinement"
@@ -1210,6 +1216,7 @@ Examples:
     config.use_semantic_reconciliation = args.use_semantic_reconciliation
     config.vlm.backend = args.vlm_backend
     config.vlm.qwen_model = args.qwen_model
+    config.vlm.unsloth_model = args.unsloth_model
 
     if args.dpi:
         config.pdf.dpi = args.dpi
