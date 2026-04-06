@@ -59,6 +59,27 @@ class VLMBackend(ABC):
             }, ...]
         """
         pass
+    
+    def detect_windows(self, image_path: Union[str, Path]) -> List[Dict[str, Any]]:
+        """
+        Detect windows from a floor plan image (Tier 3 fallback).
+        
+        Sends image to VLM with window-detection prompt.
+        
+        Args:
+            image_path: Path to image file
+        
+        Returns:
+            List of window detections with format:
+            [{
+                "bbox": [x1, y1, x2, y2],
+                "confidence": float,
+                "type": "window" | "skylight" | "opening"
+            }, ...]
+        """
+        # Default implementation: not supported by this backend
+        logger.debug(f"{self.__class__.__name__} does not implement window detection")
+        return []
 
 
 class ClaudeBackend(VLMBackend):

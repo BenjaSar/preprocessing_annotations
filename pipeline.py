@@ -34,6 +34,7 @@ try:
     from .automation.abbreviation_ocr_recovery import (
         AbbreviationOCRRecovery, ResidentialAbbreviationRecovery
     )
+    from .window_detector import WindowDetector, apply_window_suffixes
 except ImportError:
     from config import PipelineConfig
     from pdf_extractor import PDFExtractor, PageTypeClassifier
@@ -53,6 +54,7 @@ except ImportError:
     from automation.abbreviation_ocr_recovery import (
         AbbreviationOCRRecovery, ResidentialAbbreviationRecovery
     )
+    from window_detector import WindowDetector, apply_window_suffixes
 
 logger = logging.getLogger(__name__)
 
@@ -125,6 +127,7 @@ class AnnotationPipeline:
         self._label_normalizer = None
         self._quality_checker = None
         self._region_extractor = None
+        self._window_detector = None
         
         # Initialize SFT annotation builder (used for mandatory schema output)
         self.sft_builder = SFTAnnotationBuilder()
@@ -188,6 +191,12 @@ class AnnotationPipeline:
         if self._region_extractor is None:
             self._region_extractor = RegionExtractor(padding_pct=0.1)
         return self._region_extractor
+
+    @property
+    def window_detector(self) -> WindowDetector:
+        if self._window_detector is None:
+            self._window_detector = WindowDetector(config=self.config)
+        return self._window_detector
 
     def run(
         self,
@@ -1045,6 +1054,56 @@ class AnnotationPipeline:
         # Add roomsRecognized to data
         data["roomsRecognized"] = sft_rooms
 
+        # Phase 2: Apply window detection and suffix augmentation
+        try:
+            # Convert rooms to format expected by window detector
+            rooms_for_detection = [
+                {
+                    "id": idx,
+                    "type": r.get("type", "UNKNOWN"),
+                    "bbox": r.get("bbox", [0, 0, 100, 100]),
+                }
+                for idx, r in enumerate(data["rooms"])
+            ]
+
+            # Detect windows (Tier 1: PDF layers, Tier 2: CubiCasa5K, Tier 3: VLM)
+            window_mappings = self.window_detector.detect_windows(
+                image_array=None,  # Would need to load image from result.image_file if using CubiCasa5K
+                rooms=rooms_for_detection,
+                pdf_path=None,  # Would be the source PDF path if available
+                vlm_backend=None,  # Could pass VLM backend for fallback detection
+            )
+
+            # Apply window suffixes to room types in legacy format
+            apply_window_suffixes(data["rooms"], window_mappings)
+
+            # Also apply suffixes to SFT format
+            for idx, sft_room in enumerate(data["roomsRecognized"]):
+                room_id = idx
+                mapping = next(
+                    (m for m in window_mappings if m.room_id == room_id), None
+                )
+                if mapping:
+                    from automation.taxonomy import add_window_suffix
+
+                    base_type = sft_room.get("type", "UNKNOWN")
+                    suffixed_type = add_window_suffix(
+                        base_type,
+                        has_windows=mapping.has_windows,
+                        has_skylights=mapping.has_skylights,
+                        has_openings=mapping.has_openings,
+                    )
+                    sft_room["type"] = suffixed_type
+                    sft_room["window_detection"] = {
+                        "has_windows": mapping.has_windows,
+                        "has_skylights": mapping.has_skylights,
+                        "has_openings": mapping.has_openings,
+                        "window_count": mapping.window_count,
+                    }
+
+        except Exception as e:
+            logger.warning(f"Window detection failed, continuing without suffixes: {e}")
+
         with open(output_path, "w") as f:
             json.dump(data, f, indent=2)
 
@@ -1121,6 +1180,56 @@ class AnnotationPipeline:
         
         # Add roomsRecognized to data
         data["roomsRecognized"] = sft_rooms
+
+        # Phase 2: Apply window detection and suffix augmentation
+        try:
+            # Convert rooms to format expected by window detector
+            rooms_for_detection = [
+                {
+                    "id": idx,
+                    "type": r.get("category", "UNKNOWN"),
+                    "bbox": r.get("bbox", [0, 0, 100, 100]),
+                }
+                for idx, r in enumerate(data["rooms"])
+            ]
+
+            # Detect windows (Tier 1: PDF layers, Tier 2: CubiCasa5K, Tier 3: VLM)
+            window_mappings = self.window_detector.detect_windows(
+                image_array=None,  # Would need to load image for CubiCasa5K
+                rooms=rooms_for_detection,
+                pdf_path=None,  # Would be the source PDF path if available
+                vlm_backend=None,  # Could pass VLM backend for fallback detection
+            )
+
+            # Apply window suffixes to room types in legacy format
+            apply_window_suffixes(data["rooms"], window_mappings)
+
+            # Also apply suffixes to SFT format
+            for idx, sft_room in enumerate(data["roomsRecognized"]):
+                room_id = idx
+                mapping = next(
+                    (m for m in window_mappings if m.room_id == room_id), None
+                )
+                if mapping:
+                    from automation.taxonomy import add_window_suffix
+
+                    base_type = sft_room.get("type", "UNKNOWN")
+                    suffixed_type = add_window_suffix(
+                        base_type,
+                        has_windows=mapping.has_windows,
+                        has_skylights=mapping.has_skylights,
+                        has_openings=mapping.has_openings,
+                    )
+                    sft_room["type"] = suffixed_type
+                    sft_room["window_detection"] = {
+                        "has_windows": mapping.has_windows,
+                        "has_skylights": mapping.has_skylights,
+                        "has_openings": mapping.has_openings,
+                        "window_count": mapping.window_count,
+                    }
+
+        except Exception as e:
+            logger.warning(f"Window detection failed, continuing without suffixes: {e}")
 
         output_path = annotations_dir / f"{img_path.stem}.json"
         with open(output_path, "w") as f:
