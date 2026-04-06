@@ -241,6 +241,123 @@ Return ONLY a JSON array, e.g.: [{"room_id": "room_0", "room_type": "CONFERENCE"
             logger.error(f"Failed to parse Claude response as JSON: {e}")
             logger.debug(f"Response text: {response_text[:200]}...")
             return []
+    
+    def detect_windows(self, image_path: Union[str, Path]) -> List[Dict[str, Any]]:
+        """
+        Detect windows in floor plan image using Claude (Phase 2, Tier 3).
+        
+        Args:
+            image_path: Path to floor plan image
+        
+        Returns:
+            List of window detections
+        """
+        try:
+            import base64
+            from pathlib import Path
+            
+            # Read and encode image
+            image_path = Path(image_path)
+            with open(image_path, "rb") as img_file:
+                image_data = base64.standard_b64encode(img_file.read()).decode("utf-8")
+            
+            # Determine media type
+            suffix = image_path.suffix.lower()
+            media_type_map = {
+                ".jpg": "image/jpeg",
+                ".jpeg": "image/jpeg",
+                ".png": "image/png",
+                ".gif": "image/gif",
+                ".webp": "image/webp"
+            }
+            media_type = media_type_map.get(suffix, "image/png")
+            
+            # Build prompt
+            prompt = self._build_window_detection_prompt()
+            
+            logger.debug(f"Running Claude window detection on {image_path.name}")
+            
+            # Call Claude API
+            from anthropic import Anthropic
+            client = Anthropic()
+            
+            response = client.messages.create(
+                model=self.config.model,
+                max_tokens=2048,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": media_type,
+                                    "data": image_data,
+                                },
+                            },
+                            {
+                                "type": "text",
+                                "text": prompt
+                            }
+                        ],
+                    }
+                ],
+            )
+            
+            response_text = response.content[0].text
+            
+            # Parse windows
+            windows = self._parse_window_response(response_text)
+            return windows
+        
+        except Exception as e:
+            logger.error(f"Window detection failed: {e}")
+            return []
+    
+    def _build_window_detection_prompt(self) -> str:
+        """Build prompt for window detection."""
+        return """Analyze this architectural floor plan and identify all windows and openings.
+
+For each window visible, return a JSON array with:
+[{
+    "bbox": [x1, y1, x2, y2] as percentage of image dimensions (0-100),
+    "type": "window" or "skylight" or "side_opening",
+    "confidence": 0.0-1.0 confidence in detection
+}]
+
+Rules:
+- Windows are typically represented as thin lines breaking wall segments
+- Skylights are shown as rectangular areas within roof spaces
+- Side openings are openings on exterior walls at ground level
+- Exclude doors, vents, and other small openings
+- Return valid JSON array only
+
+Return ONLY a JSON array: [{"bbox": [10, 20, 30, 40], "type": "window", "confidence": 0.95}, ...]"""
+    
+    def _parse_window_response(self, response_text: str) -> List[Dict[str, Any]]:
+        """Parse window detection response."""
+        try:
+            windows = json.loads(response_text)
+            if not isinstance(windows, list):
+                windows = [windows]
+            
+            result = []
+            for window in windows:
+                bbox = window.get("bbox", [])
+                if len(bbox) == 4:
+                    result.append({
+                        "bbox": bbox,
+                        "confidence": float(window.get("confidence", 0.7)),
+                        "type": window.get("type", "window"),
+                    })
+            
+            logger.debug(f"Detected {len(result)} windows")
+            return result
+        
+        except json.JSONDecodeError as e:
+            logger.debug(f"Failed to parse window response: {e}")
+            return []
 
 
 class Qwen2_5VLBackend(VLMBackend):
@@ -361,10 +478,10 @@ class Qwen2_5VLBackend(VLMBackend):
             rooms = self._parse_room_response(response_text)
             return rooms
             
-         except Exception as e:
+        except Exception as e:
             logger.error(f"Qwen2.5-VL inference failed: {e}")
             return []
-     
+
     def _build_room_detection_prompt(self) -> str:
         """
         Build prompt for room detection using mandatory SFT taxonomy.
@@ -433,6 +550,97 @@ Rules:
         except (json.JSONDecodeError, AttributeError) as e:
             logger.error(f"Failed to parse Qwen response: {e}")
             logger.debug(f"Response text: {response_text[:200]}...")
+            return []
+    
+    def detect_windows(self, image_path: Union[str, Path]) -> List[Dict[str, Any]]:
+        """
+        Detect windows in floor plan image using Qwen2.5-VL (Phase 2, Tier 3).
+        
+        Args:
+            image_path: Path to floor plan image
+        
+        Returns:
+            List of window detections
+        """
+        try:
+            self.initialize()
+            
+            image = Image.open(image_path)
+            prompt = self._build_window_detection_prompt()
+            
+            logger.debug(f"Running Qwen2.5-VL window detection on {image_path.name}")
+            
+            # Prepare inputs
+            inputs = self.processor(
+                text=prompt,
+                images=image,
+                return_tensors="pt"
+            ).to(self.device)
+            
+            # Run inference
+            with torch.no_grad():
+                output = self.model.generate(**inputs, max_new_tokens=2048)
+            
+            response_text = self.processor.decode(output[0], skip_special_tokens=True)
+            
+            # Parse windows
+            windows = self._parse_window_response(response_text)
+            return windows
+        
+        except Exception as e:
+            logger.error(f"Window detection failed: {e}")
+            return []
+    
+    def _build_window_detection_prompt(self) -> str:
+        """Build prompt for window detection."""
+        return """Analyze this architectural floor plan and identify all windows and openings.
+
+For each window visible, return a JSON array with:
+[{
+    "bbox": [x1, y1, x2, y2] as percentage of image dimensions (0-100),
+    "type": "window" or "skylight" or "side_opening",
+    "confidence": 0.0-1.0 confidence in detection
+}]
+
+Rules:
+- Windows are typically represented as thin lines breaking wall segments
+- Skylights are shown as rectangular areas within roof spaces
+- Side openings are openings on exterior walls at ground level
+- Exclude doors, vents, and other small openings
+- Return valid JSON array only
+
+Return ONLY a JSON array: [{"bbox": [10, 20, 30, 40], "type": "window", "confidence": 0.95}, ...]"""
+    
+    def _parse_window_response(self, response_text: str) -> List[Dict[str, Any]]:
+        """Parse window detection response."""
+        try:
+            import re
+            json_match = re.search(r'\[.*\]', response_text, re.DOTALL)
+            if not json_match:
+                logger.debug("No windows detected")
+                return []
+            
+            windows_raw = json.loads(json_match.group())
+            if not isinstance(windows_raw, list):
+                windows_raw = [windows_raw]
+            
+            windows = []
+            for window in windows_raw:
+                bbox = window.get("bbox", [])
+                if len(bbox) == 4:
+                    bbox = [x * 10 for x in bbox]
+                
+                windows.append({
+                    "bbox": bbox,
+                    "confidence": float(window.get("confidence", 0.7)),
+                    "type": window.get("type", "window"),
+                })
+            
+            logger.debug(f"Detected {len(windows)} windows")
+            return windows
+        
+        except (json.JSONDecodeError, AttributeError) as e:
+            logger.debug(f"Failed to parse window response: {e}")
             return []
 
 
@@ -584,10 +792,10 @@ class UnslothQwenBackend(VLMBackend):
             rooms = self._parse_room_response(response_text)
             return rooms
         
-         except Exception as e:
+        except Exception as e:
             logger.error(f"Unsloth Qwen inference failed: {e}")
             return []
-     
+
     def _build_room_detection_prompt(self) -> str:
         """
         Build prompt for room detection using mandatory SFT taxonomy.
@@ -657,6 +865,111 @@ Rules:
         except (json.JSONDecodeError, AttributeError) as e:
             logger.error(f"Failed to parse Unsloth Qwen response: {e}")
             logger.debug(f"Response text: {response_text[:200]}...")
+            return []
+    
+    def detect_windows(self, image_path: Union[str, Path]) -> List[Dict[str, Any]]:
+        """
+        Detect windows in floor plan image using Unsloth Qwen (Phase 2, Tier 3).
+        
+        Args:
+            image_path: Path to floor plan image
+        
+        Returns:
+            List of window detections with format:
+            [{
+                "bbox": [x1, y1, x2, y2],
+                "confidence": float,
+                "type": "window" | "skylight" | "opening"
+            }, ...]
+        """
+        try:
+            self.initialize()
+            
+            # Load and prepare image
+            image = Image.open(image_path)
+            
+            # Build window detection prompt
+            prompt = self._build_window_detection_prompt()
+            
+            # Run inference
+            logger.debug(f"Running Unsloth Qwen window detection on {image_path.name}")
+            response = self.processor(image, prompt, return_tensors='pt').to(self.device)
+            
+            with torch.no_grad():
+                output = self.model.generate(**response, max_new_tokens=2048)
+            
+            # Decode response
+            response_text = self.processor.decode(output[0], skip_special_tokens=True)
+            logger.debug(f"Window detection response: {response_text[:200]}...")
+            
+            # Parse windows from response
+            windows = self._parse_window_response(response_text)
+            
+            return windows
+        
+        except Exception as e:
+            logger.error(f"Window detection failed: {e}")
+            return []
+    
+    def _build_window_detection_prompt(self) -> str:
+        """Build prompt for window detection."""
+        return """Analyze this architectural floor plan and identify all windows and openings.
+
+For each window visible, return a JSON array with:
+[{
+    "bbox": [x1, y1, x2, y2] as percentage of image dimensions (0-100),
+    "type": "window" or "skylight" or "side_opening",
+    "confidence": 0.0-1.0 confidence in detection
+}]
+
+Rules:
+- Windows are typically represented as thin lines breaking wall segments
+- Skylights are shown as rectangular areas within roof spaces
+- Side openings are openings on exterior walls at ground level
+- Exclude doors, vents, and other small openings
+- Return valid JSON array only
+
+Examples of window symbols in floor plans:
+- Parallel thin lines on wall segments
+- Double lines at angles (double-hung windows)
+- Simple rectangles on wall perimeters
+- Repeated grid patterns (curtain walls, glazing)
+
+Return ONLY a JSON array: [{"bbox": [10, 20, 30, 40], "type": "window", "confidence": 0.95}, ...]"""
+    
+    def _parse_window_response(self, response_text: str) -> List[Dict[str, Any]]:
+        """Parse window detection response from Unsloth Qwen."""
+        try:
+            import re
+            # Extract JSON array from response
+            json_match = re.search(r'\[.*\]', response_text, re.DOTALL)
+            if not json_match:
+                logger.debug("No windows detected in response")
+                return []
+            
+            windows_raw = json.loads(json_match.group())
+            if not isinstance(windows_raw, list):
+                windows_raw = [windows_raw]
+            
+            # Normalize response
+            windows = []
+            for window in windows_raw:
+                bbox = window.get("bbox", [])
+                if len(bbox) == 4:
+                    # Convert percentage (0-100) to pixel coordinates
+                    bbox = [x * 10 for x in bbox]  # Assuming 0-1000 scale
+                
+                windows.append({
+                    "bbox": bbox,
+                    "confidence": float(window.get("confidence", 0.7)),
+                    "type": window.get("type", "window"),
+                })
+            
+            logger.debug(f"Detected {len(windows)} windows")
+            return windows
+        
+        except (json.JSONDecodeError, AttributeError) as e:
+            logger.debug(f"Failed to parse window response: {e}")
             return []
 
 
