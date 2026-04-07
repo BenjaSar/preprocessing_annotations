@@ -179,21 +179,26 @@ class PaddleOCRBackend(OCRBackend):
         if self.initialized:
             return
         try:
+            import os
             from paddleocr import PaddleOCR
+            
+            # Control PaddleOCR device via environment variable
+            # If device is 'cpu', disable CUDA to prevent PaddleOCR from loading models on GPU
+            if self.config.device == "cpu":
+                os.environ['CUDA_VISIBLE_DEVICES'] = ''  # Hide GPU from PaddleOCR
+                device_str = 'CPU'
+            else:
+                device_str = 'GPU'
             
             # Initialize PaddleOCR with minimal parameters (latest versions are strict about params)
             # Only use parameters that are widely supported
-            # device: "cpu" or "gpu" - force to CPU if device is "cpu" to save VRAM for VLM
-            use_gpu = self.config.device == "cuda"
-            
             self.ocr = PaddleOCR(
                 use_angle_cls=True,  # Enable rotated text detection
-                lang='en' if 'en' in self.config.languages else 'ch',
-                use_gpu=use_gpu,  # Explicit device control
+                lang='en' if 'en' in self.config.languages else 'ch'
             )
             
             self.initialized = True
-            logger.info(f"PaddleOCR initialized on device: {'GPU' if use_gpu else 'CPU'} (config.device={self.config.device})")
+            logger.info(f"PaddleOCR initialized on device: {device_str} (config.device={self.config.device})")
         except ImportError:
             logger.error(
                 "PaddleOCR not installed. Install via: "
