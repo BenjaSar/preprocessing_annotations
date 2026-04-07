@@ -894,12 +894,13 @@ class AnnotationPipeline:
         return stats
 
     def _get_vlm_result(self, img_path: Path):
-        """Get VLM annotation result, handling both Claude and Qwen backends."""
+        """Get VLM annotation result, handling both Claude and Qwen/Unsloth backends."""
         vlm = self.vlm_annotator
-        is_qwen = self.config.vlm.backend.lower() == "qwen"
+        backend_name = self.config.vlm.backend.lower()
+        is_local_vlm = backend_name in ("qwen", "unsloth")
         
-        if is_qwen:
-            # Qwen backend returns list of dicts from detect_rooms()
+        if is_local_vlm:
+            # Qwen and Unsloth backends return list of dicts from detect_rooms()
             rooms_dicts = vlm.detect_rooms(img_path)
             result = self._qwen_dicts_to_vlm_result(rooms_dicts, img_path)
         else:

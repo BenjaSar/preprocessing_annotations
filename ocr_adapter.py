@@ -182,11 +182,20 @@ class PaddleOCRBackend(OCRBackend):
             import os
             from paddleocr import PaddleOCR
             
-            # Control PaddleOCR device via environment variable
-            # If device is 'cpu', disable CUDA to prevent PaddleOCR from loading models on GPU
+            # Save original CUDA_VISIBLE_DEVICES to restore after PaddleOCR init
+            original_cuda_visible_devices = os.environ.get('CUDA_VISIBLE_DEVICES')
+            
+            # Control PaddleOCR device via PaddlePaddle's set_device() API
+            # This only affects PaddlePaddle, not PyTorch/CUDA, so Unsloth can still use GPU
             if self.config.device == "cpu":
-                os.environ['CUDA_VISIBLE_DEVICES'] = ''  # Hide GPU from PaddleOCR
-                device_str = 'CPU'
+                try:
+                    import paddle
+                    paddle.set_device('cpu')
+                    device_str = 'CPU (via paddle.set_device)'
+                except ImportError:
+                    # Fallback: use env var if paddle.set_device not available
+                    os.environ['CUDA_VISIBLE_DEVICES'] = ''
+                    device_str = 'CPU (via CUDA_VISIBLE_DEVICES)'
             else:
                 device_str = 'GPU'
             
@@ -196,6 +205,13 @@ class PaddleOCRBackend(OCRBackend):
                 use_angle_cls=True,  # Enable rotated text detection
                 lang='en' if 'en' in self.config.languages else 'ch'
             )
+            
+            # Restore original CUDA_VISIBLE_DEVICES to ensure other code can still use GPU
+            if original_cuda_visible_devices is not None:
+                os.environ['CUDA_VISIBLE_DEVICES'] = original_cuda_visible_devices
+            elif 'CUDA_VISIBLE_DEVICES' in os.environ:
+                # If we modified it and it didn't exist before, remove the modification
+                del os.environ['CUDA_VISIBLE_DEVICES']
             
             self.initialized = True
             logger.info(f"PaddleOCR initialized on device: {device_str} (config.device={self.config.device})")
