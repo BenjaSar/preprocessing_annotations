@@ -381,7 +381,12 @@ class Qwen2_5VLBackend(VLMBackend):
             return
         
         try:
-            from transformers import AutoProcessor, Qwen2VLForConditionalGeneration
+            from transformers import (
+                AutoProcessor,
+                Qwen2VLForConditionalGeneration,
+                Qwen2_5_VLForConditionalGeneration,
+                Qwen3VLForConditionalGeneration,
+            )
             import torch
             
             # Load model with quantization if configured
@@ -401,6 +406,17 @@ class Qwen2_5VLBackend(VLMBackend):
                 model_id = _DEFAULT_QWEN_MODEL
                 logger.info(f"Using default Qwen model: {model_id}")
             
+            # Determine which model class to use based on model ID
+            if "2.5" in model_id or "2_5" in model_id:
+                ModelClass = Qwen2_5_VLForConditionalGeneration
+                logger.info(f"Using Qwen2.5-VL model class")
+            elif "3" in model_id.split("/")[-1][:1]:  # Check if version starts with 3
+                ModelClass = Qwen3VLForConditionalGeneration
+                logger.info(f"Using Qwen3-VL model class")
+            else:
+                ModelClass = Qwen2VLForConditionalGeneration
+                logger.info(f"Using Qwen2-VL model class")
+            
             # Configure quantization
             quantization_config = None
             if self.config.qwen_quantization == "4bit":
@@ -414,12 +430,13 @@ class Qwen2_5VLBackend(VLMBackend):
                 quantization_config = BitsAndBytesConfig(load_in_8bit=True)
             
             # Load processor and model
-            self.processor = AutoProcessor.from_pretrained(model_id)
-            self.model = Qwen2VLForConditionalGeneration.from_pretrained(
+            self.processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
+            self.model = ModelClass.from_pretrained(
                 model_id,
                 quantization_config=quantization_config,
                 device_map=self.device,
                 torch_dtype=torch.float16 if self.device == "cuda" else torch.float32,
+                trust_remote_code=True,
             )
             
             self.initialized = True
@@ -450,6 +467,7 @@ class Qwen2_5VLBackend(VLMBackend):
         self.initialize()
         
         try:
+            import torch
             from PIL import Image
             
             # Load image
@@ -563,6 +581,9 @@ Rules:
             List of window detections
         """
         try:
+            import torch
+            from PIL import Image
+            
             self.initialize()
             
             image = Image.open(image_path)
@@ -683,8 +704,23 @@ class UnslothQwenBackend(VLMBackend):
             return
         
         try:
+            import os
             from unsloth import FastVisionModel
             import torch
+            
+            # Increase HuggingFace Hub timeout for slow connections
+            # Default is 10 seconds, we increase to 60 seconds for large model downloads
+            os.environ['HF_HUB_DOWNLOAD_TIMEOUT'] = '60'
+            
+            # Also configure huggingface_hub directly if available
+            try:
+                from huggingface_hub import constants
+                constants.HFHUB_DOWNLOAD_TIMEOUT = 60
+                logger.info("Set HuggingFace Hub timeout to 60s (via constants)")
+            except (ImportError, AttributeError):
+                pass
+            
+            logger.info("Set HuggingFace Hub download timeout to 60s")
             
             # Resolve model ID
             model_key = getattr(self.config, 'unsloth_model', 'qwen2.5-vl-7b').lower()
