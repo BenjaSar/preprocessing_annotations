@@ -41,6 +41,47 @@ pip install -e .
 annotate-pipeline --input ./pdfs --output ./results --use-vlm
 ```
 
+## VLM Backend Guide
+
+When using `--use-vlm`, you have three backend options:
+
+### Backend Comparison
+
+| Backend | Speed | Cost | VRAM | Internet | Best For |
+|---------|-------|------|------|----------|----------|
+| **Claude** (default) | 2-5 sec/image | ~$0.01-0.05/image | None | Yes | Fast testing, best quality |
+| **Qwen** | 30-60 sec/image | Free | 15 GB | No | No API cost, offline |
+| **Unsloth** | 15-30 sec/image | Free | 8 GB | No | Fast + free (2x faster than Qwen) |
+
+### Quick Commands
+
+```bash
+# Claude API (recommended for testing)
+python3 -m pipeline --input /home/ubuntu/floorplan_classifier/VLM/test_input \
+                    --output ./test_output_claude \
+                    --ocr-backend paddleocr --use-vlm
+
+# Qwen (local, no cost)
+python3 -m pipeline --input /home/ubuntu/floorplan_classifier/VLM/test_input \
+                    --output ./test_output_qwen \
+                    --ocr-backend paddleocr --use-vlm --vlm-backend qwen
+
+# Unsloth (fast + free, requires installation)
+pip install "unsloth[cu121]" --break-system-packages
+python3 -m pipeline --input /home/ubuntu/floorplan_classifier/VLM/test_input \
+                    --output ./test_output_unsloth \
+                    --ocr-backend paddleocr --use-vlm --vlm-backend unsloth
+```
+
+### Verify Backend is Running
+
+After starting the pipeline, check the log:
+```bash
+grep "Creating VLM backend" test_output_*/pipeline.log
+```
+
+---
+
 ## Command Line Interface
 
 ```bash
@@ -127,6 +168,28 @@ stats = pipeline.run(
 print(f"Processed {stats['images_extracted']} images")
 print(f"Flagged {stats['flagged_for_review']} for review")
 ```
+
+### 6. VLM Backend Selection
+
+Choose the backend that best fits your needs:
+
+```bash
+# Fastest testing (use default Claude backend)
+python main.py --input ./pdfs --output ./dataset --use-vlm
+
+# No API costs (use Qwen backend)
+python main.py --input ./pdfs --output ./dataset --use-vlm --vlm-backend qwen
+
+# Best speed + free (use Unsloth backend - requires installation)
+pip install "unsloth[cu121]" --break-system-packages
+python main.py --input ./pdfs --output ./dataset --use-vlm --vlm-backend unsloth
+```
+
+**Expected Processing Times** (for 2 test PDFs):
+- Claude: 15-30 minutes
+- Qwen: 60-120 minutes
+- Unsloth: 30-60 minutes
+- OCR only (no VLM): 5-10 minutes
 
 ## Project Structure
 
@@ -281,6 +344,66 @@ source .env
 - Use fast mode: `--fast`
 - Disable preprocessing: modify config
 - Reduce template scales
+
+## Frequently Asked Questions (VLM Backends)
+
+### Which VLM backend should I use?
+
+For **Phase 3 Testing**, choose based on your priorities:
+
+1. **Claude API** (Recommended for most users)
+   - Fastest results (2-5 sec/image)
+   - Best quality annotations
+   - Minimal setup
+   - Requires API key and internet
+   - Cost: ~$0.05-0.30 per floorplan
+
+2. **Qwen** (Best for avoiding API costs)
+   - Free to run
+   - Works offline
+   - Slower (30-60 sec/image)
+   - Requires 15 GB VRAM
+   - No installation challenges
+
+3. **Unsloth** (Best of both worlds)
+   - Free and fast (15-30 sec/image)
+   - Works offline
+   - 2x faster than Qwen
+   - Requires 8 GB VRAM
+   - Installation can take time due to compilation
+
+### Why is my pipeline using Claude and not Qwen?
+
+Because `--vlm-backend` defaults to `claude`. You must explicitly add `--vlm-backend qwen` to use Qwen.
+
+### Is Unsloth already installed?
+
+No. Installation requires Unsloth to compile against your CUDA version. You can install it with:
+```bash
+pip install "unsloth[cu121]" --break-system-packages
+```
+
+### Can I use Unsloth without installing it?
+
+No, you must install it first. Once installed, use: `--vlm-backend unsloth`
+
+### How much does Claude API cost?
+
+Approximately:
+- ~$0.01-0.05 per image (depends on complexity)
+- ~$0.05-0.30 per floorplan (varies by page count and room complexity)
+
+### How do I verify which backend is running?
+
+Check the pipeline log after starting:
+```bash
+grep "Creating VLM backend" test_output_*/pipeline.log
+```
+
+Should show:
+- `Creating VLM backend: claude`
+- `Creating VLM backend: qwen`
+- `Creating VLM backend: unsloth`
 
 ## Development
 

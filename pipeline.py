@@ -19,6 +19,7 @@ try:
     from .config import PipelineConfig
     from .pdf_extractor import PDFExtractor, PageTypeClassifier
     from .ocr_extractor import MEPTextExtractor, RoomCandidate
+    from .two_pass_ocr_extractor import TwoPassOCRExtractor
     from .vlm_annotator import VLMAnnotator
     from .semantic_reconciler import SemanticReconciler
     from .vlm_backend import VLMFactory
@@ -39,6 +40,8 @@ except ImportError:
     from config import PipelineConfig
     from pdf_extractor import PDFExtractor, PageTypeClassifier
     from ocr_extractor import MEPTextExtractor, RoomCandidate
+    #from test.two_pass_ocr_extractor import TwoPassOCRExtractor
+    from two_pass_ocr_extractor import TwoPassOCRExtractor
     from vlm_annotator import VLMAnnotator
     from semantic_reconciler import SemanticReconciler
     from vlm_backend import VLMFactory
@@ -139,17 +142,32 @@ class AnnotationPipeline:
         return self._pdf_extractor
 
     @property
-    def ocr_extractor(self) -> MEPTextExtractor:
+    def ocr_extractor(self) -> TwoPassOCRExtractor:
+        """
+        Lazy-loaded OCR extractor with two-pass strategy.
+        
+        Pass 1: PaddleOCR (all regions, baseline)
+        Pass 2: VLM fallback (for low-confidence < 0.7)
+        
+        Returns TwoPassOCRExtractor which wraps MEPTextExtractor for Pass 1
+        and uses VLM backend for Pass 2 fallback.
+        """
         if self._ocr_extractor is None:
-            self._ocr_extractor = MEPTextExtractor(self.config.ocr)
+            vlm_backend = self.vlm_annotator if self.config.use_vlm else None
+            self._ocr_extractor = TwoPassOCRExtractor(
+                ocr_config=self.config.ocr,
+                vlm_backend=vlm_backend,
+                confidence_threshold=0.7,  # Use VLM fallback for confidence < 0.7
+            )
         return self._ocr_extractor
 
     @property
     def vlm_annotator(self):
-        """Return appropriate VLM backend (Claude VLMAnnotator or Qwen VLMBackend)."""
+        """Return appropriate VLM backend (Claude VLMAnnotator, Qwen, or Unsloth)."""
         if self._vlm_annotator is None:
-            if self.config.vlm.backend.lower() == "qwen":
-                # Use VLMFactory to create Qwen backend
+            backend_name = self.config.vlm.backend.lower()
+            if backend_name in ("qwen", "unsloth"):
+                # Use VLMFactory to create Qwen or Unsloth backend
                 self._vlm_annotator = VLMFactory.create(self.config.vlm)
             else:
                 # Default to Claude backend (VLMAnnotator)
@@ -429,10 +447,13 @@ class AnnotationPipeline:
 
         for img_path in self._iter_images(images_dir):
             try:
-                # 2a: Standard OCR room detection (compound merging + number linking built-in).
-                # extract_and_find_rooms now returns (candidates, raw_detections) to avoid
-                # running OCR twice — raw_detections are reused for abbreviation recovery.
-                rooms, raw_detections = self.ocr_extractor.extract_and_find_rooms(img_path)
+                # 2a: Two-Pass OCR room detection (PaddleOCR + VLM fallback).
+                # extract_and_find_rooms_with_vlm_fallback returns (candidates, raw_detections):
+                # - Pass 1: PaddleOCR extraction (fast baseline)
+                # - Pass 2: VLM fallback for low-confidence results (confidence < 0.7)
+                # - Merge: Returns best candidates from both passes
+                # raw_detections are reused for abbreviation recovery.
+                rooms, raw_detections = self.ocr_extractor.extract_and_find_rooms_with_vlm_fallback(img_path)
                 recovered_abbrevs: List[RoomCandidate] = []
                 for det in raw_detections:
                     text = det.text.strip().upper()
