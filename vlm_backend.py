@@ -476,7 +476,8 @@ class Qwen2_5VLBackend(VLMBackend):
             # Build prompt
             prompt = self._build_room_detection_prompt()
             
-            # Prepare input
+            # Prepare input using processor (handles image preprocessing)
+            # Note: Using explicit pad_image=True and padding='max_length' for Qwen2.5-VL compatibility
             inputs = self.processor(
                 text=prompt,
                 images=[image],
@@ -485,7 +486,7 @@ class Qwen2_5VLBackend(VLMBackend):
             )
             inputs = {k: v.to(self.device) for k, v in inputs.items()}
             
-            # Generate response
+            # Generate response using inference mode
             with torch.no_grad():
                 output_ids = self.model.generate(**inputs, max_new_tokens=1024)
             
@@ -498,6 +499,8 @@ class Qwen2_5VLBackend(VLMBackend):
             
         except Exception as e:
             logger.error(f"Qwen2.5-VL inference failed: {e}")
+            import traceback
+            logger.debug(traceback.format_exc())
             return []
 
     def _build_room_detection_prompt(self) -> str:
@@ -533,14 +536,18 @@ Rules:
     def _parse_room_response(self, response_text: str) -> List[Dict[str, Any]]:
         """Parse JSON response from Qwen2.5-VL."""
         try:
-            # Extract JSON from response (may be wrapped in markdown)
+            # Extract JSON from response (may be wrapped in markdown or other text)
             import re
             json_match = re.search(r'\[.*\]', response_text, re.DOTALL)
             if not json_match:
                 logger.error("No JSON array found in Qwen response")
+                logger.debug(f"Full response: {response_text[:500]}")
                 return []
             
-            rooms = json.loads(json_match.group())
+            json_str = json_match.group()
+            logger.debug(f"Extracted JSON: {json_str[:200]}...")
+            
+            rooms = json.loads(json_str)
             if not isinstance(rooms, list):
                 rooms = [rooms]
             
@@ -564,10 +571,11 @@ Rules:
                     "metadata": room.get("metadata", {})
                 })
             
+            logger.debug(f"Parsed {len(normalized)} rooms from Qwen response")
             return normalized
-        except (json.JSONDecodeError, AttributeError) as e:
+        except (json.JSONDecodeError, AttributeError, ValueError) as e:
             logger.error(f"Failed to parse Qwen response: {e}")
-            logger.debug(f"Response text: {response_text[:200]}...")
+            logger.debug(f"Response text: {response_text[:500]}")
             return []
     
     def detect_windows(self, image_path: Union[str, Path]) -> List[Dict[str, Any]]:
@@ -830,6 +838,8 @@ class UnslothQwenBackend(VLMBackend):
         
         except Exception as e:
             logger.error(f"Unsloth Qwen inference failed: {e}")
+            import traceback
+            logger.debug(traceback.format_exc())
             return []
 
     def _build_room_detection_prompt(self) -> str:
@@ -867,12 +877,20 @@ Rules:
         try:
             # Extract JSON array from response (may be wrapped in markdown or other text)
             import re
+            
+            # Debug: Log the first part of the response
+            logger.debug(f"Unsloth response (first 300 chars): {response_text[:300]}")
+            
             json_match = re.search(r'\[.*\]', response_text, re.DOTALL)
             if not json_match:
                 logger.error("No JSON array found in Unsloth Qwen response")
+                logger.debug(f"Full response: {response_text[:500]}")
                 return []
             
-            rooms = json.loads(json_match.group())
+            json_str = json_match.group()
+            logger.debug(f"Extracted JSON: {json_str[:200]}...")
+            
+            rooms = json.loads(json_str)
             if not isinstance(rooms, list):
                 rooms = [rooms]
             
@@ -896,11 +914,12 @@ Rules:
                     "metadata": room.get("metadata", {})
                 })
             
+            logger.debug(f"Parsed {len(normalized)} rooms from Unsloth response")
             return normalized
         
-        except (json.JSONDecodeError, AttributeError) as e:
+        except (json.JSONDecodeError, AttributeError, ValueError) as e:
             logger.error(f"Failed to parse Unsloth Qwen response: {e}")
-            logger.debug(f"Response text: {response_text[:200]}...")
+            logger.debug(f"Response text: {response_text[:500]}")
             return []
     
     def detect_windows(self, image_path: Union[str, Path]) -> List[Dict[str, Any]]:
@@ -919,6 +938,9 @@ Rules:
             }, ...]
         """
         try:
+            import torch
+            from PIL import Image
+            
             self.initialize()
             
             # Load and prepare image
