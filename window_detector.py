@@ -453,7 +453,10 @@ def apply_window_suffixes(
         rooms: List of room dicts to modify (modified in-place).
         window_mappings: Results from window detection/mapping.
     """
-    from automation.taxonomy import add_window_suffix
+    try:
+        from .automation.taxonomy import add_window_suffix
+    except ImportError:
+        from automation.taxonomy import add_window_suffix
 
     # Build lookup table
     mapping_by_id = {m.room_id: m for m in window_mappings}

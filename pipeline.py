@@ -1078,6 +1078,12 @@ class AnnotationPipeline:
 
         # Phase 2: Apply window detection and suffix augmentation
         try:
+            # Import add_window_suffix with fallback for different module import contexts
+            try:
+                from .automation.taxonomy import add_window_suffix
+            except ImportError:
+                from automation.taxonomy import add_window_suffix
+            
             # Convert rooms to format expected by window detector
             rooms_for_detection = [
                 {
@@ -1106,8 +1112,6 @@ class AnnotationPipeline:
                     (m for m in window_mappings if m.room_id == room_id), None
                 )
                 if mapping:
-                    from automation.taxonomy import add_window_suffix
-
                     base_type = sft_room.get("type", "UNKNOWN")
                     suffixed_type = add_window_suffix(
                         base_type,
@@ -1205,6 +1209,12 @@ class AnnotationPipeline:
 
         # Phase 2: Apply window detection and suffix augmentation
         try:
+            # Import add_window_suffix with fallback for different module import contexts
+            try:
+                from .automation.taxonomy import add_window_suffix
+            except ImportError:
+                from automation.taxonomy import add_window_suffix
+            
             # Convert rooms to format expected by window detector
             rooms_for_detection = [
                 {
@@ -1233,8 +1243,6 @@ class AnnotationPipeline:
                     (m for m in window_mappings if m.room_id == room_id), None
                 )
                 if mapping:
-                    from automation.taxonomy import add_window_suffix
-
                     base_type = sft_room.get("type", "UNKNOWN")
                     suffixed_type = add_window_suffix(
                         base_type,

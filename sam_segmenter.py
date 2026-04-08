@@ -79,7 +79,13 @@ class RoomSegmenter:
                     "Install with: pip install segment-anything"
                 )
 
+            # Resolve checkpoint path: if relative, resolve relative to module directory
             checkpoint_path = Path(self.config.checkpoint)
+            if not checkpoint_path.is_absolute():
+                # Resolve relative to this module's directory
+                module_dir = Path(__file__).parent
+                checkpoint_path = module_dir / checkpoint_path
+            
             if not checkpoint_path.exists():
                 raise SAMSegmentationError(
                     f"SAM checkpoint not found: {checkpoint_path}. "

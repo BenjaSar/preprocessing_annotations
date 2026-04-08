@@ -175,50 +175,52 @@ class PaddleOCRBackend(OCRBackend):
         self.initialized = False
 
     def initialize(self) -> None:
-        """Lazy-load PaddleOCR model on first use."""
+        """Lazy-load PaddleOCR model on first use.
+        
+        Uses PaddleOCR 2.x API with use_gpu parameter for device control.
+        Falls back to CPU if GPU initialization fails (e.g., cuDNN not installed).
+        """
         if self.initialized:
             return
         try:
-            import os
             from paddleocr import PaddleOCR
             
-            # Save original CUDA_VISIBLE_DEVICES to restore after PaddleOCR init
-            original_cuda_visible_devices = os.environ.get('CUDA_VISIBLE_DEVICES')
+            # PaddleOCR 2.x: use_gpu parameter controls device
+            # Try GPU first if configured for CUDA
+            use_gpu = (self.config.device == "cuda")
             
-            # Control PaddleOCR device via PaddlePaddle's set_device() API
-            # This only affects PaddlePaddle, not PyTorch/CUDA, so Unsloth can still use GPU
-            if self.config.device == "cpu":
-                try:
-                    import paddle
-                    paddle.set_device('cpu')
-                    device_str = 'CPU (via paddle.set_device)'
-                except ImportError:
-                    # Fallback: use env var if paddle.set_device not available
-                    os.environ['CUDA_VISIBLE_DEVICES'] = ''
-                    device_str = 'CPU (via CUDA_VISIBLE_DEVICES)'
-            else:
-                device_str = 'GPU'
-            
-            # Initialize PaddleOCR with minimal parameters (latest versions are strict about params)
-            # Only use parameters that are widely supported
-            self.ocr = PaddleOCR(
-                use_angle_cls=True,  # Enable rotated text detection
-                lang='en' if 'en' in self.config.languages else 'ch'
-            )
-            
-            # Restore original CUDA_VISIBLE_DEVICES to ensure other code can still use GPU
-            if original_cuda_visible_devices is not None:
-                os.environ['CUDA_VISIBLE_DEVICES'] = original_cuda_visible_devices
-            elif 'CUDA_VISIBLE_DEVICES' in os.environ:
-                # If we modified it and it didn't exist before, remove the modification
-                del os.environ['CUDA_VISIBLE_DEVICES']
-            
-            self.initialized = True
-            logger.info(f"PaddleOCR initialized on device: {device_str} (config.device={self.config.device})")
+            # Attempt GPU initialization with fallback
+            try:
+                self.ocr = PaddleOCR(
+                    use_angle_cls=True,  # Enable text line orientation classification
+                    lang='en' if 'en' in self.config.languages else 'ch',
+                    use_gpu=use_gpu
+                )
+                self.initialized = True
+                device_str = 'GPU' if use_gpu else 'CPU'
+                logger.info(f"PaddleOCR initialized on device: {device_str} (paddlepaddle-gpu 2.6.2)")
+            except RuntimeError as e:
+                # Catch cuDNN loading errors and other GPU-specific issues
+                if use_gpu and ('cudnn' in str(e).lower() or 'cuda' in str(e).lower()):
+                    logger.warning(
+                        f"GPU initialization failed (cuDNN not found or incompatible): {e}. "
+                        "Falling back to CPU mode."
+                    )
+                    # Retry with CPU
+                    self.ocr = PaddleOCR(
+                        use_angle_cls=True,
+                        lang='en' if 'en' in self.config.languages else 'ch',
+                        use_gpu=False
+                    )
+                    self.initialized = True
+                    logger.info("PaddleOCR initialized on device: CPU (fallback from GPU)")
+                else:
+                    # Re-raise if not a cuDNN issue
+                    raise
         except ImportError:
             logger.error(
                 "PaddleOCR not installed. Install via: "
-                "pip install paddlepaddle paddleocr"
+                "pip install paddlepaddle-gpu paddleocr"
             )
             raise
 
