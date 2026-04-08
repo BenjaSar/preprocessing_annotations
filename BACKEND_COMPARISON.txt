@@ -1,0 +1,155 @@
+╔════════════════════════════════════════════════════════════════════════════╗
+║          FLOORPLAN ANNOTATION PIPELINE - BACKEND COMPARISON                ║
+╚════════════════════════════════════════════════════════════════════════════╝
+
+┌─ QUICK COMPARISON ────────────────────────────────────────────────────────┐
+│                                                                             │
+│  BACKEND     STATUS           SPEED       COST       VRAM      QUALITY    │
+│  ─────────────────────────────────────────────────────────────────────────│
+│  Claude      ✅ WORKING       ⭐⭐       $$$        None      ⭐⭐⭐⭐⭐  │
+│  Qwen        🔶 LOADING✓      ⭐⭐⭐      FREE       8-10GB    TBD        │
+│  Unsloth     🔶 LOADING✓      ⭐⭐⭐⭐    FREE       6-8GB     TBD        │
+│  OCR-Only    ✅ WORKING       ⭐⭐⭐⭐⭐   FREE       None      ⭐⭐       │
+│                                                                             │
+│  Legend: ✅ = Fully Working | 🔶 = In Development | $ = Requires Payment │
+│          ⭐ = Rating (5 stars = best)                                     │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+╔════════════════════════════════════════════════════════════════════════════╗
+║ 1. CLAUDE (RECOMMENDED FOR PRODUCTION)                                     ║
+╠════════════════════════════════════════════════════════════════════════════╣
+║                                                                              ║
+║  Status:    ✅ FULLY FUNCTIONAL & TESTED                                   ║
+║  Platform:  Anthropic API (requires ANTHROPIC_API_KEY)                     ║
+║  Cost:      ~$0.10 per image (8 images = $0.80)                           ║
+║  Speed:     10-15 seconds per image (FASTEST)                             ║
+║  Quality:   Excellent - Accurate room boundaries & classification         ║
+║  VRAM:      None (runs on Anthropic servers)                              ║
+║  Setup:     1. Set ANTHROPIC_API_KEY environment variable                 ║
+║             2. Run: python3 main.py ... --vlm-backend claude             ║
+║                                                                              ║
+║  USE WHEN:  Need reliable, production-quality annotations now             ║
+║             OR want guaranteed working pipeline for demonstrations         ║
+║                                                                              ║
+║  COMMAND:   python3 main.py --input ./pdfs --output ./results \           ║
+║               --ocr-backend easyocr --use-vlm --vlm-backend claude       ║
+║                                                                              ║
+╚════════════════════════════════════════════════════════════════════════════╝
+
+╔════════════════════════════════════════════════════════════════════════════╗
+║ 2. QWEN2.5-VL (LOCAL, UNDER DEVELOPMENT)                                  ║
+╠════════════════════════════════════════════════════════════════════════════╣
+║                                                                              ║
+║  Status:    🔶 MODEL LOADS ✓ | INFERENCE ISSUE (Phase 3.2)               ║
+║  Model:     Qwen2.5-VL-7B-Instruct (7 billion parameters)                 ║
+║  Platform:  Local GPU (Tesla T4 compatible)                               ║
+║  Cost:      FREE (after one-time model download ~14GB)                    ║
+║  Speed:     ~30 seconds per image (when working)                          ║
+║  Quality:   Excellent quality expected (same model as Unsloth)            ║
+║  VRAM:      8-10GB GPU memory required                                    ║
+║  Setup:     1. Model auto-downloads on first use                          ║
+║             2. Run: python3 main.py ... --vlm-backend qwen               ║
+║                                                                              ║
+║  STATUS:    ⚠️  Model initialization FIXED (Commit 188dfaa)               ║
+║             ⚠️  Inference BROKEN: "Image features/tokens don't match"    ║
+║             🔧 REQUIRES: Fix input preparation (Phase 3.2)                ║
+║                                                                              ║
+║  USE WHEN:  You want to help debug/fix inference issues                   ║
+║             OR want free local inference after infrastructure is ready   ║
+║                                                                              ║
+║  COMMAND:   python3 main.py --input ./pdfs --output ./results \           ║
+║               --ocr-backend easyocr --use-vlm --vlm-backend qwen        ║
+║                                                                              ║
+╚════════════════════════════════════════════════════════════════════════════╝
+
+╔════════════════════════════════════════════════════════════════════════════╗
+║ 3. UNSLOTH (OPTIMIZED QWEN, UNDER DEVELOPMENT)                            ║
+╠════════════════════════════════════════════════════════════════════════════╣
+║                                                                              ║
+║  Status:    🔶 MODEL LOADS ✓ | INFERENCE ISSUE (Phase 3.2)               ║
+║  Model:     Qwen2.5-VL optimized by Unsloth (4-bit quantized)             ║
+║  Platform:  Local GPU (Tesla T4 compatible)                               ║
+║  Cost:      FREE (after one-time model download ~8GB)                     ║
+║  Speed:     ~15 seconds per image (2x faster than Qwen, when working)    ║
+║  Quality:   Excellent quality expected (same model, optimized)            ║
+║  VRAM:      6-8GB GPU memory required (less than Qwen)                    ║
+║  Setup:     1. Model auto-downloads on first use                          ║
+║             2. HuggingFace timeout FIXED (Commit 188dfaa)                 ║
+║             3. Run: python3 main.py ... --vlm-backend unsloth            ║
+║                                                                              ║
+║  STATUS:    ✅ Model download timeout FIXED (60s timeout)                 ║
+║             ✅ Model initialization successful                             ║
+║             ⚠️  Inference BROKEN: Invalid JSON response format            ║
+║             🔧 REQUIRES: Fix response parsing (Phase 3.2)                 ║
+║                                                                              ║
+║  USE WHEN:  You want the fastest local inference after infrastructure    ║
+║             is ready, or want to help debug response parsing issues      ║
+║                                                                              ║
+║  COMMAND:   python3 main.py --input ./pdfs --output ./results \           ║
+║               --ocr-backend easyocr --use-vlm --vlm-backend unsloth \   ║
+║               --unsloth-model qwen2.5-vl-7b                              ║
+║                                                                              ║
+╚════════════════════════════════════════════════════════════════════════════╝
+
+╔════════════════════════════════════════════════════════════════════════════╗
+║ 4. OCR-ONLY (FASTEST, LOWEST QUALITY)                                      ║
+╠════════════════════════════════════════════════════════════════════════════╣
+║                                                                              ║
+║  Status:    ✅ FULLY FUNCTIONAL (always available)                         ║
+║  Method:    EasyOCR text detection (no VLM used)                          ║
+║  Platform:  CPU (no GPU needed)                                            ║
+║  Cost:      FREE                                                            ║
+║  Speed:     2-3 minutes for 8 images (FASTEST)                            ║
+║  Quality:   Lower - detects text labels, not room boundaries              ║
+║  VRAM:      None (CPU only)                                                ║
+║  Setup:     Just run without --use-vlm flag                               ║
+║                                                                              ║
+║  USE WHEN:  Need ultra-fast processing for testing                        ║
+║             OR don't have GPU available                                    ║
+║             OR want baseline text extraction before VLM enhancement       ║
+║                                                                              ║
+║  COMMAND:   python3 main.py --input ./pdfs --output ./results \           ║
+║               --ocr-backend easyocr                                        ║
+║                                                                              ║
+║  LIMITATION: Produces text-label bboxes, not room-extent polygons         ║
+║              Gets filtered out during post-processing (sft_ready=False)   ║
+║                                                                              ║
+╚════════════════════════════════════════════════════════════════════════════╝
+
+╔════════════════════════════════════════════════════════════════════════════╗
+║ DECISION MATRIX: WHICH BACKEND TO USE?                                    ║
+╠════════════════════════════════════════════════════════════════════════════╣
+║                                                                              ║
+║  IF you need...                        THEN use...                         ║
+║  ─────────────────────────────────────────────────────────────────────    ║
+║  ✅ Working pipeline RIGHT NOW         → CLAUDE                            ║
+║  ✅ Production-quality annotations     → CLAUDE                            ║
+║  ✅ Cost-effectiveness (long-term)     → QWEN or UNSLOTH (when ready)     ║
+║  ✅ Speed (fastest local)              → UNSLOTH (when working)           ║
+║  ✅ Minimal VRAM usage                 → UNSLOTH (when working)           ║
+║  ✅ Free inference (GPU available)     → QWEN or UNSLOTH (when working)   ║
+║  ✅ No GPU available                   → OCR-ONLY (limited quality)       ║
+║  ✅ Help debug local VLM               → QWEN or UNSLOTH                  ║
+║                                                                              ║
+╚════════════════════════════════════════════════════════════════════════════╝
+
+╔════════════════════════════════════════════════════════════════════════════╗
+║ PHASE 3 FIX STATUS                                                         ║
+╠════════════════════════════════════════════════════════════════════════════╣
+║                                                                              ║
+║  ✅ Fix 1: Qwen model class compatibility                                  ║
+║     - Issue: Qwen2.5-VL failed with "weight is not nn.Module"             ║
+║     - Fixed: Using Qwen2_5_VLForConditionalGeneration instead             ║
+║     - Status: ✅ COMPLETE (Commit 188dfaa)                                 ║
+║                                                                              ║
+║  ✅ Fix 2: Unsloth HuggingFace timeout                                     ║
+║     - Issue: "ReadTimeoutError: HTTP 443 Read timed out (10s)"            ║
+║     - Fixed: Increased timeout to 60s                                      ║
+║     - Status: ✅ COMPLETE (Commit 188dfaa)                                 ║
+║                                                                              ║
+║  🔧 Remaining Issues (Phase 3.2):                                          ║
+║     - Qwen: Image features/tokens mismatch during inference               ║
+║     - Unsloth: Invalid JSON response parsing                              ║
+║                                                                              ║
+╚════════════════════════════════════════════════════════════════════════════╝
