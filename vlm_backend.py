@@ -548,13 +548,23 @@ Rules:
         try:
             # Extract JSON from response (may be wrapped in markdown or other text)
             import re
-            json_match = re.search(r'\[.*\]', response_text, re.DOTALL)
+            
+            # Try to find JSON array - use greedy matching
+            # First try standard JSON array pattern
+            json_match = re.search(r'\[\s*\{.*?\}\s*\]', response_text, re.DOTALL)
+            
+            # If standard pattern fails, try to find any array-like structure
+            if not json_match:
+                json_match = re.search(r'\[.*\]', response_text, re.DOTALL)
+            
             if not json_match:
                 logger.error("No JSON array found in Qwen response")
                 logger.debug(f"Full response: {response_text[:500]}")
                 return []
             
             json_str = json_match.group()
+            # Clean up any trailing/leading whitespace
+            json_str = json_str.strip()
             logger.debug(f"Extracted JSON: {json_str[:200]}...")
             
             rooms = json.loads(json_str)
@@ -846,6 +856,9 @@ class UnslothQwenBackend(VLMBackend):
                 skip_special_tokens=True
             )
             
+            # Clean up response text
+            response_text = response_text.strip()
+            
             # Parse room detections from response
             rooms = self._parse_room_response(response_text)
             return rooms
@@ -895,13 +908,22 @@ Rules:
             # Debug: Log the first part of the response
             logger.debug(f"Unsloth response (first 300 chars): {response_text[:300]}")
             
-            json_match = re.search(r'\[.*\]', response_text, re.DOTALL)
+            # Try to find JSON array - use greedy matching
+            # First try standard JSON array pattern
+            json_match = re.search(r'\[\s*\{.*?\}\s*\]', response_text, re.DOTALL)
+            
+            # If standard pattern fails, try to find any array-like structure
+            if not json_match:
+                json_match = re.search(r'\[.*\]', response_text, re.DOTALL)
+            
             if not json_match:
                 logger.error("No JSON array found in Unsloth Qwen response")
                 logger.debug(f"Full response: {response_text[:500]}")
                 return []
             
             json_str = json_match.group()
+            # Clean up any trailing/leading whitespace
+            json_str = json_str.strip()
             logger.debug(f"Extracted JSON: {json_str[:200]}...")
             
             rooms = json.loads(json_str)
