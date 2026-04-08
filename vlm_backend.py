@@ -27,6 +27,14 @@ import json
 import base64
 import io
 
+# Try to import torch at module level for VLM inference
+# Some VLM models may reference torch directly during generation
+try:
+    import torch
+except ImportError:
+    # Torch will be imported locally in methods that need it
+    torch = None
+
 logger = logging.getLogger(__name__)
 
 
@@ -490,7 +498,9 @@ class Qwen2_5VLBackend(VLMBackend):
             with torch.no_grad():
                 output_ids = self.model.generate(**inputs, max_new_tokens=1024)
             
-            # Decode response
+            # Decode response (move to CPU if needed for batch_decode)
+            if hasattr(output_ids, 'cpu'):
+                output_ids = output_ids.cpu()
             response_text = self.processor.batch_decode(output_ids, skip_special_tokens=True)[0]
             
             # Parse response
@@ -826,9 +836,13 @@ class UnslothQwenBackend(VLMBackend):
                     top_p=0.9,
                 )
             
-            # Decode response
+            # Decode response (move to CPU if needed)
+            output_first = output_ids[0]
+            if hasattr(output_first, 'cpu'):
+                output_first = output_first.cpu()
+            
             response_text = self.tokenizer.decode(
-                output_ids[0],
+                output_first,
                 skip_special_tokens=True
             )
             
