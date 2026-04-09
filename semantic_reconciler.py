@@ -152,9 +152,18 @@ class SemanticReconciler:
             try:
                 room_id = result.get('room_id', f"room_{idx}")
                 polygon = result.get('polygon', [])
+                
+                # If no polygon but bbox exists, create polygon from bbox
                 if not polygon:
-                    logger.warning(f"VLM result {room_id} has no polygon. Skipping.")
-                    continue
+                    bbox = result.get('bbox', [])
+                    if bbox and len(bbox) == 4:
+                        x1, y1, x2, y2 = bbox
+                        # Convert bbox to rectangle polygon: [top-left, top-right, bottom-right, bottom-left]
+                        polygon = [[x1, y1], [x2, y1], [x2, y2], [x1, y2]]
+                        logger.debug(f"VLM result {room_id} has no polygon, created from bbox {bbox}")
+                    else:
+                        logger.warning(f"VLM result {room_id} has no polygon or bbox. Skipping.")
+                        continue
                 
                 vlm_rooms.append(VLMRoom(
                     room_id=room_id,

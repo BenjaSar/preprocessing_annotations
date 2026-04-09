@@ -45,6 +45,7 @@ class RoomAnnotation:
     room_name: str
     category: str
     bbox: List[int]  # [x, y, width, height]
+    name_expanded: Optional[str] = None  # Abbreviation expansion (e.g., "BR" -> "BEDROOM")
 
 
 @dataclass
@@ -342,6 +343,7 @@ Output ONLY valid JSON with this exact structure:
                 response = self.client.messages.create(
                     model=self.config.model,
                     max_tokens=self.config.max_tokens,
+                    temperature=0.0,  # Deterministic output for reproducible annotations
                     messages=[
                         {
                             "role": "user",

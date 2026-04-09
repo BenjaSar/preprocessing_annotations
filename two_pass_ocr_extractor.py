@@ -189,11 +189,13 @@ class TwoPassOCRExtractor:
             # Convert VLM detections to RoomCandidate format
             room_candidates = []
             for detection in vlm_detections:
-                # VLM returns bbox as list, convert to tuple
+                # VLM returns bbox as [x1, y1, x2, y2], convert to (x, y, w, h) to match Pass 1 format
                 bbox = detection.get("bbox")
                 if bbox and isinstance(bbox, (list, tuple)):
                     if len(bbox) >= 4:
-                        bbox_tuple = (int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3]))
+                        # Convert [x1, y1, x2, y2] -> (x, y, w, h)
+                        x1, y1, x2, y2 = bbox[0], bbox[1], bbox[2], bbox[3]
+                        bbox_tuple = (int(x1), int(y1), int(x2 - x1), int(y2 - y1))
                     else:
                         logger.warning(f"Invalid bbox format: {bbox}, skipping")
                         continue

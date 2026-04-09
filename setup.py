@@ -14,9 +14,9 @@ setup(
         "Pillow>=9.0.0",
         "opencv-python>=4.6.0",
         "numpy>=1.21.0",
-        # OCR backends
-        "paddlepaddle>=2.5.0",  # PaddleOCR engine (default OCR backend)
-        "paddleocr>=2.7.0.3",   # PaddleOCR wrapper (default OCR backend)
+        # OCR backends (PaddleOCR 2.x with GPU support)
+        "paddlepaddle-gpu>=2.6.0,<3.0",  # PaddleOCR GPU engine (CUDA 11.8 bundled)
+        "paddleocr>=2.7.0,<3.0",         # PaddleOCR wrapper (2.x API)
         # VLM and other dependencies
         "anthropic>=0.7.0",
         "segment-anything>=1.0",

@@ -158,6 +158,7 @@ class ClaudeBackend(VLMBackend):
             message = self.client.messages.create(
                 model=self.config.model,
                 max_tokens=self.config.max_tokens,
+                temperature=0.0,  # Deterministic output for reproducible annotations
                 messages=[
                     {
                         "role": "user",
@@ -292,6 +293,7 @@ Return ONLY a JSON array, e.g.: [{"room_id": "room_0", "room_type": "CONFERENCE"
             response = client.messages.create(
                 model=self.config.model,
                 max_tokens=2048,
+                temperature=0.0,  # Deterministic output for reproducible window detection
                 messages=[
                     {
                         "role": "user",
@@ -503,8 +505,9 @@ class Qwen2_5VLBackend(VLMBackend):
                 output_ids = output_ids.cpu()
             response_text = self.processor.batch_decode(output_ids, skip_special_tokens=True)[0]
             
-            # Parse response
-            rooms = self._parse_room_response(response_text)
+            # Parse response (pass actual image dimensions for correct bbox scaling)
+            img_width, img_height = image.size
+            rooms = self._parse_room_response(response_text, img_width, img_height)
             return rooms
             
         except Exception as e:
@@ -543,7 +546,7 @@ Rules:
 - Preserve original labels; do NOT expand abbreviations
 - Return valid JSON only"""
      
-    def _parse_room_response(self, response_text: str) -> List[Dict[str, Any]]:
+    def _parse_room_response(self, response_text: str, img_width: int = 1000, img_height: int = 1000) -> List[Dict[str, Any]]:
         """Parse JSON response from Qwen2.5-VL."""
         try:
             # Extract JSON from response (may be wrapped in markdown or other text)
@@ -574,12 +577,18 @@ Rules:
             # Normalize response format
             normalized = []
             for idx, room in enumerate(rooms):
-                # Convert bbox percentages to pixel coordinates
+                # Convert bbox percentages to pixel coordinates using actual image dimensions
                 bbox = room.get("bbox")
                 if bbox and len(bbox) == 4:
-                    # Assuming image is max 1000x1000 for normalization
-                    # In real use, this would need actual image dimensions
-                    bbox = [x * 10 for x in bbox]  # 0-100 -> 0-1000
+                    # Qwen returns [x1%, y1%, x2%, y2%] in 0-100 range
+                    # Scale to actual pixel coordinates: x-coords use width, y-coords use height
+                    x1_pct, y1_pct, x2_pct, y2_pct = bbox
+                    bbox = [
+                        int(x1_pct * img_width / 100),
+                        int(y1_pct * img_height / 100),
+                        int(x2_pct * img_width / 100),
+                        int(y2_pct * img_height / 100)
+                    ]
                 
                 normalized.append({
                     "room_id": room.get("room_id", f"room_{idx}"),
@@ -859,8 +868,9 @@ class UnslothQwenBackend(VLMBackend):
             # Clean up response text
             response_text = response_text.strip()
             
-            # Parse room detections from response
-            rooms = self._parse_room_response(response_text)
+            # Parse room detections from response (pass actual image dimensions for correct bbox scaling)
+            img_width, img_height = image.size
+            rooms = self._parse_room_response(response_text, img_width, img_height)
             return rooms
         
         except Exception as e:
@@ -899,7 +909,7 @@ Rules:
 - Preserve original labels; do NOT expand abbreviations
 - Return valid JSON only"""
     
-    def _parse_room_response(self, response_text: str) -> List[Dict[str, Any]]:
+    def _parse_room_response(self, response_text: str, img_width: int = 1000, img_height: int = 1000) -> List[Dict[str, Any]]:
         """Parse JSON response from Unsloth Qwen."""
         try:
             # Extract JSON array from response (may be wrapped in markdown or other text)
@@ -933,12 +943,18 @@ Rules:
             # Normalize response format
             normalized = []
             for idx, room in enumerate(rooms):
-                # Convert bbox percentages (0-100) to pixel coordinates
+                # Convert bbox percentages (0-100) to pixel coordinates using actual image dimensions
                 bbox = room.get("bbox")
                 if bbox and len(bbox) == 4:
-                    # Assuming image is max 1000x1000 for normalization
-                    # In real use, this would need actual image dimensions
-                    bbox = [x * 10 for x in bbox]  # 0-100 -> 0-1000
+                    # Qwen returns [x1%, y1%, x2%, y2%] in 0-100 range
+                    # Scale to actual pixel coordinates: x-coords use width, y-coords use height
+                    x1_pct, y1_pct, x2_pct, y2_pct = bbox
+                    bbox = [
+                        int(x1_pct * img_width / 100),
+                        int(y1_pct * img_height / 100),
+                        int(x2_pct * img_width / 100),
+                        int(y2_pct * img_height / 100)
+                    ]
                 
                 normalized.append({
                     "room_id": room.get("room_id", f"room_{idx}"),
