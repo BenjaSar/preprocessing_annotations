@@ -496,9 +496,9 @@ class Qwen2_5VLBackend(VLMBackend):
             )
             inputs = {k: v.to(self.device) for k, v in inputs.items()}
             
-             # Generate response using inference mode (deterministic for reproducibility)
-             with torch.no_grad():
-                 output_ids = self.model.generate(**inputs, max_new_tokens=1024, temperature=0.0)
+            # Generate response using inference mode (deterministic for reproducibility)
+            with torch.no_grad():
+                output_ids = self.model.generate(**inputs, max_new_tokens=1024, temperature=0.0)
             
             # Decode response (move to CPU if needed for batch_decode)
             if hasattr(output_ids, 'cpu'):
@@ -670,44 +670,44 @@ Rules:
 
 Return ONLY a JSON array: [{"bbox": [10, 20, 30, 40], "type": "window", "confidence": 0.95}, ...]"""
     
-     def _parse_window_response(self, response_text: str, img_width: int = 1000, img_height: int = 1000) -> List[Dict[str, Any]]:
-         """Parse window detection response."""
-         try:
-             import re
-             json_match = re.search(r'\[.*\]', response_text, re.DOTALL)
-             if not json_match:
-                 logger.debug("No windows detected")
-                 return []
-             
-             windows_raw = json.loads(json_match.group())
-             if not isinstance(windows_raw, list):
-                 windows_raw = [windows_raw]
-             
-             windows = []
-             for window in windows_raw:
-                 bbox = window.get("bbox", [])
-                 if len(bbox) == 4:
-                     # Convert percentage (0-100) to pixel coordinates using actual image dimensions
-                     x1_pct, y1_pct, x2_pct, y2_pct = bbox
-                     bbox = [
-                         int(x1_pct * img_width / 100),
-                         int(y1_pct * img_height / 100),
-                         int(x2_pct * img_width / 100),
-                         int(y2_pct * img_height / 100)
-                     ]
-                 
-                 windows.append({
-                     "bbox": bbox,
-                     "confidence": float(window.get("confidence", 0.7)),
-                     "type": window.get("type", "window"),
-                 })
-             
-             logger.debug(f"Detected {len(windows)} windows")
-             return windows
-         
-         except (json.JSONDecodeError, AttributeError) as e:
-             logger.debug(f"Failed to parse window response: {e}")
-             return []
+    def _parse_window_response(self, response_text: str, img_width: int = 1000, img_height: int = 1000) -> List[Dict[str, Any]]:
+        """Parse window detection response."""
+        try:
+            import re
+            json_match = re.search(r'\[.*\]', response_text, re.DOTALL)
+            if not json_match:
+                logger.debug("No windows detected")
+                return []
+            
+            windows_raw = json.loads(json_match.group())
+            if not isinstance(windows_raw, list):
+                windows_raw = [windows_raw]
+            
+            windows = []
+            for window in windows_raw:
+                bbox = window.get("bbox", [])
+                if len(bbox) == 4:
+                    # Convert percentage (0-100) to pixel coordinates using actual image dimensions
+                    x1_pct, y1_pct, x2_pct, y2_pct = bbox
+                    bbox = [
+                        int(x1_pct * img_width / 100),
+                        int(y1_pct * img_height / 100),
+                        int(x2_pct * img_width / 100),
+                        int(y2_pct * img_height / 100)
+                    ]
+                
+                windows.append({
+                    "bbox": bbox,
+                    "confidence": float(window.get("confidence", 0.7)),
+                    "type": window.get("type", "window"),
+                })
+            
+            logger.debug(f"Detected {len(windows)} windows")
+            return windows
+        
+        except (json.JSONDecodeError, AttributeError) as e:
+            logger.debug(f"Failed to parse window response: {e}")
+            return []
 
 
 class UnslothQwenBackend(VLMBackend):
