@@ -91,8 +91,8 @@ case "$BACKEND" in
     unsloth)
         CMD="$CMD --use-vlm --vlm-backend unsloth --unsloth-model qwen2.5-vl-7b"
         echo -e "${GREEN}✓ Using Unsloth optimized backend${NC}"
-        echo "  NOTE: Model loads successfully (timeout fixed)"
-        echo "  WARNING: Inference needs Phase 3.2 work (response parsing issue)"
+        echo "  NOTE: ~2x faster than Qwen, ~70% less VRAM"
+        echo "  NOTE: Deterministic inference (temperature=0.0)"
         ;;
     ocr-only)
         echo -e "${GREEN}✓ Using OCR-only extraction${NC}"

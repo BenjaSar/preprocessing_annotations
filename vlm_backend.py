@@ -496,9 +496,9 @@ class Qwen2_5VLBackend(VLMBackend):
             )
             inputs = {k: v.to(self.device) for k, v in inputs.items()}
             
-            # Generate response using inference mode
-            with torch.no_grad():
-                output_ids = self.model.generate(**inputs, max_new_tokens=1024)
+             # Generate response using inference mode (deterministic for reproducibility)
+             with torch.no_grad():
+                 output_ids = self.model.generate(**inputs, max_new_tokens=1024, temperature=0.0)
             
             # Decode response (move to CPU if needed for batch_decode)
             if hasattr(output_ids, 'cpu'):
@@ -635,14 +635,15 @@ Rules:
                 return_tensors="pt"
             ).to(self.device)
             
-            # Run inference
+            # Run inference with deterministic temperature
             with torch.no_grad():
-                output = self.model.generate(**inputs, max_new_tokens=2048)
+                output = self.model.generate(**inputs, max_new_tokens=2048, temperature=0.0)
             
             response_text = self.processor.decode(output[0], skip_special_tokens=True)
             
-            # Parse windows
-            windows = self._parse_window_response(response_text)
+            # Parse windows (pass actual image dimensions for correct bbox scaling)
+            img_width, img_height = image.size
+            windows = self._parse_window_response(response_text, img_width, img_height)
             return windows
         
         except Exception as e:
@@ -669,37 +670,44 @@ Rules:
 
 Return ONLY a JSON array: [{"bbox": [10, 20, 30, 40], "type": "window", "confidence": 0.95}, ...]"""
     
-    def _parse_window_response(self, response_text: str) -> List[Dict[str, Any]]:
-        """Parse window detection response."""
-        try:
-            import re
-            json_match = re.search(r'\[.*\]', response_text, re.DOTALL)
-            if not json_match:
-                logger.debug("No windows detected")
-                return []
-            
-            windows_raw = json.loads(json_match.group())
-            if not isinstance(windows_raw, list):
-                windows_raw = [windows_raw]
-            
-            windows = []
-            for window in windows_raw:
-                bbox = window.get("bbox", [])
-                if len(bbox) == 4:
-                    bbox = [x * 10 for x in bbox]
-                
-                windows.append({
-                    "bbox": bbox,
-                    "confidence": float(window.get("confidence", 0.7)),
-                    "type": window.get("type", "window"),
-                })
-            
-            logger.debug(f"Detected {len(windows)} windows")
-            return windows
-        
-        except (json.JSONDecodeError, AttributeError) as e:
-            logger.debug(f"Failed to parse window response: {e}")
-            return []
+     def _parse_window_response(self, response_text: str, img_width: int = 1000, img_height: int = 1000) -> List[Dict[str, Any]]:
+         """Parse window detection response."""
+         try:
+             import re
+             json_match = re.search(r'\[.*\]', response_text, re.DOTALL)
+             if not json_match:
+                 logger.debug("No windows detected")
+                 return []
+             
+             windows_raw = json.loads(json_match.group())
+             if not isinstance(windows_raw, list):
+                 windows_raw = [windows_raw]
+             
+             windows = []
+             for window in windows_raw:
+                 bbox = window.get("bbox", [])
+                 if len(bbox) == 4:
+                     # Convert percentage (0-100) to pixel coordinates using actual image dimensions
+                     x1_pct, y1_pct, x2_pct, y2_pct = bbox
+                     bbox = [
+                         int(x1_pct * img_width / 100),
+                         int(y1_pct * img_height / 100),
+                         int(x2_pct * img_width / 100),
+                         int(y2_pct * img_height / 100)
+                     ]
+                 
+                 windows.append({
+                     "bbox": bbox,
+                     "confidence": float(window.get("confidence", 0.7)),
+                     "type": window.get("type", "window"),
+                 })
+             
+             logger.debug(f"Detected {len(windows)} windows")
+             return windows
+         
+         except (json.JSONDecodeError, AttributeError) as e:
+             logger.debug(f"Failed to parse window response: {e}")
+             return []
 
 
 class UnslothQwenBackend(VLMBackend):
@@ -851,7 +859,7 @@ class UnslothQwenBackend(VLMBackend):
                     **inputs,
                     max_new_tokens=1024,
                     use_cache=True,
-                    temperature=1.0,
+                    temperature=0.0,
                     top_p=0.9,
                 )
             
@@ -996,29 +1004,68 @@ Rules:
             self.initialize()
             
             # Load and prepare image
-            image = Image.open(image_path)
+            image = Image.open(image_path).convert("RGB")
             
             # Build window detection prompt
             prompt = self._build_window_detection_prompt()
             
+            # Prepare chat messages in Unsloth format (same as detect_rooms)
+            messages = [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image"},
+                        {"type": "text", "text": prompt}
+                    ]
+                }
+            ]
+            
+            # Apply chat template
+            input_text = self.tokenizer.apply_chat_template(
+                messages,
+                add_generation_prompt=True
+            )
+            
+            # Prepare model inputs
+            inputs = self.tokenizer(
+                image,
+                input_text,
+                add_special_tokens=False,
+                return_tensors="pt",
+            ).to(self.device)
+            
             # Run inference
             logger.debug(f"Running Unsloth Qwen window detection on {image_path.name}")
-            response = self.processor(image, prompt, return_tensors='pt').to(self.device)
-            
             with torch.no_grad():
-                output = self.model.generate(**response, max_new_tokens=2048)
+                output_ids = self.model.generate(
+                    **inputs,
+                    max_new_tokens=2048,
+                    use_cache=True,
+                    temperature=0.0,
+                )
             
-            # Decode response
-            response_text = self.processor.decode(output[0], skip_special_tokens=True)
+            # Decode response (move to CPU if needed)
+            output_first = output_ids[0]
+            if hasattr(output_first, 'cpu'):
+                output_first = output_first.cpu()
+            
+            response_text = self.tokenizer.decode(
+                output_first,
+                skip_special_tokens=True
+            )
+            response_text = response_text.strip()
             logger.debug(f"Window detection response: {response_text[:200]}...")
             
-            # Parse windows from response
-            windows = self._parse_window_response(response_text)
+            # Parse windows from response (pass actual image dimensions for correct bbox scaling)
+            img_width, img_height = image.size
+            windows = self._parse_window_response(response_text, img_width, img_height)
             
             return windows
         
         except Exception as e:
             logger.error(f"Window detection failed: {e}")
+            import traceback
+            logger.debug(traceback.format_exc())
             return []
     
     def _build_window_detection_prompt(self) -> str:
@@ -1047,7 +1094,7 @@ Examples of window symbols in floor plans:
 
 Return ONLY a JSON array: [{"bbox": [10, 20, 30, 40], "type": "window", "confidence": 0.95}, ...]"""
     
-    def _parse_window_response(self, response_text: str) -> List[Dict[str, Any]]:
+    def _parse_window_response(self, response_text: str, img_width: int = 1000, img_height: int = 1000) -> List[Dict[str, Any]]:
         """Parse window detection response from Unsloth Qwen."""
         try:
             import re
@@ -1066,8 +1113,14 @@ Return ONLY a JSON array: [{"bbox": [10, 20, 30, 40], "type": "window", "confide
             for window in windows_raw:
                 bbox = window.get("bbox", [])
                 if len(bbox) == 4:
-                    # Convert percentage (0-100) to pixel coordinates
-                    bbox = [x * 10 for x in bbox]  # Assuming 0-1000 scale
+                    # Convert percentage (0-100) to pixel coordinates using actual image dimensions
+                    x1_pct, y1_pct, x2_pct, y2_pct = bbox
+                    bbox = [
+                        int(x1_pct * img_width / 100),
+                        int(y1_pct * img_height / 100),
+                        int(x2_pct * img_width / 100),
+                        int(y2_pct * img_height / 100)
+                    ]
                 
                 windows.append({
                     "bbox": bbox,
