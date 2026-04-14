@@ -498,7 +498,7 @@ class Qwen2_5VLBackend(VLMBackend):
             
             # Generate response using inference mode (deterministic for reproducibility)
             with torch.no_grad():
-                output_ids = self.model.generate(**inputs, max_new_tokens=1024, temperature=0.0)
+                output_ids = self.model.generate(**inputs, max_new_tokens=1024, do_sample=False)
             
             # Decode response (move to CPU if needed for batch_decode)
             if hasattr(output_ids, 'cpu'):
@@ -633,11 +633,11 @@ Rules:
                 text=prompt,
                 images=image,
                 return_tensors="pt"
-            ).to(self.device)
-            
-            # Run inference with deterministic temperature
+             ).to(self.device)
+             
+            # Run inference with deterministic decoding
             with torch.no_grad():
-                output = self.model.generate(**inputs, max_new_tokens=2048, temperature=0.0)
+                output = self.model.generate(**inputs, max_new_tokens=2048, do_sample=False)
             
             response_text = self.processor.decode(output[0], skip_special_tokens=True)
             
@@ -853,14 +853,13 @@ class UnslothQwenBackend(VLMBackend):
                 return_tensors="pt",
             ).to(self.device)
             
-            # Generate response
+            # Generate response (deterministic decoding for reproducibility)
             with torch.no_grad():
                 output_ids = self.model.generate(
                     **inputs,
                     max_new_tokens=1024,
                     use_cache=True,
-                    temperature=0.0,
-                    top_p=0.9,
+                    do_sample=False,
                 )
             
             # Decode response (move to CPU if needed)
@@ -1041,7 +1040,7 @@ Rules:
                     **inputs,
                     max_new_tokens=2048,
                     use_cache=True,
-                    temperature=0.0,
+                    do_sample=False,
                 )
             
             # Decode response (move to CPU if needed)
