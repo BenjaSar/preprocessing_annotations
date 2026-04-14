@@ -500,10 +500,11 @@ class Qwen2_5VLBackend(VLMBackend):
             with torch.no_grad():
                 output_ids = self.model.generate(**inputs, max_new_tokens=1024, do_sample=False)
             
-            # Decode response (move to CPU if needed for batch_decode)
-            if hasattr(output_ids, 'cpu'):
-                output_ids = output_ids.cpu()
-            response_text = self.processor.batch_decode(output_ids, skip_special_tokens=True)[0]
+            # Decode response: only the generated tokens (exclude input prompt echo)
+            # batch_decode returns list of decoded sequences (one per batch item)
+            input_len = inputs["input_ids"].shape[-1]
+            generated_ids = output_ids[:, input_len:]
+            response_text = self.processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
             
             # Parse response (pass actual image dimensions for correct bbox scaling)
             img_width, img_height = image.size
@@ -570,6 +571,12 @@ Rules:
             json_str = json_str.strip()
             logger.debug(f"Extracted JSON: {json_str[:200]}...")
             
+            # JSON repair: strip markdown fences and fix common LLM mistakes
+            json_str = re.sub(r'^```(?:json)?\s*', '', json_str)
+            json_str = re.sub(r'\s*```$', '', json_str)
+            # Remove trailing commas (common LLM mistake)
+            json_str = re.sub(r',\s*([}\]])', r'\1', json_str)
+            
             rooms = json.loads(json_str)
             if not isinstance(rooms, list):
                 rooms = [rooms]
@@ -633,13 +640,16 @@ Rules:
                 text=prompt,
                 images=image,
                 return_tensors="pt"
-             ).to(self.device)
-             
+            ).to(self.device)
+            
             # Run inference with deterministic decoding
             with torch.no_grad():
                 output = self.model.generate(**inputs, max_new_tokens=2048, do_sample=False)
             
-            response_text = self.processor.decode(output[0], skip_special_tokens=True)
+            # Decode response: only the generated tokens (exclude input prompt echo)
+            input_len = inputs["input_ids"].shape[-1]
+            generated_ids = output[0][input_len:]
+            response_text = self.processor.decode(generated_ids, skip_special_tokens=True)
             
             # Parse windows (pass actual image dimensions for correct bbox scaling)
             img_width, img_height = image.size
@@ -679,7 +689,13 @@ Return ONLY a JSON array: [{"bbox": [10, 20, 30, 40], "type": "window", "confide
                 logger.debug("No windows detected")
                 return []
             
-            windows_raw = json.loads(json_match.group())
+            # JSON repair: strip markdown fences and fix common LLM mistakes
+            json_str = json_match.group()
+            json_str = re.sub(r'^```(?:json)?\s*', '', json_str)
+            json_str = re.sub(r'\s*```$', '', json_str)
+            json_str = re.sub(r',\s*([}\]])', r'\1', json_str)
+            
+            windows_raw = json.loads(json_str)
             if not isinstance(windows_raw, list):
                 windows_raw = [windows_raw]
             
@@ -862,13 +878,14 @@ class UnslothQwenBackend(VLMBackend):
                     do_sample=False,
                 )
             
-            # Decode response (move to CPU if needed)
-            output_first = output_ids[0]
-            if hasattr(output_first, 'cpu'):
-                output_first = output_first.cpu()
+            # Decode response: only the generated tokens (exclude input prompt echo)
+            input_len = inputs["input_ids"].shape[-1]
+            generated_ids = output_ids[0][input_len:]
+            if hasattr(generated_ids, 'cpu'):
+                generated_ids = generated_ids.cpu()
             
             response_text = self.tokenizer.decode(
-                output_first,
+                generated_ids,
                 skip_special_tokens=True
             )
             
@@ -942,6 +959,12 @@ Rules:
             # Clean up any trailing/leading whitespace
             json_str = json_str.strip()
             logger.debug(f"Extracted JSON: {json_str[:200]}...")
+            
+            # JSON repair: strip markdown fences and fix common LLM mistakes
+            json_str = re.sub(r'^```(?:json)?\s*', '', json_str)
+            json_str = re.sub(r'\s*```$', '', json_str)
+            # Remove trailing commas (common LLM mistake)
+            json_str = re.sub(r',\s*([}\]])', r'\1', json_str)
             
             rooms = json.loads(json_str)
             if not isinstance(rooms, list):
@@ -1043,13 +1066,14 @@ Rules:
                     do_sample=False,
                 )
             
-            # Decode response (move to CPU if needed)
-            output_first = output_ids[0]
-            if hasattr(output_first, 'cpu'):
-                output_first = output_first.cpu()
+            # Decode response: only the generated tokens (exclude input prompt echo)
+            input_len = inputs["input_ids"].shape[-1]
+            generated_ids = output_ids[0][input_len:]
+            if hasattr(generated_ids, 'cpu'):
+                generated_ids = generated_ids.cpu()
             
             response_text = self.tokenizer.decode(
-                output_first,
+                generated_ids,
                 skip_special_tokens=True
             )
             response_text = response_text.strip()
@@ -1103,7 +1127,13 @@ Return ONLY a JSON array: [{"bbox": [10, 20, 30, 40], "type": "window", "confide
                 logger.debug("No windows detected in response")
                 return []
             
-            windows_raw = json.loads(json_match.group())
+            # JSON repair: strip markdown fences and fix common LLM mistakes
+            json_str = json_match.group()
+            json_str = re.sub(r'^```(?:json)?\s*', '', json_str)
+            json_str = re.sub(r'\s*```$', '', json_str)
+            json_str = re.sub(r',\s*([}\]])', r'\1', json_str)
+            
+            windows_raw = json.loads(json_str)
             if not isinstance(windows_raw, list):
                 windows_raw = [windows_raw]
             
