@@ -873,7 +873,7 @@ class UnslothQwenBackend(VLMBackend):
             with torch.no_grad():
                 output_ids = self.model.generate(
                     **inputs,
-                    max_new_tokens=1024,
+                    max_new_tokens=4096,
                     use_cache=True,
                     do_sample=False,
                 )
@@ -966,7 +966,32 @@ Rules:
             # Remove trailing commas (common LLM mistake)
             json_str = re.sub(r',\s*([}\]])', r'\1', json_str)
             
-            rooms = json.loads(json_str)
+            # Attempt parsing and handle truncation
+            try:
+                rooms = json.loads(json_str)
+            except json.JSONDecodeError as e:
+                # If JSON is truncated (incomplete), try to recover by closing structures
+                logger.debug(f"Initial JSON parse failed: {e}. Attempting truncation recovery...")
+                
+                # Count braces/brackets to see if we're missing closing characters
+                open_braces = json_str.count('{') - json_str.count('}')
+                open_brackets = json_str.count('[') - json_str.count(']')
+                
+                if open_braces > 0 or open_brackets > 0:
+                    # JSON appears truncated, try to close it
+                    logger.debug(f"Truncation detected: {open_braces} open braces, {open_brackets} open brackets")
+                    recovered_json = json_str + ('}' * open_braces) + (']' * open_brackets)
+                    
+                    try:
+                        rooms = json.loads(recovered_json)
+                        logger.info(f"Successfully recovered JSON by closing {open_braces} braces and {open_brackets} brackets")
+                    except json.JSONDecodeError as recovery_e:
+                        logger.error(f"Truncation recovery failed: {recovery_e}")
+                        return []
+                else:
+                    # Not a truncation issue, re-raise
+                    raise
+            
             if not isinstance(rooms, list):
                 rooms = [rooms]
             
@@ -1061,7 +1086,7 @@ Rules:
             with torch.no_grad():
                 output_ids = self.model.generate(
                     **inputs,
-                    max_new_tokens=2048,
+                    max_new_tokens=4096,
                     use_cache=True,
                     do_sample=False,
                 )
@@ -1133,7 +1158,32 @@ Return ONLY a JSON array: [{"bbox": [10, 20, 30, 40], "type": "window", "confide
             json_str = re.sub(r'\s*```$', '', json_str)
             json_str = re.sub(r',\s*([}\]])', r'\1', json_str)
             
-            windows_raw = json.loads(json_str)
+            # Attempt parsing and handle truncation
+            try:
+                windows_raw = json.loads(json_str)
+            except json.JSONDecodeError as e:
+                # If JSON is truncated (incomplete), try to recover by closing structures
+                logger.debug(f"Initial JSON parse failed: {e}. Attempting truncation recovery...")
+                
+                # Count braces/brackets to see if we're missing closing characters
+                open_braces = json_str.count('{') - json_str.count('}')
+                open_brackets = json_str.count('[') - json_str.count(']')
+                
+                if open_braces > 0 or open_brackets > 0:
+                    # JSON appears truncated, try to close it
+                    logger.debug(f"Truncation detected: {open_braces} open braces, {open_brackets} open brackets")
+                    recovered_json = json_str + ('}' * open_braces) + (']' * open_brackets)
+                    
+                    try:
+                        windows_raw = json.loads(recovered_json)
+                        logger.info(f"Successfully recovered JSON by closing {open_braces} braces and {open_brackets} brackets")
+                    except json.JSONDecodeError as recovery_e:
+                        logger.error(f"Truncation recovery failed: {recovery_e}")
+                        return []
+                else:
+                    # Not a truncation issue, re-raise
+                    raise
+            
             if not isinstance(windows_raw, list):
                 windows_raw = [windows_raw]
             
