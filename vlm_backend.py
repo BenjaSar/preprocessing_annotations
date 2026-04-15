@@ -232,28 +232,77 @@ Return ONLY a JSON array, e.g.: [{"room_id": "room_0", "room_type": "CONFERENCE"
             if not isinstance(rooms, list):
                 rooms = [rooms]
             
-            # Normalize response format
+            # Apply hallucination detection before processing
+            rooms = self._truncate_repetitive_patterns(rooms)
+            
+            # Cap rooms at 25 (as per prompt specification)
+            if len(rooms) > 25:
+                logger.warning(
+                    f"VLM generated {len(rooms)} rooms, exceeding prompt limit of 25. "
+                    f"Capping at 25."
+                )
+                rooms = rooms[:25]
+            
+            # Normalize response format with bbox validation
             normalized = []
+            dropped_count = 0
             for idx, room in enumerate(rooms):
+                # Convert bbox percentages to pixel coordinates using actual image dimensions
+                bbox = room.get("bbox")
+                if bbox and len(bbox) == 4:
+                    try:
+                        x1_pct, y1_pct, x2_pct, y2_pct = [float(v) for v in bbox]
+                    except (ValueError, TypeError):
+                        logger.debug(f"Room {idx}: non-numeric bbox values {bbox}, skipping")
+                        dropped_count += 1
+                        continue
+                    
+                    # Validation: all coordinates must be in 0-100 range (with 5% tolerance)
+                    if any(v < 0 or v > 105 for v in [x1_pct, y1_pct, x2_pct, y2_pct]):
+                        logger.debug(
+                            f"Room {idx} ({room.get('room_name', '?')}): out-of-bounds bbox "
+                            f"[{x1_pct},{y1_pct},{x2_pct},{y2_pct}]%, skipping"
+                        )
+                        dropped_count += 1
+                        continue
+                    
+                    # Clamp to valid range for safety
+                    x1_pct = max(0, min(100, x1_pct))
+                    y1_pct = max(0, min(100, y1_pct))
+                    x2_pct = max(0, min(100, x2_pct))
+                    y2_pct = max(0, min(100, y2_pct))
+                    
+                    # Scale to actual pixel coordinates: x-coords use width, y-coords use height
+                    bbox = [
+                        int(x1_pct * img_width / 100),
+                        int(y1_pct * img_height / 100),
+                        int(x2_pct * img_width / 100),
+                        int(y2_pct * img_height / 100)
+                    ]
+                
                 normalized.append({
                     "room_id": room.get("room_id", f"room_{idx}"),
-                    "polygon": None,  # Claude returns bbox, not polygon
-                    "bbox": room.get("bbox"),
+                    "polygon": None,  # Qwen returns bbox, not polygon
+                    "bbox": bbox,
                     "room_type": room.get("room_type", "other"),
                     "room_name": room.get("room_name"),
                     "confidence": float(room.get("confidence", 0.5)),
                     "metadata": room.get("metadata", {})
                 })
             
+            if dropped_count > 0:
+                logger.info(f"Dropped {dropped_count} rooms with invalid bboxes")
+            
+            logger.debug(f"Parsed {len(normalized)} rooms from Qwen response")
             return normalized
-        except json.JSONDecodeError as e:
-            logger.error(f"Failed to parse Claude response as JSON: {e}")
-            logger.debug(f"Response text: {response_text[:200]}...")
+        except (json.JSONDecodeError, AttributeError, ValueError) as e:
+            logger.error(f"Failed to parse Qwen response: {e}")
+            logger.debug(f"Response text: {response_text[:500]}")
             return []
     
     def detect_windows(self, image_path: Union[str, Path]) -> List[Dict[str, Any]]:
         """
-        Detect windows in floor plan image using Claude (Phase 2, Tier 3).
+        Detect windows in floor plan image using Qwen2.5-VL (Phase 2, Tier 3).
         
         Args:
             image_path: Path to floor plan image
@@ -262,63 +311,40 @@ Return ONLY a JSON array, e.g.: [{"room_id": "room_0", "room_type": "CONFERENCE"
             List of window detections
         """
         try:
-            import base64
-            from pathlib import Path
+            import torch
+            from PIL import Image
             
-            # Read and encode image
-            image_path = Path(image_path)
-            with open(image_path, "rb") as img_file:
-                image_data = base64.standard_b64encode(img_file.read()).decode("utf-8")
+            self.initialize()
             
-            # Determine media type
-            suffix = image_path.suffix.lower()
-            media_type_map = {
-                ".jpg": "image/jpeg",
-                ".jpeg": "image/jpeg",
-                ".png": "image/png",
-                ".gif": "image/gif",
-                ".webp": "image/webp"
-            }
-            media_type = media_type_map.get(suffix, "image/png")
-            
-            # Build prompt
+            image = Image.open(image_path)
             prompt = self._build_window_detection_prompt()
             
-            logger.debug(f"Running Claude window detection on {image_path.name}")
+            logger.debug(f"Running Qwen2.5-VL window detection on {image_path.name}")
             
-            # Call Claude API
-            from anthropic import Anthropic
-            client = Anthropic()
+            # Prepare inputs
+            inputs = self.processor(
+                text=prompt,
+                images=image,
+                return_tensors="pt"
+            ).to(self.device)
             
-            response = client.messages.create(
-                model=self.config.model,
-                max_tokens=2048,
-                temperature=0.0,  # Deterministic output for reproducible window detection
-                messages=[
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "image",
-                                "source": {
-                                    "type": "base64",
-                                    "media_type": media_type,
-                                    "data": image_data,
-                                },
-                            },
-                            {
-                                "type": "text",
-                                "text": prompt
-                            }
-                        ],
-                    }
-                ],
-            )
+            # Run inference with deterministic decoding
+            with torch.no_grad():
+                output = self.model.generate(**inputs, max_new_tokens=2048, do_sample=False)
             
-            response_text = response.content[0].text
+            # Decode response: only the generated tokens (exclude input prompt echo)
+            input_len = inputs["input_ids"].shape[-1]
+            generated_ids = output[0][input_len:]
+            response_text = self.processor.decode(generated_ids, skip_special_tokens=True)
             
-            # Parse windows
-            windows = self._parse_window_response(response_text)
+            # Parse windows (pass actual image dimensions for correct bbox scaling)
+            img_width, img_height = image.size
+            windows = self._parse_window_response(response_text, img_width, img_height)
+            
+            # GPU memory cleanup
+            del inputs, output, generated_ids
+            torch.cuda.empty_cache()
+            
             return windows
         
         except Exception as e:
@@ -345,27 +371,48 @@ Rules:
 
 Return ONLY a JSON array: [{"bbox": [10, 20, 30, 40], "type": "window", "confidence": 0.95}, ...]"""
     
-    def _parse_window_response(self, response_text: str) -> List[Dict[str, Any]]:
+    def _parse_window_response(self, response_text: str, img_width: int = 1000, img_height: int = 1000) -> List[Dict[str, Any]]:
         """Parse window detection response."""
         try:
-            windows = json.loads(response_text)
-            if not isinstance(windows, list):
-                windows = [windows]
+            import re
+            json_match = re.search(r'\[.*\]', response_text, re.DOTALL)
+            if not json_match:
+                logger.debug("No windows detected")
+                return []
             
-            result = []
-            for window in windows:
+            # JSON repair: strip markdown fences and fix common LLM mistakes
+            json_str = json_match.group()
+            json_str = re.sub(r'^```(?:json)?\s*', '', json_str)
+            json_str = re.sub(r'\s*```$', '', json_str)
+            json_str = re.sub(r',\s*([}\]])', r'\1', json_str)
+            
+            windows_raw = json.loads(json_str)
+            if not isinstance(windows_raw, list):
+                windows_raw = [windows_raw]
+            
+            windows = []
+            for window in windows_raw:
                 bbox = window.get("bbox", [])
                 if len(bbox) == 4:
-                    result.append({
-                        "bbox": bbox,
-                        "confidence": float(window.get("confidence", 0.7)),
-                        "type": window.get("type", "window"),
-                    })
+                    # Convert percentage (0-100) to pixel coordinates using actual image dimensions
+                    x1_pct, y1_pct, x2_pct, y2_pct = bbox
+                    bbox = [
+                        int(x1_pct * img_width / 100),
+                        int(y1_pct * img_height / 100),
+                        int(x2_pct * img_width / 100),
+                        int(y2_pct * img_height / 100)
+                    ]
+                
+                windows.append({
+                    "bbox": bbox,
+                    "confidence": float(window.get("confidence", 0.7)),
+                    "type": window.get("type", "window"),
+                })
             
-            logger.debug(f"Detected {len(result)} windows")
-            return result
+            logger.debug(f"Detected {len(windows)} windows")
+            return windows
         
-        except json.JSONDecodeError as e:
+        except (json.JSONDecodeError, AttributeError) as e:
             logger.debug(f"Failed to parse window response: {e}")
             return []
 
@@ -862,90 +909,107 @@ class UnslothQwenBackend(VLMBackend):
             raise
     
     def detect_rooms(self, image_path: Union[str, Path]) -> List[Dict[str, Any]]:
-        """
-        Detect rooms using Unsloth-optimized Qwen VL.
-        
-        Args:
-            image_path: Path to floor plan image
-        
-        Returns:
-            List of room detections
-        """
-        self.initialize()
-        
-        try:
-            from PIL import Image
-            import torch
-            
-            # Load image
-            image = Image.open(image_path).convert("RGB")
-            
-            # Build room detection prompt
-            prompt = self._build_room_detection_prompt()
-            
-            # Prepare chat messages in Unsloth format
-            messages = [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "image"},
-                        {"type": "text", "text": prompt}
-                    ]
-                }
-            ]
-            
-            # Apply chat template
-            input_text = self.tokenizer.apply_chat_template(
-                messages,
-                add_generation_prompt=True
-            )
-            
-            # Prepare model inputs
-            inputs = self.tokenizer(
-                image,
-                input_text,
-                add_special_tokens=False,
-                return_tensors="pt",
-            ).to(self.device)
-            
-            # Generate response (deterministic decoding for reproducibility)
-            with torch.no_grad():
-                output_ids = self.model.generate(
-                    **inputs,
-                    max_new_tokens=4096,
-                    use_cache=True,
-                    do_sample=False,
-                )
-            
-            # Decode response: only the generated tokens (exclude input prompt echo)
-            input_len = inputs["input_ids"].shape[-1]
-            generated_ids = output_ids[0][input_len:]
-            if hasattr(generated_ids, 'cpu'):
-                generated_ids = generated_ids.cpu()
-            
-            response_text = self.tokenizer.decode(
-                generated_ids,
-                skip_special_tokens=True
-            )
-            
-            # Clean up response text
-            response_text = response_text.strip()
-            
-            # Parse room detections from response (pass actual image dimensions for correct bbox scaling)
-            img_width, img_height = image.size
-            rooms = self._parse_room_response(response_text, img_width, img_height)
-            
-            # GPU memory cleanup
-            del inputs, output_ids, generated_ids
-            torch.cuda.empty_cache()
-            
-            return rooms
-        
-        except Exception as e:
-            logger.error(f"Unsloth Qwen inference failed: {e}")
-            import traceback
-            logger.debug(traceback.format_exc())
-            return []
+         """
+         Detect rooms using Unsloth-optimized Qwen VL.
+         
+         Args:
+             image_path: Path to floor plan image
+         
+         Returns:
+             List of room detections
+         """
+         self.initialize()
+         
+         try:
+             from PIL import Image
+             import torch
+             
+             # Load image
+             image = Image.open(image_path).convert("RGB")
+             
+             # Resize large images to reduce GPU memory usage
+             # Preserve aspect ratio while capping max dimension at 2048px
+             max_dim = 2048
+             width, height = image.size
+             if max(width, height) > max_dim:
+                 scale = max_dim / max(width, height)
+                 new_size = (int(width * scale), int(height * scale))
+                 logger.info(f"Resizing image from {width}x{height} to {new_size[0]}x{new_size[1]} (scale={scale:.2f})")
+                 image = image.resize(new_size, Image.Resampling.LANCZOS)
+             
+             # Build room detection prompt
+             prompt = self._build_room_detection_prompt()
+             
+             # Prepare chat messages in Unsloth format
+             messages = [
+                 {
+                     "role": "user",
+                     "content": [
+                         {"type": "image"},
+                         {"type": "text", "text": prompt}
+                     ]
+                 }
+             ]
+             
+             # Apply chat template
+             input_text = self.tokenizer.apply_chat_template(
+                 messages,
+                 add_generation_prompt=True
+             )
+             
+             # Prepare model inputs
+             inputs = self.tokenizer(
+                 image,
+                 input_text,
+                 add_special_tokens=False,
+                 return_tensors="pt",
+             ).to(self.device)
+             
+             # Generate response (deterministic decoding for reproducibility)
+             # Reduce max_new_tokens to 768 to prevent hallucination loops
+             with torch.no_grad():
+                 output_ids = self.model.generate(
+                     **inputs,
+                     max_new_tokens=768,
+                     use_cache=True,
+                     do_sample=False,
+                 )
+             
+             # Decode response: only the generated tokens (exclude input prompt echo)
+             input_len = inputs["input_ids"].shape[-1]
+             generated_ids = output_ids[0][input_len:]
+             if hasattr(generated_ids, 'cpu'):
+                 generated_ids = generated_ids.cpu()
+             
+             response_text = self.tokenizer.decode(
+                 generated_ids,
+                 skip_special_tokens=True
+             )
+             
+             # Clean up response text
+             response_text = response_text.strip()
+             
+             # Parse room detections from response (pass actual image dimensions for correct bbox scaling)
+             img_width, img_height = image.size
+             rooms = self._parse_room_response(response_text, img_width, img_height)
+             
+             # GPU memory cleanup - aggressive deletion of all references
+             del inputs, output_ids, generated_ids, image, prompt, messages, input_text
+             torch.cuda.empty_cache()
+             import gc
+             gc.collect()
+             
+             return rooms
+         
+         except Exception as e:
+             logger.error(f"Unsloth Qwen inference failed: {e}")
+             import traceback
+             logger.debug(traceback.format_exc())
+             # Cleanup on error
+             import gc
+             torch.cuda.empty_cache()
+             gc.collect()
+             return []
 
     def _build_room_detection_prompt(self) -> str:
          """
@@ -982,6 +1046,60 @@ class UnslothQwenBackend(VLMBackend):
  - All bbox values MUST be decimals between 0.0 and 1.0 (not 0-100, not pixel coords)
  - Maximum 25 rooms
  - Return valid JSON only, no markdown"""
+
+    def _truncate_repetitive_patterns(self, rooms: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        Detect and truncate autoregressive hallucination patterns.
+        
+        Qwen3-VL can enter loops generating repetitive bboxes with same x-coords 
+        but incrementing y by fixed amounts (0.15-0.35 range). This method detects
+        that pattern and truncates the list when found.
+        """
+        if len(rooms) < 4:
+            return rooms
+        
+        # Check for pattern: same x-coords, incrementing y by consistent delta
+        for i in range(len(rooms) - 3):
+            r0, r1, r2, r3 = rooms[i:i+4]
+            
+            # Extract bboxes
+            b0 = r0.get("bbox", [])
+            b1 = r1.get("bbox", [])
+            b2 = r2.get("bbox", [])
+            b3 = r3.get("bbox", [])
+            
+            if not all(len(b) == 4 for b in [b0, b1, b2, b3]):
+                continue
+            
+            try:
+                # Check if x-coords match (same left/right edges)
+                x0_match = abs(b0[0] - b1[0]) < 0.01 and abs(b0[2] - b1[2]) < 0.01
+                x1_match = abs(b1[0] - b2[0]) < 0.01 and abs(b1[2] - b2[2]) < 0.01
+                x2_match = abs(b2[0] - b3[0]) < 0.01 and abs(b2[2] - b3[2]) < 0.01
+                
+                if not (x0_match and x1_match and x2_match):
+                    continue
+                
+                # Check if y-coords increment by consistent delta
+                delta_01 = b1[1] - b0[1]
+                delta_12 = b2[1] - b1[1]
+                delta_23 = b3[1] - b2[1]
+                
+                # Allow ±5% tolerance on delta consistency
+                if (abs(delta_01 - delta_12) < 0.05 and 
+                    abs(delta_12 - delta_23) < 0.05 and 
+                    0.15 < delta_01 < 0.35):
+                    
+                    logger.warning(
+                        f"Detected hallucination pattern at room {i}: "
+                        f"repetitive bboxes with constant y-delta={delta_01:.3f}. "
+                        f"Truncating list at position {i}"
+                    )
+                    return rooms[:i]
+            except (TypeError, ValueError, IndexError):
+                continue
+        
+        return rooms
 
     def _parse_room_response(self, response_text: str, img_width: int = 1000, img_height: int = 1000) -> List[Dict[str, Any]]:
         """Parse JSON response from Unsloth Qwen."""
