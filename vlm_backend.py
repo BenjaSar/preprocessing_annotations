@@ -509,6 +509,11 @@ class Qwen2_5VLBackend(VLMBackend):
             # Parse response (pass actual image dimensions for correct bbox scaling)
             img_width, img_height = image.size
             rooms = self._parse_room_response(response_text, img_width, img_height)
+            
+            # GPU memory cleanup
+            del inputs, output_ids, generated_ids
+            torch.cuda.empty_cache()
+            
             return rooms
             
         except Exception as e:
@@ -519,34 +524,39 @@ class Qwen2_5VLBackend(VLMBackend):
 
     def _build_room_detection_prompt(self) -> str:
         """
-        Build prompt for room detection using mandatory SFT taxonomy.
+        Build prompt for room detection to prevent hallucination.
         
-        Uses VLM_PROMPT_CATEGORIES from automation.taxonomy for consistent
-        room type vocabulary across all VLM backends.
+        Key improvements:
+        - Shortened category list prevents the model from treating it as a checklist
+        - No example bbox values (prevents direct copying of [10, 20, 40, 50])
+        - Explicit anti-hallucination instruction: "Do NOT invent or fabricate"
+        - Room count limit prevents 75-room generation
         """
-        from automation.taxonomy import VLM_PROMPT_CATEGORIES, get_vlm_categories_string
-        
-        categories_str = get_vlm_categories_string()
-        
-        return f"""Analyze this architectural floor plan image and identify all rooms and spaces.
+        return """You are a floor plan annotation expert. Analyze this architectural floor plan image and identify all labeled rooms and spaces that are actually visible in the image.
 
-For each room, extract:
-- room_type: {categories_str}
-- room_name: extracted label from the plan (preserve original, do NOT expand)
-- approximate bbox coordinates as [x1, y1, x2, y2] where 0-100 is image dimensions
+TASK: For each room/space you can see labeled in the floor plan, extract:
+  - room_type: one of PRIVATE OFFICE, OPEN OFFICE, CONFERENCE, LOBBY, CORRIDOR, RESTROOM, STAIRWELL, ELECTRICAL ROOM, STORAGE ROOM, MEETING, or another descriptive type that fits
+  - room_name: the exact label text as written on the plan
+  - bbox: bounding box as [x1, y1, x2, y2] percentage of image size (0-100)
+    where (x1,y1) is top-left corner and (x2,y2) is bottom-right corner.
+    ALL values MUST be between 0 and 100.
 
-Office Classification:
-- PRIVATE OFFICE: visually enclosed spaces with walls/doors for individual use
-- OPEN OFFICE: shared open floor plans without individual enclosures
+INCLUDE only: physical rooms and labeled spaces (offices, restrooms, corridors, etc.)
+EXCLUDE: legends, title blocks, schedules, notes, equipment labels, panel lists
 
-Return ONLY a JSON array, no markdown:
-[{{"room_id": "room_0", "room_type": "CONFERENCE", "room_name": "Conf Rm A", "bbox": [10, 20, 40, 50], "confidence": 0.95}}, ...]
+Office rule: PRIVATE OFFICE = enclosed with walls/doors; OPEN OFFICE = shared open area
+
+Return ONLY a JSON array. Example format (do not copy exact values):
+[{"room_id": "room_0", "room_type": "CONFERENCE", "room_name": "Conf Rm A",
+  "bbox": [x1, y1, x2, y2], "confidence": 0.9}]
 
 Rules:
-- Only rooms/spaces; exclude legends, notes, schedules, title blocks
-- Preserve original labels; do NOT expand abbreviations
-- Return valid JSON only"""
-     
+- ONLY include rooms that have visible labels in the image
+- Do NOT invent or fabricate rooms that are not shown
+- All bbox values must be between 0 and 100
+- Maximum 25 rooms
+- Return valid JSON only, no markdown"""
+
     def _parse_room_response(self, response_text: str, img_width: int = 1000, img_height: int = 1000) -> List[Dict[str, Any]]:
         """Parse JSON response from Qwen2.5-VL."""
         try:
@@ -581,15 +591,36 @@ Rules:
             if not isinstance(rooms, list):
                 rooms = [rooms]
             
-            # Normalize response format
+            # Normalize response format with bbox validation
             normalized = []
+            dropped_count = 0
             for idx, room in enumerate(rooms):
                 # Convert bbox percentages to pixel coordinates using actual image dimensions
                 bbox = room.get("bbox")
                 if bbox and len(bbox) == 4:
-                    # Qwen returns [x1%, y1%, x2%, y2%] in 0-100 range
+                    try:
+                        x1_pct, y1_pct, x2_pct, y2_pct = [float(v) for v in bbox]
+                    except (ValueError, TypeError):
+                        logger.debug(f"Room {idx}: non-numeric bbox values {bbox}, skipping")
+                        dropped_count += 1
+                        continue
+                    
+                    # Validation: all coordinates must be in 0-100 range (with 5% tolerance)
+                    if any(v < 0 or v > 105 for v in [x1_pct, y1_pct, x2_pct, y2_pct]):
+                        logger.debug(
+                            f"Room {idx} ({room.get('room_name', '?')}): out-of-bounds bbox "
+                            f"[{x1_pct},{y1_pct},{x2_pct},{y2_pct}]%, skipping"
+                        )
+                        dropped_count += 1
+                        continue
+                    
+                    # Clamp to valid range for safety
+                    x1_pct = max(0, min(100, x1_pct))
+                    y1_pct = max(0, min(100, y1_pct))
+                    x2_pct = max(0, min(100, x2_pct))
+                    y2_pct = max(0, min(100, y2_pct))
+                    
                     # Scale to actual pixel coordinates: x-coords use width, y-coords use height
-                    x1_pct, y1_pct, x2_pct, y2_pct = bbox
                     bbox = [
                         int(x1_pct * img_width / 100),
                         int(y1_pct * img_height / 100),
@@ -606,6 +637,9 @@ Rules:
                     "confidence": float(room.get("confidence", 0.5)),
                     "metadata": room.get("metadata", {})
                 })
+            
+            if dropped_count > 0:
+                logger.info(f"Dropped {dropped_count} rooms with invalid bboxes")
             
             logger.debug(f"Parsed {len(normalized)} rooms from Qwen response")
             return normalized
@@ -654,6 +688,11 @@ Rules:
             # Parse windows (pass actual image dimensions for correct bbox scaling)
             img_width, img_height = image.size
             windows = self._parse_window_response(response_text, img_width, img_height)
+            
+            # GPU memory cleanup
+            del inputs, output, generated_ids
+            torch.cuda.empty_cache()
+            
             return windows
         
         except Exception as e:
@@ -895,6 +934,11 @@ class UnslothQwenBackend(VLMBackend):
             # Parse room detections from response (pass actual image dimensions for correct bbox scaling)
             img_width, img_height = image.size
             rooms = self._parse_room_response(response_text, img_width, img_height)
+            
+            # GPU memory cleanup
+            del inputs, output_ids, generated_ids
+            torch.cuda.empty_cache()
+            
             return rooms
         
         except Exception as e:
@@ -905,34 +949,39 @@ class UnslothQwenBackend(VLMBackend):
 
     def _build_room_detection_prompt(self) -> str:
         """
-        Build prompt for room detection using mandatory SFT taxonomy.
+        Build prompt for room detection to prevent hallucination.
         
-        Uses VLM_PROMPT_CATEGORIES from automation.taxonomy for consistent
-        room type vocabulary across all VLM backends.
+        Key improvements:
+        - Shortened category list prevents the model from treating it as a checklist
+        - No example bbox values (prevents direct copying of [10, 20, 40, 50])
+        - Explicit anti-hallucination instruction: "Do NOT invent or fabricate"
+        - Room count limit prevents 75-room generation
         """
-        from automation.taxonomy import VLM_PROMPT_CATEGORIES, get_vlm_categories_string
-        
-        categories_str = get_vlm_categories_string()
-        
-        return f"""Analyze this architectural floor plan image and identify all rooms and spaces.
+        return """You are a floor plan annotation expert. Analyze this architectural floor plan image and identify all labeled rooms and spaces that are actually visible in the image.
 
-For each room, extract:
-- room_type: {categories_str}
-- room_name: extracted label from the plan (preserve original, do NOT expand)
-- approximate bbox coordinates as [x1, y1, x2, y2] where 0-100 is image dimensions
+TASK: For each room/space you can see labeled in the floor plan, extract:
+  - room_type: one of PRIVATE OFFICE, OPEN OFFICE, CONFERENCE, LOBBY, CORRIDOR, RESTROOM, STAIRWELL, ELECTRICAL ROOM, STORAGE ROOM, MEETING, or another descriptive type that fits
+  - room_name: the exact label text as written on the plan
+  - bbox: bounding box as [x1, y1, x2, y2] percentage of image size (0-100)
+    where (x1,y1) is top-left corner and (x2,y2) is bottom-right corner.
+    ALL values MUST be between 0 and 100.
 
-Office Classification:
-- PRIVATE OFFICE: visually enclosed spaces with walls/doors for individual use
-- OPEN OFFICE: shared open floor plans without individual enclosures
+INCLUDE only: physical rooms and labeled spaces (offices, restrooms, corridors, etc.)
+EXCLUDE: legends, title blocks, schedules, notes, equipment labels, panel lists
 
-Return ONLY a JSON array, no markdown:
-[{{"room_id": "room_0", "room_type": "CONFERENCE", "room_name": "Conf Rm A", "bbox": [10, 20, 40, 50], "confidence": 0.95}}, ...]
+Office rule: PRIVATE OFFICE = enclosed with walls/doors; OPEN OFFICE = shared open area
+
+Return ONLY a JSON array. Example format (do not copy exact values):
+[{"room_id": "room_0", "room_type": "CONFERENCE", "room_name": "Conf Rm A",
+  "bbox": [x1, y1, x2, y2], "confidence": 0.9}]
 
 Rules:
-- Only rooms/spaces; exclude legends, notes, schedules, title blocks
-- Preserve original labels; do NOT expand abbreviations
-- Return valid JSON only"""
-    
+- ONLY include rooms that have visible labels in the image
+- Do NOT invent or fabricate rooms that are not shown
+- All bbox values must be between 0 and 100
+- Maximum 25 rooms
+- Return valid JSON only, no markdown"""
+
     def _parse_room_response(self, response_text: str, img_width: int = 1000, img_height: int = 1000) -> List[Dict[str, Any]]:
         """Parse JSON response from Unsloth Qwen."""
         try:
@@ -995,15 +1044,36 @@ Rules:
             if not isinstance(rooms, list):
                 rooms = [rooms]
             
-            # Normalize response format
+            # Normalize response format with bbox validation
             normalized = []
+            dropped_count = 0
             for idx, room in enumerate(rooms):
                 # Convert bbox percentages (0-100) to pixel coordinates using actual image dimensions
                 bbox = room.get("bbox")
                 if bbox and len(bbox) == 4:
-                    # Qwen returns [x1%, y1%, x2%, y2%] in 0-100 range
+                    try:
+                        x1_pct, y1_pct, x2_pct, y2_pct = [float(v) for v in bbox]
+                    except (ValueError, TypeError):
+                        logger.debug(f"Room {idx}: non-numeric bbox values {bbox}, skipping")
+                        dropped_count += 1
+                        continue
+                    
+                    # Validation: all coordinates must be in 0-100 range (with 5% tolerance)
+                    if any(v < 0 or v > 105 for v in [x1_pct, y1_pct, x2_pct, y2_pct]):
+                        logger.debug(
+                            f"Room {idx} ({room.get('room_name', '?')}): out-of-bounds bbox "
+                            f"[{x1_pct},{y1_pct},{x2_pct},{y2_pct}]%, skipping"
+                        )
+                        dropped_count += 1
+                        continue
+                    
+                    # Clamp to valid range for safety
+                    x1_pct = max(0, min(100, x1_pct))
+                    y1_pct = max(0, min(100, y1_pct))
+                    x2_pct = max(0, min(100, x2_pct))
+                    y2_pct = max(0, min(100, y2_pct))
+                    
                     # Scale to actual pixel coordinates: x-coords use width, y-coords use height
-                    x1_pct, y1_pct, x2_pct, y2_pct = bbox
                     bbox = [
                         int(x1_pct * img_width / 100),
                         int(y1_pct * img_height / 100),
@@ -1020,6 +1090,9 @@ Rules:
                     "confidence": float(room.get("confidence", 0.5)),
                     "metadata": room.get("metadata", {})
                 })
+            
+            if dropped_count > 0:
+                logger.info(f"Dropped {dropped_count} rooms with invalid bboxes")
             
             logger.debug(f"Parsed {len(normalized)} rooms from Unsloth response")
             return normalized
@@ -1107,6 +1180,10 @@ Rules:
             # Parse windows from response (pass actual image dimensions for correct bbox scaling)
             img_width, img_height = image.size
             windows = self._parse_window_response(response_text, img_width, img_height)
+            
+            # GPU memory cleanup
+            del inputs, output_ids, generated_ids
+            torch.cuda.empty_cache()
             
             return windows
         

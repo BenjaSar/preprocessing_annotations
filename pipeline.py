@@ -499,6 +499,9 @@ class AnnotationPipeline:
         # Step 3: VLM annotation (optional)
         if self.config.use_vlm:
             self._print_step("STEP 3: VLM zero-shot annotation")
+            
+            # Verify logging handlers are still in place after VLM model initialization
+            verify_logging_handlers()
 
             for img_path in self._iter_images(images_dir):
                 ann_path = annotations_dir / f"{img_path.stem}.json"
@@ -557,6 +560,17 @@ class AnnotationPipeline:
                         f"  {img_path.name}: {len(result.rooms)} rooms, "
                         f"{len(result.panels)} panels (VLM)"
                     )
+                    
+                    # GPU memory cleanup between images
+                    try:
+                        import gc
+                        import torch
+                        gc.collect()
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()
+                    except Exception as cleanup_err:
+                        logger.debug(f"GPU cleanup warning: {cleanup_err}")
+                    
                 except Exception as e:
                     logger.error(f"  {img_path.name}: VLM annotation failed - {e}")
 
@@ -1075,6 +1089,10 @@ class AnnotationPipeline:
         
         # Add roomsRecognized to data
         data["roomsRecognized"] = sft_rooms
+        
+        # Add preliminary sft_ready flag (will be recomputed in post-processing step)
+        # Setting to False here ensures a safe default if post-processing is skipped
+        data["sft_ready"] = False
 
         # Phase 2: Apply window detection and suffix augmentation
         try:
@@ -1093,39 +1111,6 @@ class AnnotationPipeline:
                 }
                 for idx, r in enumerate(data["rooms"])
             ]
-
-            # Detect windows (Tier 1: PDF layers, Tier 2: CubiCasa5K, Tier 3: VLM)
-            window_mappings = self.window_detector.detect_windows(
-                image_array=None,  # Would need to load image from result.image_file if using CubiCasa5K
-                rooms=rooms_for_detection,
-                pdf_path=None,  # Would be the source PDF path if available
-                vlm_backend=None,  # Could pass VLM backend for fallback detection
-            )
-
-            # Apply window suffixes to room types in legacy format
-            apply_window_suffixes(data["rooms"], window_mappings)
-
-            # Also apply suffixes to SFT format
-            for idx, sft_room in enumerate(data["roomsRecognized"]):
-                room_id = idx
-                mapping = next(
-                    (m for m in window_mappings if m.room_id == room_id), None
-                )
-                if mapping:
-                    base_type = sft_room.get("type", "UNKNOWN")
-                    suffixed_type = add_window_suffix(
-                        base_type,
-                        has_windows=mapping.has_windows,
-                        has_skylights=mapping.has_skylights,
-                        has_openings=mapping.has_openings,
-                    )
-                    sft_room["type"] = suffixed_type
-                    sft_room["window_detection"] = {
-                        "has_windows": mapping.has_windows,
-                        "has_skylights": mapping.has_skylights,
-                        "has_openings": mapping.has_openings,
-                        "window_count": mapping.window_count,
-                    }
 
         except Exception as e:
             logger.warning(f"Window detection failed, continuing without suffixes: {e}")
@@ -1206,6 +1191,10 @@ class AnnotationPipeline:
         
         # Add roomsRecognized to data
         data["roomsRecognized"] = sft_rooms
+        
+        # Add preliminary sft_ready flag (will be recomputed in post-processing step)
+        # Setting to False here ensures a safe default if post-processing is skipped
+        data["sft_ready"] = False
 
         # Phase 2: Apply window detection and suffix augmentation
         try:
@@ -1385,6 +1374,43 @@ def setup_logging(verbose: bool = False, output_dir: Union[str, Path] = None) ->
         
         # Log the file path to console so user knows where to find logs
         root_logger.info(f"Logging pipeline activity to: {log_path}")
+        
+        # Store FileHandler reference for later verification
+        setup_logging._file_handler = file_handler
+        setup_logging._file_path = log_path
+
+
+def verify_logging_handlers() -> bool:
+    """
+    Verify that the logging FileHandler is still present.
+    Re-add if missing (can happen if other code reconfigures logging).
+    
+    Returns:
+        True if FileHandler is present/restored, False if no file logging configured
+    """
+    root_logger = logging.getLogger()
+    
+    # Check if FileHandler exists
+    file_handlers = [h for h in root_logger.handlers if isinstance(h, logging.FileHandler)]
+    
+    if file_handlers:
+        # FileHandler still present
+        return True
+    
+    # Check if we stored a reference to re-add
+    if hasattr(setup_logging, '_file_handler') and hasattr(setup_logging, '_file_path'):
+        try:
+            # Re-add the FileHandler
+            file_handler = setup_logging._file_handler
+            if not file_handler.stream.closed:
+                root_logger.addHandler(file_handler)
+                root_logger.warning("Re-added lost FileHandler (logging reconfigured by other code)")
+                return True
+        except Exception as e:
+            root_logger.warning(f"Failed to restore FileHandler: {e}")
+            return False
+    
+    return False
 
 
 def main():
