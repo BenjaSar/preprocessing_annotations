@@ -1270,8 +1270,9 @@ class AnnotationPipeline:
             },
             "vlm": {
                 "backend": self.config.vlm.backend,
-                "model": self.config.vlm.model,
+                "model": self.config.vlm.active_model,
                 "qwen_model": self.config.vlm.qwen_model,
+                "unsloth_model": self.config.vlm.unsloth_model,
                 "max_tokens": self.config.vlm.max_tokens,
             },
             "sam": {
@@ -1477,6 +1478,12 @@ Examples:
              "'unsloth' (optimized local, ~2x faster, requires: pip install unsloth)",
     )
     parser.add_argument(
+        "--vlm-model",
+        default=None,
+        help="Model ID for the VLM backend. For Claude: claude-haiku-4-5-20251001 (default), "
+             "claude-sonnet-4-5-20250929. Overrides the VLM_MODEL env var.",
+    )
+    parser.add_argument(
         "--qwen-model",
         default="Qwen/Qwen2.5-VL-7B-Instruct",
         help="HuggingFace model ID for 'qwen' backend "
@@ -1530,6 +1537,8 @@ Examples:
     config.ocr.backend = args.ocr_backend
     config.use_semantic_reconciliation = args.use_semantic_reconciliation
     config.vlm.backend = args.vlm_backend
+    if args.vlm_model is not None:
+        config.vlm.model = args.vlm_model
     config.vlm.qwen_model = args.qwen_model
     config.vlm.unsloth_model = args.unsloth_model
 

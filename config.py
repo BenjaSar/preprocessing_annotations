@@ -21,7 +21,12 @@ except ImportError:
 
 
 def _get_vlm_model() -> str:
-    """Get VLM model from environment or use default Haiku."""
+    """Get VLM model from environment or use default Claude Haiku.
+    
+    Note: This default only applies to the 'claude' backend.
+    For 'qwen' and 'unsloth' backends, use qwen_model and unsloth_model fields.
+    See VLMConfig.active_model for the resolved model based on the selected backend.
+    """
     return os.getenv("VLM_MODEL", "claude-haiku-4-5-20251001")
 
 
@@ -234,6 +239,20 @@ class VLMConfig:
     def __post_init__(self):
         if self.qwen_device is None:
             self.qwen_device = _detect_device()
+
+    @property
+    def active_model(self) -> str:
+        """Return the model ID actually used by the selected backend.
+        
+        - claude: uses self.model (e.g. claude-haiku-4-5-20251001)
+        - qwen:   uses self.qwen_model (e.g. Qwen/Qwen2.5-VL-7B-Instruct)
+        - unsloth: uses self.unsloth_model (e.g. qwen3-vl-2b)
+        """
+        if self.backend == "qwen":
+            return self.qwen_model
+        elif self.backend == "unsloth":
+            return self.unsloth_model
+        return self.model
 
     # Room categories for classification (CV-focused, standardized taxonomy)
     room_categories: List[str] = field(
