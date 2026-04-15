@@ -496,6 +496,10 @@ class AnnotationPipeline:
                 if img_path.name in image_status:
                     image_status[img_path.name]["ocr"] = True
 
+        # Verify logging handlers after Step 2 OCR completes
+        # (PaddlePaddle may have reset the root logger level during import)
+        verify_logging_handlers()
+
         # Step 3: VLM annotation (optional)
         if self.config.use_vlm:
             self._print_step("STEP 3: VLM zero-shot annotation")
@@ -1378,17 +1382,29 @@ def setup_logging(verbose: bool = False, output_dir: Union[str, Path] = None) ->
         # Store FileHandler reference for later verification
         setup_logging._file_handler = file_handler
         setup_logging._file_path = log_path
+    
+    # Store root logger level for later verification/restoration
+    # (in case paddle or other code changes it)
+    setup_logging._root_logger_level = logging.DEBUG
 
 
 def verify_logging_handlers() -> bool:
     """
-    Verify that the logging FileHandler is still present.
-    Re-add if missing (can happen if other code reconfigures logging).
+    Verify that the logging FileHandler is still present and root logger level is correct.
+    Re-add FileHandler if missing (can happen if other code reconfigures logging).
+    Restore logger level if it was changed (e.g., by PaddlePaddle import).
     
     Returns:
         True if FileHandler is present/restored, False if no file logging configured
     """
     root_logger = logging.getLogger()
+    
+    # Check and restore root logger level if it was changed by paddle
+    # PaddlePaddle resets root logger to WARNING (30) during import
+    stored_level = getattr(setup_logging, '_root_logger_level', logging.DEBUG)
+    if root_logger.level != stored_level and root_logger.level > stored_level:
+        root_logger.setLevel(stored_level)
+        root_logger.debug(f"Restored root logger level to {logging.getLevelName(stored_level)}")
     
     # Check if FileHandler exists
     file_handlers = [h for h in root_logger.handlers if isinstance(h, logging.FileHandler)]
@@ -1468,9 +1484,9 @@ Examples:
     )
     parser.add_argument(
         "--unsloth-model",
-        default="qwen2.5-vl-7b",
-        help="Model key for 'unsloth' backend. Options: qwen2.5-vl-7b (default), "
-             "qwen3-vl-2b, qwen3-vl-4b, qwen3-vl-8b",
+        default="qwen3-vl-2b",
+        help="Model key for 'unsloth' backend. Options: qwen3-vl-2b (default), "
+             "qwen2.5-vl-7b, qwen3-vl-4b, qwen3-vl-8b",
     )
     parser.add_argument(
         "--use-sam", action="store_true", help="Use SAM for boundary refinement"

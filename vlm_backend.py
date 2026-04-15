@@ -823,14 +823,14 @@ class UnslothQwenBackend(VLMBackend):
             logger.info("Set HuggingFace Hub download timeout to 60s")
             
             # Resolve model ID
-            model_key = getattr(self.config, 'unsloth_model', 'qwen2.5-vl-7b').lower()
+            model_key = getattr(self.config, 'unsloth_model', 'qwen3-vl-2b').lower()
             if model_key not in self.MODEL_REGISTRY:
                 logger.warning(
                     f"Unknown Unsloth model key: {model_key}. "
                     f"Available: {', '.join(self.MODEL_REGISTRY.keys())}. "
-                    f"Using default: qwen2.5-vl-7b"
+                    f"Using default: qwen3-vl-2b"
                 )
-                model_key = "qwen2.5-vl-7b"
+                model_key = "qwen3-vl-2b"
             
             model_id = self.MODEL_REGISTRY[model_key]
             logger.info(f"Loading Unsloth model: {model_key} ({model_id})")
@@ -948,39 +948,40 @@ class UnslothQwenBackend(VLMBackend):
             return []
 
     def _build_room_detection_prompt(self) -> str:
-        """
-        Build prompt for room detection to prevent hallucination.
-        
-        Key improvements:
-        - Shortened category list prevents the model from treating it as a checklist
-        - No example bbox values (prevents direct copying of [10, 20, 40, 50])
-        - Explicit anti-hallucination instruction: "Do NOT invent or fabricate"
-        - Room count limit prevents 75-room generation
-        """
-        return """You are a floor plan annotation expert. Analyze this architectural floor plan image and identify all labeled rooms and spaces that are actually visible in the image.
+         """
+         Build prompt for room detection to prevent hallucination.
+         
+         Key improvements:
+         - Shortened category list prevents the model from treating it as a checklist
+         - Clear bbox format: fractions from 0.0 to 1.0 (not percentages) to avoid model confusion
+         - Explicit anti-hallucination instruction: "Do NOT invent or fabricate"
+         - Room count limit prevents 75-room generation
+         """
+         return """You are a floor plan annotation expert. Analyze this architectural floor plan image and identify all labeled rooms and spaces that are actually visible in the image.
 
-TASK: For each room/space you can see labeled in the floor plan, extract:
-  - room_type: one of PRIVATE OFFICE, OPEN OFFICE, CONFERENCE, LOBBY, CORRIDOR, RESTROOM, STAIRWELL, ELECTRICAL ROOM, STORAGE ROOM, MEETING, or another descriptive type that fits
-  - room_name: the exact label text as written on the plan
-  - bbox: bounding box as [x1, y1, x2, y2] percentage of image size (0-100)
-    where (x1,y1) is top-left corner and (x2,y2) is bottom-right corner.
-    ALL values MUST be between 0 and 100.
+ TASK: For each room/space you can see labeled in the floor plan, extract:
+   - room_type: one of PRIVATE OFFICE, OPEN OFFICE, CONFERENCE, LOBBY, CORRIDOR, RESTROOM, STAIRWELL, ELECTRICAL ROOM, STORAGE ROOM, MEETING, or another descriptive type that fits
+   - room_name: the exact label text as written on the plan
+   - bbox: bounding box as [x1, y1, x2, y2] where each value is a decimal fraction from 0.0 to 1.0
+     representing the position as a fraction of image width/height.
+     (x1,y1) is top-left corner, (x2,y2) is bottom-right corner.
+     ALL values MUST be between 0.0 and 1.0.
 
-INCLUDE only: physical rooms and labeled spaces (offices, restrooms, corridors, etc.)
-EXCLUDE: legends, title blocks, schedules, notes, equipment labels, panel lists
+ INCLUDE only: physical rooms and labeled spaces (offices, restrooms, corridors, etc.)
+ EXCLUDE: legends, title blocks, schedules, notes, equipment labels, panel lists
 
-Office rule: PRIVATE OFFICE = enclosed with walls/doors; OPEN OFFICE = shared open area
+ Office rule: PRIVATE OFFICE = enclosed with walls/doors; OPEN OFFICE = shared open area
 
-Return ONLY a JSON array. Example format (do not copy exact values):
-[{"room_id": "room_0", "room_type": "CONFERENCE", "room_name": "Conf Rm A",
-  "bbox": [x1, y1, x2, y2], "confidence": 0.9}]
+ Return ONLY a JSON array. Example format (do not copy exact values):
+ [{"room_id": "room_0", "room_type": "CONFERENCE", "room_name": "Conf Rm A",
+   "bbox": [0.1, 0.2, 0.4, 0.5], "confidence": 0.9}]
 
-Rules:
-- ONLY include rooms that have visible labels in the image
-- Do NOT invent or fabricate rooms that are not shown
-- All bbox values must be between 0 and 100
-- Maximum 25 rooms
-- Return valid JSON only, no markdown"""
+ Rules:
+ - ONLY include rooms that have visible labels in the image
+ - Do NOT invent or fabricate rooms that are not shown
+ - All bbox values MUST be decimals between 0.0 and 1.0 (not 0-100, not pixel coords)
+ - Maximum 25 rooms
+ - Return valid JSON only, no markdown"""
 
     def _parse_room_response(self, response_text: str, img_width: int = 1000, img_height: int = 1000) -> List[Dict[str, Any]]:
         """Parse JSON response from Unsloth Qwen."""
@@ -1048,37 +1049,40 @@ Rules:
             normalized = []
             dropped_count = 0
             for idx, room in enumerate(rooms):
-                # Convert bbox percentages (0-100) to pixel coordinates using actual image dimensions
+                # Convert bbox fractions (0.0-1.0) to pixel coordinates using actual image dimensions
                 bbox = room.get("bbox")
                 if bbox and len(bbox) == 4:
                     try:
-                        x1_pct, y1_pct, x2_pct, y2_pct = [float(v) for v in bbox]
+                        x1_frac, y1_frac, x2_frac, y2_frac = [float(v) for v in bbox]
                     except (ValueError, TypeError):
                         logger.debug(f"Room {idx}: non-numeric bbox values {bbox}, skipping")
                         dropped_count += 1
                         continue
                     
-                    # Validation: all coordinates must be in 0-100 range (with 5% tolerance)
-                    if any(v < 0 or v > 105 for v in [x1_pct, y1_pct, x2_pct, y2_pct]):
+                    # Validation: allow slight tolerance for model quirks (0.0-1.2)
+                    # Many VLMs slightly overshoot the 1.0 boundary, so we clamp rather than reject
+                    if any(v < -0.05 or v > 1.2 for v in [x1_frac, y1_frac, x2_frac, y2_frac]):
+                        # Only skip if values are WAY out of bounds
                         logger.debug(
-                            f"Room {idx} ({room.get('room_name', '?')}): out-of-bounds bbox "
-                            f"[{x1_pct},{y1_pct},{x2_pct},{y2_pct}]%, skipping"
+                            f"Room {idx} ({room.get('room_name', '?')}): severely out-of-bounds bbox "
+                            f"[{x1_frac},{y1_frac},{x2_frac},{y2_frac}] (far outside 0.0-1.0), skipping"
                         )
                         dropped_count += 1
                         continue
                     
-                    # Clamp to valid range for safety
-                    x1_pct = max(0, min(100, x1_pct))
-                    y1_pct = max(0, min(100, y1_pct))
-                    x2_pct = max(0, min(100, x2_pct))
-                    y2_pct = max(0, min(100, y2_pct))
+                    # Clamp to valid range [0.0, 1.0] for safety
+                    # This allows models slight flexibility while keeping coords valid
+                    x1_frac = max(0.0, min(1.0, x1_frac))
+                    y1_frac = max(0.0, min(1.0, y1_frac))
+                    x2_frac = max(0.0, min(1.0, x2_frac))
+                    y2_frac = max(0.0, min(1.0, y2_frac))
                     
-                    # Scale to actual pixel coordinates: x-coords use width, y-coords use height
+                    # Scale to actual pixel coordinates: multiply fractions by image dimensions
                     bbox = [
-                        int(x1_pct * img_width / 100),
-                        int(y1_pct * img_height / 100),
-                        int(x2_pct * img_width / 100),
-                        int(y2_pct * img_height / 100)
+                        int(x1_frac * img_width),
+                        int(y1_frac * img_height),
+                        int(x2_frac * img_width),
+                        int(y2_frac * img_height)
                     ]
                 
                 normalized.append({
