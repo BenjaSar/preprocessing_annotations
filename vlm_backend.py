@@ -927,14 +927,18 @@ class UnslothQwenBackend(VLMBackend):
              # Load image
              image = Image.open(image_path).convert("RGB")
              
+             # Save original dimensions before resizing
+             original_width, original_height = image.size
+             
              # Resize large images to reduce GPU memory usage
              # Preserve aspect ratio while capping max dimension at 2048px
              max_dim = 2048
              width, height = image.size
+             resize_scale = 1.0  # Track whether we resized
              if max(width, height) > max_dim:
-                 scale = max_dim / max(width, height)
-                 new_size = (int(width * scale), int(height * scale))
-                 logger.info(f"Resizing image from {width}x{height} to {new_size[0]}x{new_size[1]} (scale={scale:.2f})")
+                 resize_scale = max_dim / max(width, height)
+                 new_size = (int(width * resize_scale), int(height * resize_scale))
+                 logger.info(f"Resizing image from {width}x{height} to {new_size[0]}x{new_size[1]} (scale={resize_scale:.2f})")
                  image = image.resize(new_size, Image.Resampling.LANCZOS)
              
              # Build room detection prompt
@@ -993,6 +997,18 @@ class UnslothQwenBackend(VLMBackend):
              img_width, img_height = image.size
              rooms = self._parse_room_response(response_text, img_width, img_height)
              
+             # Rescale bboxes back to original image dimensions if image was resized
+             # VLM saw the resized image and generated fractions based on resized dimensions.
+             # _parse_room_response converted those fractions to pixel coords in resized space.
+             # Now we rescale back to original space so downstream consumers get original-dim coordinates.
+             if resize_scale < 1.0:
+                 inv_scale = 1.0 / resize_scale  # e.g. 2.1973 if scaled from 4500 to 2048
+                 for room in rooms:
+                     bbox = room.get("bbox", [])
+                     if bbox and len(bbox) == 4:
+                         room["bbox"] = [int(v * inv_scale) for v in bbox]
+                 logger.debug(f"Rescaled {len(rooms)} room bboxes from resized({img_width}x{img_height}) to original({original_width}x{original_height})")
+             
              # GPU memory cleanup - aggressive deletion of all references
              del inputs, output_ids, generated_ids, image, prompt, messages, input_text
              torch.cuda.empty_cache()
@@ -1045,61 +1061,142 @@ class UnslothQwenBackend(VLMBackend):
  - Do NOT invent or fabricate rooms that are not shown
  - All bbox values MUST be decimals between 0.0 and 1.0 (not 0-100, not pixel coords)
  - Maximum 25 rooms
- - Return valid JSON only, no markdown"""
+  - Return valid JSON only, no markdown"""
 
     def _truncate_repetitive_patterns(self, rooms: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """
-        Detect and truncate autoregressive hallucination patterns.
-        
-        Qwen3-VL can enter loops generating repetitive bboxes with same x-coords 
-        but incrementing y by fixed amounts (0.15-0.35 range). This method detects
-        that pattern and truncates the list when found.
-        """
-        if len(rooms) < 4:
-            return rooms
-        
-        # Check for pattern: same x-coords, incrementing y by consistent delta
-        for i in range(len(rooms) - 3):
-            r0, r1, r2, r3 = rooms[i:i+4]
-            
-            # Extract bboxes
-            b0 = r0.get("bbox", [])
-            b1 = r1.get("bbox", [])
-            b2 = r2.get("bbox", [])
-            b3 = r3.get("bbox", [])
-            
-            if not all(len(b) == 4 for b in [b0, b1, b2, b3]):
-                continue
-            
-            try:
-                # Check if x-coords match (same left/right edges)
-                x0_match = abs(b0[0] - b1[0]) < 0.01 and abs(b0[2] - b1[2]) < 0.01
-                x1_match = abs(b1[0] - b2[0]) < 0.01 and abs(b1[2] - b2[2]) < 0.01
-                x2_match = abs(b2[0] - b3[0]) < 0.01 and abs(b2[2] - b3[2]) < 0.01
-                
-                if not (x0_match and x1_match and x2_match):
-                    continue
-                
-                # Check if y-coords increment by consistent delta
-                delta_01 = b1[1] - b0[1]
-                delta_12 = b2[1] - b1[1]
-                delta_23 = b3[1] - b2[1]
-                
-                # Allow ±5% tolerance on delta consistency
-                if (abs(delta_01 - delta_12) < 0.05 and 
-                    abs(delta_12 - delta_23) < 0.05 and 
-                    0.15 < delta_01 < 0.35):
-                    
-                    logger.warning(
-                        f"Detected hallucination pattern at room {i}: "
-                        f"repetitive bboxes with constant y-delta={delta_01:.3f}. "
-                        f"Truncating list at position {i}"
-                    )
-                    return rooms[:i]
-            except (TypeError, ValueError, IndexError):
-                continue
-        
-        return rooms
+         """
+         Detect and truncate autoregressive hallucination patterns.
+         
+         Qwen3-VL can enter loops generating repetitive bboxes. This method detects
+         multiple hallucination patterns:
+         1. Identical bbox repetition: N rooms with exact same bbox
+         2. Grid pattern: rooms on regular grid (constant x-step AND y-step)
+         3. Incremental y-delta: same x-coords, incrementing y (original pattern)
+         """
+         if len(rooms) < 2:
+             return rooms
+         
+         # Pattern 1: Detect identical bboxes (indicates infinite loop at same location)
+         # If we see 3+ identical bboxes, keep only the first one
+         try:
+             seen_bboxes = {}
+             first_unique_indices = []
+             duplicate_start = None
+             
+             for i, room in enumerate(rooms):
+                 bbox = tuple(room.get("bbox", []))
+                 if bbox and len(bbox) == 4:
+                     # Convert to a hashable tuple for comparison
+                     bbox_key = tuple(int(v * 100) for v in bbox)  # quantize to nearest 1/100
+                     
+                     if bbox_key not in seen_bboxes:
+                         seen_bboxes[bbox_key] = []
+                         first_unique_indices.append(i)
+                     seen_bboxes[bbox_key].append(i)
+             
+             # Check if any bbox appears 3+ times
+             for bbox_key, indices in seen_bboxes.items():
+                 if len(indices) >= 3:
+                     duplicate_start = min(indices[1:])  # start of duplicates (skip first)
+                     logger.warning(
+                         f"Detected identical bbox hallucination at room {indices[0]}: "
+                         f"bbox appears {len(indices)} times (indices {indices}). "
+                         f"Truncating list at position {duplicate_start}"
+                     )
+                     return rooms[:duplicate_start]
+         except (TypeError, ValueError, IndexError):
+             pass
+         
+         # Pattern 2: Detect grid pattern (room grid like 3x3, 4x3, etc)
+         # If rooms form a regular grid with constant x-step and y-step, it's likely hallucinated
+         if len(rooms) >= 6:
+             try:
+                 # Extract all bboxes and check for grid regularity
+                 bboxes = []
+                 for room in rooms:
+                     bbox = room.get("bbox", [])
+                     if bbox and len(bbox) == 4:
+                         bboxes.append(bbox)
+                     else:
+                         break  # Stop if we hit an invalid bbox
+                 
+                 if len(bboxes) >= 6:
+                     # Check for grid pattern: collect all unique x1 and y1 values
+                     x1_values = set()
+                     y1_values = set()
+                     
+                     for bbox in bboxes:
+                         # Quantize to avoid floating point issues
+                         x1_key = int(bbox[0] * 100)
+                         y1_key = int(bbox[1] * 100)
+                         x1_values.add(x1_key)
+                         y1_values.add(y1_key)
+                     
+                     # Grid detection: if rooms fit into a regular grid pattern (e.g., 3x3, 2x3, 4x2)
+                     # then we expect num_rooms = num_x_values * num_y_values
+                     num_x = len(x1_values)
+                     num_y = len(y1_values)
+                     
+                     if num_x >= 2 and num_y >= 2 and (num_x * num_y) >= 6:
+                         # Check if actual rooms match grid dimensions (allowing some tolerance)
+                         expected_grid = num_x * num_y
+                         actual_rooms = len(bboxes)
+                         
+                         # If we have close to expected grid size, it's probably a hallucination
+                         if abs(actual_rooms - expected_grid) <= 1:
+                             logger.warning(
+                                 f"Detected grid pattern hallucination: "
+                                 f"{actual_rooms} rooms on {num_x}x{num_y} grid. "
+                                 f"Truncating entire list"
+                             )
+                             return rooms[:0]  # Return empty list
+             except (TypeError, ValueError, IndexError):
+                 pass
+         
+         # Pattern 3: Check for pattern with same x-coords, incrementing y by consistent delta
+         # This is the original pattern detector
+         if len(rooms) >= 4:
+             for i in range(len(rooms) - 3):
+                 r0, r1, r2, r3 = rooms[i:i+4]
+                 
+                 # Extract bboxes
+                 b0 = r0.get("bbox", [])
+                 b1 = r1.get("bbox", [])
+                 b2 = r2.get("bbox", [])
+                 b3 = r3.get("bbox", [])
+                 
+                 if not all(len(b) == 4 for b in [b0, b1, b2, b3]):
+                     continue
+                 
+                 try:
+                     # Check if x-coords match (same left/right edges)
+                     x0_match = abs(b0[0] - b1[0]) < 0.01 and abs(b0[2] - b1[2]) < 0.01
+                     x1_match = abs(b1[0] - b2[0]) < 0.01 and abs(b1[2] - b2[2]) < 0.01
+                     x2_match = abs(b2[0] - b3[0]) < 0.01 and abs(b2[2] - b3[2]) < 0.01
+                     
+                     if not (x0_match and x1_match and x2_match):
+                         continue
+                     
+                     # Check if y-coords increment by consistent delta
+                     delta_01 = b1[1] - b0[1]
+                     delta_12 = b2[1] - b1[1]
+                     delta_23 = b3[1] - b2[1]
+                     
+                     # Allow ±5% tolerance on delta consistency
+                     if (abs(delta_01 - delta_12) < 0.05 and 
+                         abs(delta_12 - delta_23) < 0.05 and 
+                         0.15 < delta_01 < 0.35):
+                         
+                         logger.warning(
+                             f"Detected y-delta hallucination pattern at room {i}: "
+                             f"repetitive bboxes with constant y-delta={delta_01:.3f}. "
+                             f"Truncating list at position {i}"
+                         )
+                         return rooms[:i]
+                 except (TypeError, ValueError, IndexError):
+                     continue
+         
+         return rooms
 
     def _parse_room_response(self, response_text: str, img_width: int = 1000, img_height: int = 1000) -> List[Dict[str, Any]]:
         """Parse JSON response from Unsloth Qwen."""
