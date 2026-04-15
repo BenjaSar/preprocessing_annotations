@@ -12,7 +12,7 @@ import logging
 import sys
 from dataclasses import asdict
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Union
 
 # Handle both relative and absolute imports for flexibility
 try:
@@ -1343,14 +1343,48 @@ class AnnotationPipeline:
         print("  5. Use room_regions/ as training examples for fine-tuning")
 
 
-def setup_logging(verbose: bool = False) -> None:
-    """Configure logging for the pipeline."""
+def setup_logging(verbose: bool = False, output_dir: Union[str, Path] = None) -> None:
+    """Configure logging for the pipeline.
+    
+    Args:
+        verbose: If True, console output is DEBUG; otherwise INFO
+        output_dir: If provided, also write full DEBUG logs to file in this directory
+    """
+    from datetime import datetime
+    
     level = logging.DEBUG if verbose else logging.INFO
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
-        datefmt="%H:%M:%S",
-    )
+    fmt = "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"
+    datefmt = "%H:%M:%S"
+    formatter = logging.Formatter(fmt, datefmt=datefmt)
+    
+    # Get root logger and set to DEBUG (handlers will filter)
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.DEBUG)
+    
+    # Remove any existing handlers to avoid duplicates
+    for handler in root_logger.handlers[:]:
+        root_logger.removeHandler(handler)
+    
+    # Console handler (respects --verbose flag)
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(level)
+    console_handler.setFormatter(formatter)
+    root_logger.addHandler(console_handler)
+    
+    # File handler (always DEBUG, written to output directory if provided)
+    if output_dir:
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+        log_path = output_dir / f"pipeline_{timestamp}.log"
+        
+        file_handler = logging.FileHandler(log_path, encoding="utf-8")
+        file_handler.setLevel(logging.DEBUG)
+        file_handler.setFormatter(formatter)
+        root_logger.addHandler(file_handler)
+        
+        # Log the file path to console so user knows where to find logs
+        root_logger.info(f"Logging pipeline activity to: {log_path}")
 
 
 def main():
@@ -1437,8 +1471,8 @@ Examples:
 
     args = parser.parse_args()
 
-    # Setup logging
-    setup_logging(args.verbose)
+    # Setup logging (with file output to --output directory)
+    setup_logging(args.verbose, output_dir=args.output)
 
     # Create config
     if args.high_detail:
