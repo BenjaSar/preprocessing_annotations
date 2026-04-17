@@ -232,7 +232,7 @@ class VLMConfig:
     qwen_model: str = "Qwen/Qwen2.5-VL-7B-Instruct"
 
     # Unsloth model key (only used when backend='unsloth')
-    # Options: "qwen2.5-vl-7b" (default), "qwen3-vl-2b", "qwen3-vl-4b", "qwen3-vl-8b"
+    # Options: "qwen2.5-vl-7b" (default, proven), "qwen3-vl-2b", "qwen3-vl-4b", "qwen3-vl-8b"
     # Override via --unsloth-model CLI flag
     unsloth_model: str = "qwen2.5-vl-7b"
 

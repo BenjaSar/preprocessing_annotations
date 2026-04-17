@@ -191,23 +191,249 @@ python main.py --input ./pdfs --output ./dataset --use-vlm --vlm-backend unsloth
 - Unsloth: 30-60 minutes
 - OCR only (no VLM): 5-10 minutes
 
-## Project Structure
+## Architecture
+
+The preprocessing pipeline transforms raw PDF floor plans into SFT-ready annotations through a multi-stage processing flow with pluggable VLM backends and comprehensive validation.
+
+### System Overview
 
 ```
-preprocessing_annotations/
-├── __init__.py                  # Package exports
-├── setup.py                     # Installation configuration
-├── main.py                      # CLI entry point
-├── README.md                    # This file
-├── config.py                    # Configuration classes
-├── pipeline.py                  # Main orchestration
-├── pdf_extractor.py             # PDF to image conversion
-├── ocr_extractor.py             # OCR text detection
-├── symbol_detector.py           # Template-based detection
-├── vlm_annotator.py             # Claude VLM integration
-├── sam_segmenter.py             # SAM segmentation
-└── exporters.py                 # Label Studio export
+                           PDF Input
+                              │
+                              ▼
+              ┌──────────────────────────────┐
+              │ preprocessing_annotations    │
+              │  (Multi-stage Pipeline)      │
+              ├──────────────────────────────┤
+              │ 1. PDF Extract → Images      │
+              │ 2. OCR Detection             │
+              │ 3. VLM Annotation (3 paths)  │
+              │ 4. Reconciliation            │
+              │ 5. Validation & Filtering    │
+              │ 6. Metrics & Quality Check   │
+              │ 7. Export                    │
+              └──────────────────────────────┘
+                    ├──────┬──────┬──────────┐
+                    ▼      ▼      ▼          ▼
+              Processed  COCO  Label    SFT JSONL
+              Annotations    Studio     (with bboxes)
+                    │                       │
+                    └───────┬───────────────┘
+                            ▼
+              ┌──────────────────────────────┐
+              │  Training Pipelines          │
+              ├──────────────────────────────┤
+              │ • paligemma2/ (10-step)      │
+              │ • finetune_qwen.py           │
+              │ • floorPlanVisionAIAdaptor   │
+              │   (production inference)     │
+              └──────────────────────────────┘
 ```
+
+### Pipeline Stages
+
+The preprocessing pipeline executes 7 sequential stages:
+
+1. **PDF Extraction** (`pdf_extractor.py`)
+   - Converts floor plan PDFs to high-resolution PNG images (150-300 DPI)
+   - Handles multi-page documents with page-by-page extraction
+
+2. **Text Detection** (`ocr_extractor.py`, `two_pass_ocr_extractor.py`)
+   - Primary: PaddleOCR or EasyOCR for room label extraction
+   - Secondary: Two-pass strategy with VLM fallback for low-confidence regions
+   - Symbol detection (`symbol_detector.py`): Template-based electrical symbol matching
+
+3. **VLM Room Annotation** (3 parallel paths)
+   - **Claude API** (`vlm_annotator.py`): Standalone Anthropic integration, 2-5 sec/image
+   - **Qwen2.5-VL** (`vlm_backend.py`): HuggingFace local inference, 30-60 sec/image
+   - **Unsloth Qwen** (`vlm_backend.py`): Optimized local inference, 15-30 sec/image
+   - Shared hallucination detection (`hallucination_detector.py`): Detects repetitive/grid patterns
+
+4. **Semantic Reconciliation** (`semantic_reconciler.py`)
+   - Hybrid merge of OCR text detections with VLM room polygons
+   - Spatial containment-based label assignment
+   - Resolves conflicts between multiple detection sources
+
+5. **Validation & Filtering** (`automation/sft_validator.py`, `bbox_validator.py`)
+   - OOB (out-of-bounds) bbox detection and filtering
+   - NaN/infinity checks, coordinate normalization
+   - Atomic writes with schema versioning (`bbox_validator.py`)
+
+6. **Quality Evaluation** (`automation/quality_checker.py`, `bbox_metrics.py`)
+   - Field validation, taxonomy synchronization
+   - Confidence thresholding and overlap detection
+   - Comprehensive metrics: mAP, GIoU, DIoU, CIoU, Acc@0.5/0.75
+   - Hallucination rate and coverage analysis
+
+7. **Export** (`exporters.py`, bridge converter)
+   - COCO format for general ML frameworks
+   - Label Studio JSON for human review workflows
+   - SFT-ready JSONL with full provenance and confidence metadata
+   - PaliGemma2 format with native `<locYYYY><locXXXX>` spatial tokens
+
+### VLM Backend Architecture
+
+The pipeline supports three pluggable VLM backends through a common interface:
+
+```
+VLMBackend (Abstract Base Class)
+├── ClaudeBackend
+│   └── Uses Anthropic API
+├── Qwen2_5VLBackend
+│   └── Uses HuggingFace Transformers (local)
+└── UnslothQwenBackend
+    └── Uses Unsloth optimized inference
+
+VLMAnnotator (Standalone Claude path)
+└── Alternative to ClaudeBackend (separate architecture)
+```
+
+**Shared components across all backends:**
+- `detect_hallucinations()`: Detects and truncates autoregressive loops (F4)
+- `_parse_room_response()`: Normalized response parsing with image dimension awareness
+- Bbox coordinate rescaling to original image space (F3)
+
+### Annotation Data Model
+
+The pipeline produces two output formats for different use cases:
+
+**Backward-Compatible Output** (`rooms[]`):
+```json
+{
+  "image_file": "...",
+  "image_size": {"width": 4500, "height": 3375},
+  "rooms": [
+    {
+      "room_name": "Office",
+      "category": "office",
+      "bbox": [100, 150, 200, 250]
+    }
+  ]
+}
+```
+
+**SFT-Ready Output** (`roomsRecognized[]`):
+```json
+{
+  "image_file": "...",
+  "roomsRecognized": [
+    {
+      "id": "room_0",
+      "type": "PRIVATE OFFICE",
+      "name": "Office",
+      "coordinates": {"bbox": [...], "polygon": [...]},
+      "confidence": 0.95,
+      "confidence_detail": {"detection": 0.9, "classification": 0.95, "ocr": 0.9},
+      "coverage": {"spatial_fraction": 0.12, "text_tokens_matched": 4},
+      "provenance": {"detection": {"method": "vlm", "model": "claude", "score": 0.9}},
+      "name_expanded": "Office - A Wing - 01"
+    }
+  ],
+  "schema_version": "1.0"
+}
+```
+
+**Room Taxonomy**: 31-class standardized schema (`automation/taxonomy.py`)
+- Commercial: PRIVATE OFFICE, OPEN OFFICE, CONFERENCE, etc.
+- Utility: ELECTRICAL ROOM, MECHANICAL, STORAGE, etc.
+- Circulation: LOBBY, CORRIDOR, STAIRWELL, ELEVATOR, etc.
+- Sanitary: RESTROOM, SHOWER, etc.
+- Special: RESIDENTIAL units with automatic bedroom/bathroom counting
+
+### Module Reference
+
+#### Core Pipeline (5 files)
+| Module | Purpose |
+|--------|---------|
+| `main.py` | CLI entry point; bootstraps and delegates to pipeline |
+| `config.py` | Centralized configuration with PDFConfig, OCRConfig, VLMConfig, SAMConfig dataclasses |
+| `pipeline.py` | Main AnnotationPipeline orchestrator coordinating 7-stage flow |
+| `exporters.py` | COCO format, Label Studio JSON, review prioritization |
+| `__init__.py`, `setup.py` | Package initialization and distribution configuration |
+
+#### Text Detection (4 files)
+| Module | Purpose |
+|--------|---------|
+| `ocr_extractor.py` | Primary OCR text extraction using PaddleOCR or EasyOCR |
+| `ocr_adapter.py` | Abstraction layer normalizing output from multiple OCR backends |
+| `two_pass_ocr_extractor.py` | Two-pass strategy: baseline + VLM fallback for low-confidence regions |
+| `symbol_detector.py` | Template-based multi-scale, rotation-invariant electrical symbol detection |
+
+#### VLM Annotation (4 files)
+| Module | Purpose |
+|--------|---------|
+| `vlm_annotator.py` | Claude standalone integration (alternative to vlm_backend.py) |
+| `vlm_backend.py` | Pluggable backend abstraction: Claude API, Qwen2.5-VL, Unsloth (1576 lines) |
+| `semantic_reconciler.py` | Hybrid merge of OCR and VLM outputs via spatial containment |
+| `hallucination_detector.py` | Shared detector for repetitive/grid/marching patterns (F4) |
+
+#### Spatial Analysis (3 files)
+| Module | Purpose |
+|--------|---------|
+| `sam_segmenter.py` | SAM (Segment Anything Model) integration for boundary refinement |
+| `window_detector.py` | Three-tier window detection: PDF layers (Tier 1), CubiCasa5K (Tier 2), VLM (Tier 3) |
+| `cubicasa5k_detector.py` | CubiCasa5K multi-task CNN for wall/icon/junction detection |
+
+#### Validation & Metrics (3 files)
+| Module | Purpose |
+|--------|---------|
+| `bbox_validator.py` | OOB/NaN checks, coordinate normalization (F10), atomic writes (F11), filtering (F12) |
+| `bbox_metrics.py` | Comprehensive evaluation: mAP, GIoU/DIoU/CIoU, Acc@0.5/0.75, hallucination rate (F7) |
+| `visualize_bbox.py` | Standalone tool to render color-coded bboxes with labels for visual QA |
+
+#### SFT & Training (2 files)
+| Module | Purpose |
+|--------|---------|
+| `finetune_qwen.py` | Qwen2.5-VL fine-tuning infrastructure with SFT data prep (includes bboxes via F8) |
+| `production_monitor.py` | Production hardening: confidence thresholding, error recovery, quality gates |
+
+#### Automation Subsystem (12 files in `automation/`)
+| Module | Purpose |
+|--------|---------|
+| `taxonomy.py` | Single source of truth: 31-class room taxonomy with mandatory mappings |
+| `annotation_schema.py` | Defines SFT-ready JSON schema (RoomCoordinates, SFTRoom, roomsRecognized) |
+| `label_normalizer.py` | Backward-compatible wrapper around taxonomy |
+| `quality_checker.py` | Room annotation validation: field names, format, taxonomy sync, overlap detection |
+| `sft_validator.py` | SFT-grade validation: confidence thresholds, spatial text filtering (1092 lines) |
+| `region_extractor.py` | Extracts cropped room regions as individual training images |
+| `abbreviations.py` | Canonical abbreviation map (BR→BEDROOM, CONF→CONFERENCE, etc.) |
+| `abbreviation_ocr_recovery.py` | Layer 2 recovery: image preprocessing + upscaling for small text OCR |
+| `residential_unit_detector.py` | Layer 1: VLM-based residential apartment detection (bedroom/bathroom counting) |
+| `synthetic_label_generator.py` | Layer 3: Synthetic label generation when OCR/VLM detection insufficient |
+| `residential_pipeline.py` | Orchestrates 3-layer residential abbreviation recovery |
+
+### Connected Projects
+
+#### PaliGemma2 Training Pipeline (`paligemma2/src/`)
+A complete 10-step fine-tuning pipeline for Google PaliGemma 2 (Vision Language Model):
+- **Steps 1-5**: PDF organization, image conversion, metadata generation, classification/VQA annotations
+- **Step 6**: Detection annotation setup with Label Studio converter to PaliGemma native `<loc0000>...<loc1023>` format
+- **Steps 7-10**: Train/val/test split creation, LoRA fine-tuning, evaluation metrics, error analysis
+- **Bridge**: `convert_preprocessing_to_paligemma.py` reads `processed_annotations/*.json` and outputs PaliGemma JSONL (F1)
+- **Advantage**: Native spatial tokens eliminate custom bbox format invention
+
+#### floorPlanVisionAIAdaptor (Production Inference)
+Production-ready application using Qwen2-VL with 4-bit quantization:
+- Takes PDF floor plans as input, outputs structured JSON analysis
+- Model lifecycle management with context manager support
+- GPU memory optimization via bit-width reduction
+- Configuration management for model selection, inference parameters, system prompts
+
+#### floorPlanVisionAI (Planned Modular Architecture)
+Scaffold-only design documenting a modular production system:
+- Separated concerns: config, preprocessing, detection, refinement, validation, association, orchestration
+- Currently empty; intended as future refactoring target
+- Provides architectural guidance for componentization
+
+### Configuration
+
+All settings are centralized in `config.py` and can be customized per use case (see Configuration section below). Key dataclasses:
+
+- **PDFConfig**: DPI, output format, page range
+- **OCRConfig**: Backend selection, confidence threshold, preprocessing, 53 room name patterns
+- **VLMConfig**: Backend selection (claude/qwen/unsloth), model ID, token limits, room taxonomy
+- **SAMConfig**: Model variant, checkpoint path, device auto-detection
+- **PipelineConfig**: Master config with factory methods (`for_high_detail()`, `for_fast_processing()`)
 
 ## Configuration
 
@@ -446,7 +672,7 @@ If you use this pipeline in your research, please cite:
 @software{preprocessing_annotations_2024,
   title={Preprocessing Annotations: MEP Floor Plan Pipeline},
   author={Computer Vision Team},
-  year={2024},
+  year={2026},
   url={https://github.com/...}
 }
 ```

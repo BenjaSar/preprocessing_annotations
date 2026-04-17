@@ -419,12 +419,55 @@ Output ONLY valid JSON with this exact structure:
                         f"out-of-bounds or non-fractional bboxes"
                     )
 
+                # F3: Rescale bboxes back to original image coordinates.
+                # VLM saw the sent image (potentially resized to fit API limits)
+                # and generated bboxes in sent-image pixel space (lines 398-401).
+                # Now we scale back to original coordinates so downstream consumers
+                # get bboxes in the same coordinate space as image_size records.
+                if sent_width != orig_width or sent_height != orig_height:
+                    scale_x = orig_width / sent_width
+                    scale_y = orig_height / sent_height
+                    for room in data.get("rooms", []):
+                        bbox = room.get("bbox", [])
+                        if bbox and len(bbox) == 4:
+                            room["bbox"] = [
+                                int(bbox[0] * scale_x),  # x
+                                int(bbox[1] * scale_y),  # y
+                                int(bbox[2] * scale_x),  # width
+                                int(bbox[3] * scale_y),  # height
+                            ]
+                    
+                    for panel in data.get("panels", []):
+                        bbox = panel.get("bbox", [])
+                        if bbox and len(bbox) == 4:
+                            panel["bbox"] = [
+                                int(bbox[0] * scale_x),
+                                int(bbox[1] * scale_y),
+                                int(bbox[2] * scale_x),
+                                int(bbox[3] * scale_y),
+                            ]
+                    
+                    logger.debug(
+                        f"Rescaled bboxes from sent({sent_width}×{sent_height}) "
+                        f"to original({orig_width}×{orig_height}) coordinate space"
+                    )
+
+                # F5: Detect and truncate hallucinations in room detections.
+                # Use shared hallucination detector (available to all backends).
+                from hallucination_detector import detect_hallucinations
+                rooms_before = len(data.get("rooms", []))
+                data["rooms"] = detect_hallucinations(data.get("rooms", []))
+                rooms_after = len(data.get("rooms", []))
+                if rooms_before != rooms_after:
+                    logger.info(
+                        f"Hallucination detection truncated {rooms_before - rooms_after} rooms "
+                        f"({rooms_after} remaining)"
+                    )
+
                 # Build result.
-                # image_size records the ORIGINAL file dimensions so that
-                # bboxes (in sent-image pixel space) can be projected back
-                # to the original coordinate space by downstream tools.
-                # sent_size records what was actually transmitted so callers
-                # can perform the scale-back if needed.
+                # image_size records the ORIGINAL file dimensions.
+                # All bboxes are now in original-image pixel coordinates,
+                # matching the image_size dimensions.
                 rooms = [
                     RoomAnnotation(
                         room_number=r.get("room_number", ""),

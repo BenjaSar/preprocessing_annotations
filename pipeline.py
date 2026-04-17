@@ -1491,9 +1491,9 @@ Examples:
     )
     parser.add_argument(
         "--unsloth-model",
-        default="qwen3-vl-2b",
-        help="Model key for 'unsloth' backend. Options: qwen3-vl-2b (default), "
-             "qwen2.5-vl-7b, qwen3-vl-4b, qwen3-vl-8b",
+        default="qwen2.5-vl-7b",
+        help="Model key for 'unsloth' backend. Options: qwen2.5-vl-7b (default, proven), "
+             "qwen3-vl-2b, qwen3-vl-4b, qwen3-vl-8b",
     )
     parser.add_argument(
         "--use-sam", action="store_true", help="Use SAM for boundary refinement"

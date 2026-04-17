@@ -88,6 +88,16 @@ class VLMBackend(ABC):
         # Default implementation: not supported by this backend
         logger.debug(f"{self.__class__.__name__} does not implement window detection")
         return []
+    
+    def detect_hallucinations(self, rooms: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        Detect and truncate autoregressive hallucination patterns in room detections.
+        
+        Wrapper around the shared hallucination_detector module.
+        This allows all VLM backends to use the same hallucination detection logic.
+        """
+        from hallucination_detector import detect_hallucinations as detect_hallucinations_util
+        return detect_hallucinations_util(rooms)
 
 
 class ClaudeBackend(VLMBackend):
@@ -557,6 +567,16 @@ class Qwen2_5VLBackend(VLMBackend):
             img_width, img_height = image.size
             rooms = self._parse_room_response(response_text, img_width, img_height)
             
+            # F6: Detect and truncate hallucinations before returning
+            rooms_before = len(rooms)
+            rooms = self.detect_hallucinations(rooms)
+            rooms_after = len(rooms)
+            if rooms_before != rooms_after:
+                logger.info(
+                    f"Hallucination detection truncated {rooms_before - rooms_after} rooms "
+                    f"({rooms_after} remaining)"
+                )
+            
             # GPU memory cleanup
             del inputs, output_ids, generated_ids
             torch.cuda.empty_cache()
@@ -931,8 +951,9 @@ class UnslothQwenBackend(VLMBackend):
              original_width, original_height = image.size
              
              # Resize large images to reduce GPU memory usage
-             # Preserve aspect ratio while capping max dimension at 2048px
-             max_dim = 2048
+             # Preserve aspect ratio while capping max dimension at 4096px
+             # (increased from 2048 for 8B model which has 8GB headroom on Tesla T4)
+             max_dim = 4096
              width, height = image.size
              resize_scale = 1.0  # Track whether we resized
              if max(width, height) > max_dim:
@@ -970,11 +991,12 @@ class UnslothQwenBackend(VLMBackend):
              ).to(self.device)
              
              # Generate response (deterministic decoding for reproducibility)
-             # Reduce max_new_tokens to 768 to prevent hallucination loops
+             # Increased max_new_tokens to 1536 for 8B model which is less prone to loops
+             # (hallucination detection will catch any patterns that do emerge)
              with torch.no_grad():
                  output_ids = self.model.generate(
                      **inputs,
-                     max_new_tokens=768,
+                     max_new_tokens=1536,
                      use_cache=True,
                      do_sample=False,
                  )
@@ -996,6 +1018,16 @@ class UnslothQwenBackend(VLMBackend):
              # Parse room detections from response (pass actual image dimensions for correct bbox scaling)
              img_width, img_height = image.size
              rooms = self._parse_room_response(response_text, img_width, img_height)
+             
+             # F6: Detect and truncate hallucinations before rescaling
+             rooms_before = len(rooms)
+             rooms = self.detect_hallucinations(rooms)
+             rooms_after = len(rooms)
+             if rooms_before != rooms_after:
+                 logger.info(
+                     f"Hallucination detection truncated {rooms_before - rooms_after} rooms "
+                     f"({rooms_after} remaining)"
+                 )
              
              # Rescale bboxes back to original image dimensions if image was resized
              # VLM saw the resized image and generated fractions based on resized dimensions.

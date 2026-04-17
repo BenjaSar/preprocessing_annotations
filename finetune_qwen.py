@@ -121,35 +121,65 @@ class QwenFinetuneDataPreparator:
         Convert annotation to SFT example format.
         
         Qwen2.5-VL expects instruction-following examples with images.
+        
+        F8: Include bbox data in SFT output to provide spatial grounding signals
+        for improved room localization during fine-tuning.
         """
         rooms = annotation.get('rooms', [])
         if not rooms:
             return None
         
-        # Build room output format
+        # Build room output format with bbox data (F8)
         room_list = []
         for room in rooms:
             room_entry = {
-                "room_name": room.get("name", ""),
-                "room_type": room.get("type", "other"),
+                "room_name": room.get("name", room.get("room_name", "")),
+                "room_type": room.get("type", room.get("category", "other")),
             }
             if room.get("room_number"):
                 room_entry["room_number"] = room["room_number"]
+            
+            # F8: Add bbox data for spatial grounding
+            bbox = room.get("bbox", [])
+            if bbox and len(bbox) == 4:
+                # Convert [x, y, w, h] to [x1, y1, x2, y2] if needed
+                if bbox[2] > 0 and bbox[3] > 0 and (bbox[2] < bbox[0] or bbox[3] < bbox[1]):
+                    # Likely already in [x1, y1, x2, y2] format
+                    room_entry["bbox"] = {
+                        "x1": float(bbox[0]),
+                        "y1": float(bbox[1]),
+                        "x2": float(bbox[2]),
+                        "y2": float(bbox[3])
+                    }
+                else:
+                    # Convert from [x, y, w, h]
+                    room_entry["bbox"] = {
+                        "x1": float(bbox[0]),
+                        "y1": float(bbox[1]),
+                        "x2": float(bbox[0] + bbox[2]),
+                        "y2": float(bbox[1] + bbox[3])
+                    }
+            
             room_list.append(room_entry)
         
-        # Create SFT example
+        # Get image dimensions for bbox normalization reference
+        image_size = annotation.get("image_size", {})
+        
+        # Create SFT example with bbox data
         example = {
             "id": f"{image_file}",
-            "instruction": "Analyze this floor plan image and identify all rooms. For each room, provide its name, number (if present), and type. Return results as JSON.",
+            "instruction": "Analyze this floor plan image and identify all rooms. For each room, provide its name, number (if present), type, and bounding box coordinates. Return results as JSON.",
             "input": image_file,  # Will be image path at training time
             "output": json.dumps({
                 "rooms": room_list,
-                "total_rooms": len(room_list)
+                "total_rooms": len(room_list),
+                "image_dimensions": image_size  # For bbox context
             }),
             "metadata": {
                 "source": "preprocessing_annotations",
                 "image_file": image_file,
-                "num_rooms": len(room_list)
+                "num_rooms": len(room_list),
+                "has_bboxes": all("bbox" in r for r in room_list)  # Track data completeness
             }
         }
         
