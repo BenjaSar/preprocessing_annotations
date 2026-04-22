@@ -34,6 +34,8 @@ ABBREVIATION_MAP: dict[str, str] = {
     # ── Unit types (apartment floor plans) ───────────────────────────────────
     "0BR":   "STUDIO",
     "0 BR":  "STUDIO",
+    # OBR: common PaddleOCR misread of 0BR (digit-zero read as letter-O)
+    "OBR":   "STUDIO",
     "1BR":   "1 BEDROOM",
     "1 BR":  "1 BEDROOM",
     "2BR":   "2 BEDROOM",

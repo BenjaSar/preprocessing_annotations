@@ -277,7 +277,19 @@ class PaddleOCRBackend(OCRBackend):
                         quadrilateral=[(float(p[0]), float(p[1])) for p in quad]
                     )
                     detections.append(detection_obj)
-            
+
+            # Diagnostic: log every raw detection so we can see what PaddleOCR
+            # actually reads before any filtering occurs.  This is intentionally
+            # at WARNING level so it survives PaddlePaddle's logger-level reset.
+            logger.warning(
+                f"PaddleOCR raw detections: {len(detections)} text regions found"
+            )
+            for det in detections:
+                logger.warning(
+                    f"  RAW OCR | text={det.text!r:30s} conf={det.confidence:.3f} "
+                    f"bbox=({det.bbox[0]:.0f},{det.bbox[1]:.0f},{det.bbox[2]:.0f},{det.bbox[3]:.0f})"
+                )
+
             return detections
         finally:
             # Clean up temporary file if created

@@ -37,6 +37,35 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 MANDATORY_CLASSES: Dict[str, List[str]] = {
+    # ── Residential Units ────────────────────────────────────────────────────
+    # Covers apartment/condo unit layouts on residential and mixed-use plans.
+    # Architectural unit-type codes (TYPE-A1, TYPE-B3, etc.) are common in
+    # multi-family building plans; they all map here regardless of bedroom count.
+    "RESIDENTIAL UNIT": [
+        "RESIDENTIAL UNIT", "RESIDENTIAL", "APARTMENT", "DWELLING",
+        "UNIT", "APARTMENT UNIT",
+        # Bedroom-count unit codes (n-bedroom apartment)
+        "STUDIO", "STUDIO APARTMENT",
+        "0BR", "0 BR",
+        "1BR", "1 BR", "1 BEDROOM",
+        "2BR", "2 BR", "2 BEDROOM",
+        "3BR", "3 BR", "3 BEDROOM",
+        "4BR", "4 BR", "4 BEDROOM",
+        # OBR is a common OCR misread of 0BR (digit-zero ↔ letter-O)
+        "OBR",
+        # Architectural unit-type code prefixes (TYPE-A1 OBR, TYPE-B3 1BR …)
+        "TYPE-A", "TYPE-B", "TYPE-C", "TYPE-D",
+        # Short residential abbreviations — listed here so _SURFACE_TO_MANDATORY
+        # resolves them before normalize_to_mandatory's short-token guard (len≤4)
+        # fires and falls back to STORAGE ROOM.
+        "BR", "BD", "BDRM", "MBR", "MSTR",
+        "LR", "LV",
+        "DR", "DIN",
+        "BEDROOM", "MASTER BEDROOM",
+        "LIVING ROOM", "DINING ROOM",
+        "FAMILY ROOM",
+    ],
+
     # ── Office ──────────────────────────────────────────────────────────────
     "PRIVATE OFFICE": [
         "PRIVATE OFFICE", "PRIVATE", "INDIVIDUAL OFFICE",
@@ -262,6 +291,12 @@ for _extended, _variants in EXTENDED_TYPES.items():
 # ---------------------------------------------------------------------------
 
 VLM_CATEGORY_MAP: Dict[str, str] = {
+    # Residential units
+    "residential_unit": "RESIDENTIAL UNIT",
+    "apartment": "RESIDENTIAL UNIT",
+    "dwelling": "RESIDENTIAL UNIT",
+    "studio": "RESIDENTIAL UNIT",
+    "unit": "RESIDENTIAL UNIT",
     # Offices
     "office": "PRIVATE OFFICE",
     "open_plan_workspace": "OPEN OFFICE",
@@ -344,6 +379,7 @@ VLM_CATEGORY_MAP: Dict[str, str] = {
 # ---------------------------------------------------------------------------
 
 VLM_PROMPT_CATEGORIES: List[str] = [
+    "RESIDENTIAL UNIT",
     "PRIVATE OFFICE",
     "OPEN OFFICE",
     "CONFERENCE",
@@ -370,6 +406,7 @@ VLM_PROMPT_CATEGORIES: List[str] = [
 # Window-eligible classes (all others get a base type without window suffix)
 # Classes that can have windows: offices, classrooms, conference, meeting, etc.
 WINDOW_ELIGIBLE: Set[str] = {
+    "RESIDENTIAL UNIT",  # apartment units typically have windows
     "PRIVATE OFFICE",
     "OPEN OFFICE",
     "CONFERENCE",
@@ -473,11 +510,11 @@ def normalize_to_mandatory(raw: str) -> str:
                     "riser": "ELECTRICAL ROOM",
                     "elevator": "CORRIDOR",
                     "bicycle_storage": "STORAGE ROOM",
-                    "bedroom": "STORAGE ROOM",
-                    "living_room": "MULTIPURPOSE ROOM",
-                    "laundry": "STORAGE ROOM",
+                    "bedroom": "RESIDENTIAL UNIT",
+                    "living_room": "RESIDENTIAL UNIT",
+                    "laundry": "RESIDENTIAL UNIT",
                     "garage": "PARKING GARAGE",
-                    "studio": "STORAGE ROOM",
+                    "studio": "RESIDENTIAL UNIT",
                     "carpentry": "MULTIPURPOSE ROOM",
                     "community_facility": "MULTIPURPOSE ROOM",
                     "cctv": "ELECTRICAL ROOM",

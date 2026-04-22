@@ -42,6 +42,14 @@ def detect_hallucinations(rooms: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     
     is_pixel_space = max_coord_value > 2.0  # Thresholds assume 0-1 or 0-100; pixel coords are in thousands
     
+    # Log input coordinate space for diagnostic purposes
+    if len(rooms) > 0:
+        first_bbox = rooms[0].get("bbox", [])
+        logger.debug(
+            f"Hallucination detection: {len(rooms)} rooms, max_coord={max_coord_value:.1f}, "
+            f"is_pixel_space={is_pixel_space}, first_bbox={first_bbox[:4] if first_bbox else None}"
+        )
+    
     # Normalize all bboxes to fraction space (0.0-1.0) for consistent threshold application
     if is_pixel_space:
         # For pixel coords, we need image dimensions. Use max values as proxy.
@@ -189,7 +197,18 @@ def detect_hallucinations(rooms: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 continue
     
     # Pattern 4: Check for uniform bbox sizes (all bboxes nearly identical width/height)
-    # Real floorplans have rooms of varied sizes; uniform size grid suggests hallucination
+    # Real floorplans have rooms of varied sizes; uniform size grid suggests hallucination.
+    #
+    # Exception — residential unit grids: a multi-family building legitimately has
+    # dozens of identical-size apartment units arranged in a grid.  To distinguish
+    # genuine uniform-unit layouts from VLM autoregressive loops, we check NAME
+    # DIVERSITY: if the room names are mostly distinct, the repetition is real.
+    # If the VLM is looping it typically reuses generic names like "Office 1",
+    # "Office 2" … or emits identical names for every room.
+    #
+    # Rule: truncate ONLY when BOTH conditions hold:
+    #   (a) bbox size CV < 5%   (uniform dimensions)
+    #   (b) name uniqueness < 40%  (fewer than 40% of names are distinct)
     if len(normalized_rooms) >= 7:
         try:
             bboxes = []
@@ -215,7 +234,6 @@ def detect_hallucinations(rooms: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                         pass
                 
                 if len(widths) >= 7 and len(heights) >= 7:
-                    # Calculate coefficient of variation for widths and heights
                     import statistics
                     width_mean = statistics.mean(widths)
                     height_mean = statistics.mean(heights)
@@ -224,19 +242,40 @@ def detect_hallucinations(rooms: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                         width_std = statistics.stdev(widths) if len(widths) > 1 else 0
                         height_std = statistics.stdev(heights) if len(heights) > 1 else 0
                         
-                        width_cv = width_std / width_mean  # Coefficient of variation
+                        width_cv = width_std / width_mean
                         height_cv = height_std / height_mean
                         
-                        # If coefficient of variation is very low (<5%), all boxes are nearly same size
-                        # This is suspicious for room detection
+                        # Check name diversity before deciding to truncate.
+                        # Collect names from the original (non-normalized) rooms so we
+                        # work with the actual labels the VLM produced.
+                        names = [
+                            str(r.get("room_name") or r.get("name") or "").strip()
+                            for r in rooms[:len(bboxes)]
+                        ]
+                        unique_names = len(set(n.upper() for n in names if n))
+                        total_names = len([n for n in names if n])
+                        name_uniqueness = unique_names / total_names if total_names > 0 else 0.0
+
+                        # Uniform size AND low name diversity → hallucination
                         if width_cv < 0.05 and height_cv < 0.05:
-                            logger.warning(
-                                f"Detected uniform bbox size hallucination: "
-                                f"all {len(bboxes)} rooms have nearly identical dimensions "
-                                f"(width_cv={width_cv:.3f}, height_cv={height_cv:.3f}). "
-                                f"Truncating entire list"
-                            )
-                            return rooms[:0]  # Return empty list
+                            if name_uniqueness < 0.40:
+                                logger.warning(
+                                    f"Detected uniform bbox size hallucination: "
+                                    f"all {len(bboxes)} rooms have nearly identical dimensions "
+                                    f"(width_cv={width_cv:.3f}, height_cv={height_cv:.3f}) "
+                                    f"and low name diversity ({unique_names}/{total_names}={name_uniqueness:.2f}). "
+                                    f"Truncating entire list"
+                                )
+                                return rooms[:0]
+                            else:
+                                # Uniform size but diverse names → likely a real residential
+                                # unit grid (TYPE-A1, TYPE-B3 …).  Keep all rooms.
+                                logger.info(
+                                    f"Uniform bbox sizes (width_cv={width_cv:.3f}, "
+                                    f"height_cv={height_cv:.3f}) but high name diversity "
+                                    f"({unique_names}/{total_names}={name_uniqueness:.2f}) — "
+                                    f"treating as real residential unit grid, not hallucination"
+                                )
         except (ValueError, TypeError, statistics.StatisticsError, ImportError):
             pass
     

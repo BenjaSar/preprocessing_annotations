@@ -221,6 +221,14 @@ class SemanticRoomValidator:
         "WAITING ROOM",     # §4 Case 3: compound form
         "REFUSE",           # §4 Case 4: "REFUSE ROOM" → compactor
         "TRASH",            # §5 table:  "TRASH ROOM"  → compactor
+        # Residential unit keywords — covers multi-family / mixed-use floor plans.
+        # "TYPE" matches architectural unit-type codes like "TYPE-A1 OBR".
+        # The word-boundary regex (\bTYPE\b) ensures it doesn't match e.g. "PROTOTYPE".
+        "RESIDENTIAL", "APARTMENT", "UNIT", "DWELLING",
+        "TYPE",         # architectural unit-type prefix: TYPE-A1, TYPE-B3, etc.
+        "STUDIO",
+        "OBR",          # 0BR misread by OCR (O/0 confusion); maps to RESIDENTIAL UNIT
+        "1BR", "2BR", "3BR", "4BR",
     }
 
     # Class-level compiled word-boundary pattern built from VALID_ROOM_KEYWORDS.
@@ -695,37 +703,21 @@ def _resolve_bbox_overlaps(rooms: List[Dict]) -> List[Dict]:
                     merged = True
                     break
             else:
-                # Clip smaller bbox to remove overlap
-                area_i = _bbox_area(bbox_i)
-                area_j = _bbox_area(bbox_j)
-
-                if area_i < area_j:
-                    # Clip room_i
-                    x1, y1, w1, h1 = bbox_i
-                    x2, y2, w2, h2 = bbox_j
-                    # Shrink bbox_i to non-intersecting region
-                    x1_new = min(x1, x2 + w2 + 10)
-                    y1_new = min(y1, y2 + h2 + 10)
-                    w1_new = max(1, w1 - (w2 + 10) // 2)
-                    h1_new = max(1, h1 - (h2 + 10) // 2)
-                    room_i["bbox"] = [x1_new, y1_new, w1_new, h1_new]
-                    logger.warning(
-                        f"Fix2: clipped bbox (IoU={iou:.2f}): '{name_i}' "
-                        f"[{bbox_i}] → [{room_i['bbox']}] to avoid '{name_j}'"
-                    )
-                else:
-                    # Clip room_j
-                    x1, y1, w1, h1 = bbox_i
-                    x2, y2, w2, h2 = bbox_j
-                    x2_new = min(x2, x1 + w1 + 10)
-                    y2_new = min(y2, y1 + h1 + 10)
-                    w2_new = max(1, w2 - (w1 + 10) // 2)
-                    h2_new = max(1, h2 - (h1 + 10) // 2)
-                    room_j["bbox"] = [x2_new, y2_new, w2_new, h2_new]
-                    logger.warning(
-                        f"Fix2: clipped bbox (IoU={iou:.2f}): '{name_j}' "
-                        f"[{bbox_j}] → [{room_j['bbox']}] to avoid '{name_i}'"
-                    )
+                # IoU <= 0.5: partial overlap between distinct adjacent rooms.
+                # Previous behaviour clipped the smaller bbox iteratively, which
+                # cascaded — each clip made the bbox smaller, triggering more
+                # overlaps with neighbours, ultimately collapsing many valid
+                # room bboxes to 1×1 px and then eliminating them in the
+                # min-area filter.
+                #
+                # Fix: keep BOTH rooms unchanged.  Partial overlap is expected
+                # in dense floorplans where VLM bboxes are not pixel-perfect.
+                # Flag for human review but do not mutate any geometry.
+                logger.debug(
+                    f"Fix2: partial overlap (IoU={iou:.2f}) between "
+                    f"'{name_i}' and '{name_j}' — keeping both unchanged "
+                    f"(review recommended)"
+                )
 
         if not merged:
             processed.append(room_i)
@@ -956,12 +948,21 @@ def prepare_sft_annotation(annotation: Dict) -> Dict:
         logger.info(f"Remediation Fix #2: overlap resolution merged/removed {n_resolved} room(s)")
 
     # Step 1: Semantic filtering
+    pre_semantic = len(rooms)
     rooms = validator.filter_rooms(rooms)
+    n_semantic = pre_semantic - len(rooms)
+    if n_semantic > 0:
+        logger.info(f"Step 1: semantic filter removed {n_semantic} room(s) ({len(rooms)} remaining)")
     logger.debug(f"After semantic filter: {len(rooms)} rooms")
 
     # Step 2: Confidence filtering (preserves VLM rooms with no confidence field)
+    pre_confidence = len(rooms)
     rooms = filter_by_confidence(rooms, min_confidence=0.85)
-    logger.debug(f"After confidence filter: {len(rooms)} rooms")
+    n_confidence = pre_confidence - len(rooms)
+    if n_confidence > 0:
+        logger.info(f"Step 2: confidence filter removed {n_confidence} room(s) ({len(rooms)} remaining)")
+    else:
+        logger.debug(f"After confidence filter: {len(rooms)} rooms")
 
     # Step 2b: Filter out-of-bounds rooms
     # (pipeline-revalidation-analysis §3 Fix B)

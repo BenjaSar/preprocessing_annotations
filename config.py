@@ -131,9 +131,15 @@ class OCRConfig:
             r"^CARPENTRY(\s+SHOP)?$",
             r"^COMMUNITY\s+FACILITY$",
             r"^KITCHEN$",
+            # --- Residential unit-type codes (multi-family / mixed-use plans) ---
+            # Matches architectural unit-type codes like "TYPE-A1 OBR",
+            # "TYPE-B3 1BR", "TYPE-C6.1", "TYPE-A15.2" as a complete token
+            # or compound label.  The [O0] group handles the common PaddleOCR
+            # confusion between digit-zero and letter-O in "0BR" / "OBR".
+            r"^TYPE-[A-Z]\d+(\.\d+)?(\s+[O0-4]BR)?$",
             # --- Residential abbreviations (full-token only) ---
             r"^(BR|BD|BDRM|MBR|MSTR)\s*\d?$",    # bedroom
-            r"^(0BR|1BR|2BR|3BR)$",                # unit type
+            r"^([O0]BR|1BR|2BR|3BR|4BR)$",         # unit type (O/0 tolerant)
             r"^(LR|LV)$",                           # living room
             r"^(DR|DIN)$",                          # dining room
             r"^(KIT|K)$",                           # kitchen
@@ -212,8 +218,10 @@ class VLMConfig:
     # For Qwen: qwen/Qwen2.5-VL-7B (or other Qwen2.5-VL variants)
     model: str = field(default_factory=_get_vlm_model)
 
-    # Maximum tokens for response (reads from VLM_MAX_TOKENS env var)
-    max_tokens: int = field(default_factory=lambda: int(os.getenv("VLM_MAX_TOKENS", "4096")))
+    # Maximum tokens for response (reads from VLM_MAX_TOKENS env var).
+    # 8192 is the new default: dense floor plans with 20+ rooms routinely
+    # truncated at 4096 tokens, causing JSON parse failures and room loss.
+    max_tokens: int = field(default_factory=lambda: int(os.getenv("VLM_MAX_TOKENS", "8192")))
 
     # Number of retries for API calls (Claude only)
     max_retries: int = 3

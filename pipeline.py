@@ -24,6 +24,7 @@ try:
     from .semantic_reconciler import SemanticReconciler
     from .vlm_backend import VLMFactory
     from .sam_segmenter import RoomSegmenter
+    from .bbox_visualizer import BboxVisualizer
     from .exporters import LabelStudioExporter, ReviewPrioritizer, COCOExporter, CoverageReporter
     from .automation import (
         LabelNormalizer, QualityChecker, RegionExtractor,
@@ -46,6 +47,7 @@ except ImportError:
     from semantic_reconciler import SemanticReconciler
     from vlm_backend import VLMFactory
     from sam_segmenter import RoomSegmenter
+    from bbox_visualizer import BboxVisualizer
     from exporters import LabelStudioExporter, ReviewPrioritizer, COCOExporter, CoverageReporter
     from automation import (
         LabelNormalizer, QualityChecker, RegionExtractor,
@@ -60,6 +62,12 @@ except ImportError:
     from window_detector import WindowDetector, apply_window_suffixes
 
 logger = logging.getLogger(__name__)
+
+
+# Step 6: Skip-reason tagging helper
+def log_skip_reason(image_name: str, reason: str, stage: str = "unknown") -> None:
+    """Log why an image/room was skipped with structured tagging."""
+    logger.warning(f"SKIP[{stage}] {image_name}: {reason}")
 
 
 class PipelineError(Exception):
@@ -131,6 +139,7 @@ class AnnotationPipeline:
         self._quality_checker = None
         self._region_extractor = None
         self._window_detector = None
+        self._bbox_visualizer = None
         
         # Initialize SFT annotation builder (used for mandatory schema output)
         self.sft_builder = SFTAnnotationBuilder()
@@ -215,6 +224,14 @@ class AnnotationPipeline:
         if self._window_detector is None:
             self._window_detector = WindowDetector(config=self.config)
         return self._window_detector
+
+    @property
+    def bbox_visualizer(self) -> BboxVisualizer:
+        if self._bbox_visualizer is None:
+            # Only create if debug overlays are enabled
+            debug_dir = Path(self.config.output_dir) / "debug_overlays" if hasattr(self.config, 'output_dir') else None
+            self._bbox_visualizer = BboxVisualizer(output_dir=str(debug_dir) if debug_dir else None)
+        return self._bbox_visualizer
 
     def run(
         self,
@@ -445,6 +462,7 @@ class AnnotationPipeline:
         ocr_results: Dict[str, List[RoomCandidate]] = {}
         abbrev_recovery = AbbreviationOCRRecovery()  # uses pattern matching only
 
+        _ocr_first_image = True  # track first image to restore logger after Paddle import
         for img_path in self._iter_images(images_dir):
             try:
                 # 2a: Two-Pass OCR room detection (PaddleOCR + VLM fallback).
@@ -454,6 +472,16 @@ class AnnotationPipeline:
                 # - Merge: Returns best candidates from both passes
                 # raw_detections are reused for abbreviation recovery.
                 rooms, raw_detections = self.ocr_extractor.extract_and_find_rooms_with_vlm_fallback(img_path)
+
+                # Restore logging immediately after the first PaddleOCR call.
+                # PaddlePaddle resets the root logger to WARNING during its first import,
+                # silencing all INFO/DEBUG messages for the remaining pages in this loop.
+                # Calling verify_logging_handlers() here (not after the loop) ensures
+                # pages 001+ are logged correctly.
+                if _ocr_first_image:
+                    verify_logging_handlers()
+                    _ocr_first_image = False
+
                 recovered_abbrevs: List[RoomCandidate] = []
                 for det in raw_detections:
                     text = det.text.strip().upper()
@@ -565,6 +593,20 @@ class AnnotationPipeline:
                         f"{len(result.panels)} panels (VLM)"
                     )
                     
+                    # Step 2: Log stage-transition counter (before hallucination detection)
+                    logger.debug(f"    Stage-transition [raw-vlm → before-halluc-detect]: {len(result.rooms)} rooms")
+                    
+                    # Debug: Draw bbox overlays for visual inspection
+                    try:
+                        self.bbox_visualizer.draw_bboxes(
+                            str(img_path),
+                            result.rooms,
+                            image_name=img_path.stem,
+                            stage="raw_vlm"
+                        )
+                    except Exception as viz_err:
+                        logger.debug(f"Bbox visualization failed: {viz_err}")
+                    
                     # GPU memory cleanup between images
                     try:
                         import gc
@@ -577,6 +619,8 @@ class AnnotationPipeline:
                     
                 except Exception as e:
                     logger.error(f"  {img_path.name}: VLM annotation failed - {e}")
+                    # Step 6: Skip-reason tagging
+                    log_skip_reason(img_path.name, f"VLM error: {str(e)[:80]}", stage="vlm_annotation")
 
                     # Fallback: always write OCR annotation (even if empty) so
                     # the image is not silently lost from downstream steps.
