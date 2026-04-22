@@ -682,11 +682,11 @@ def _resolve_bbox_overlaps(rooms: List[Dict]) -> List[Dict]:
             name_j = room_j.get("room_name") or room_j.get("name", "?")
 
             if iou > 0.5:
-                # Merge: keep higher confidence or larger bbox
+                # Merge: keep higher-confidence room; tie-break on room_i (first seen).
+                # Area is not used here — we are not doing spatial measurement at this
+                # stage.  The only signal available is the VLM/OCR confidence score.
                 conf_i = room_i.get("confidence", 0.5)
                 conf_j = room_j.get("confidence", 0.5)
-                area_i = _bbox_area(bbox_i)
-                area_j = _bbox_area(bbox_j)
 
                 if conf_i >= conf_j:
                     logger.warning(
@@ -725,25 +725,7 @@ def _resolve_bbox_overlaps(rooms: List[Dict]) -> List[Dict]:
     return processed
 
 
-def _bbox_area(bbox: List) -> float:
-    """
-    Compute the area of a bounding box.
 
-    (vlm-sft-fitness-evaluation BUG-3)
-
-    Used to distinguish real room annotations (area ≥ 30,000 px²) from
-    OCR text-label detections (area ~1,500–2,500 px²).
-
-    Args:
-        bbox: [x, y, width, height]
-
-    Returns:
-        Area in px², or 0 if bbox is malformed.
-    """
-    if len(bbox) < 4:
-        return 0.0
-    w, h = bbox[2], bbox[3]
-    return float(w) * float(h) if w > 0 and h > 0 else 0.0
 
 
 def _merge_vlm_and_ocr(vlm_rooms: List[Dict], ocr_rooms: List[Dict]) -> List[Dict]:
@@ -897,46 +879,77 @@ def prepare_sft_annotation(annotation: Dict) -> Dict:
             room["name"] = clean_name
             logger.info(f"Fix2b: cleaned room_name '{rn}' → name='{clean_name}'")
 
-    # Step 0c-iv: Fix 1 — Geometric filter for OCR text-label bboxes.
-    # The VLM detects OCR text strings (e.g., "RECEPTION" at 320×61px) and
-    # emits them as room detections.  Real rooms never have aspect_ratio >4:1
-    # with min_dimension <100px.  Also reject bboxes smaller than 2.5% of
-    # the image dimension in either axis — no real room occupies less than
-    # 2.5% of a floor plan dimension.
+    # Step 0c-iv: Geometric filter — single location for ALL bbox-shape rejection.
+    #
+    # This is the ONLY place in the pipeline that inspects bbox geometry.
+    # Three conditions are evaluated together so that every spatial rejection
+    # has a single, auditable cause:
+    #
+    #   (a) Extreme aspect ratio + small minimum dimension
+    #       Catches text-label bboxes the VLM emits from OCR fragments
+    #       (e.g., "RECEPTION" detected as 320×61 px).
+    #       Real rooms do not have aspect_ratio > 4:1 with min_dim < 100 px.
+    #
+    #   (b) Bbox smaller than 2.5% of the image dimension in either axis
+    #       No real room on a floor plan occupies less than 2.5% of the
+    #       plan's width or height.
+    #
+    #   (c) Absolute pixel area below MIN_ROOM_AREA_PX
+    #       Catches any remaining text-label or degenerate bbox that passed
+    #       (a) and (b).  Previously this check lived in Step 2c alongside
+    #       semantic and confidence filters — wrong stage, wrong concern.
+    #       Consolidating here means area is never evaluated downstream.
+    #
+    # NOTE: do NOT move area checks downstream.  Once rooms reach semantic /
+    # confidence / taxonomy steps, geometry is no longer the concern.
+    MIN_ROOM_AREA_PX = 10_000  # ~0.5"×0.5" at 200 DPI; excludes all text labels
+
     img_w_pre = annotation.get("image_size", {}).get("width", 0)
     img_h_pre = annotation.get("image_size", {}).get("height", 0)
     pre_geom = len(rooms)
     geom_filtered = []
     for room in rooms:
         bbox = room.get("bbox", [])
+        rn = room.get("room_name") or room.get("name", "?")
         if len(bbox) == 4:
             bx, by, bw, bh = bbox
+            area = bw * bh
+
             min_dim = min(bw, bh)
             max_dim = max(bw, bh)
             aspect = max_dim / min_dim if min_dim > 0 else 999
-            # Reject: aspect ratio >4:1 AND min dimension <100px
+
+            # (a) Text-label bbox: extreme aspect + small minimum dimension
             if aspect > 4.0 and min_dim < 100:
-                rn = room.get("room_name") or room.get("name", "?")
                 logger.warning(
                     f"Fix1: dropped text-label bbox '{rn}' "
                     f"(aspect={aspect:.1f}, min_dim={min_dim:.0f}px)"
                 )
                 continue
-            # Reject: bbox smaller than 2.5% of image dimension in either axis
+
+            # (b) Bbox narrower/shorter than 2.5% of image dimension
             if img_w_pre > 0 and img_h_pre > 0:
                 if bw < img_w_pre * 0.025 or bh < img_h_pre * 0.025:
-                    rn = room.get("room_name") or room.get("name", "?")
                     logger.warning(
                         f"Fix1: dropped sub-2.5%% bbox '{rn}' "
                         f"(w={bw:.0f}<{img_w_pre*0.025:.0f}, "
                         f"h={bh:.0f}<{img_h_pre*0.025:.0f})"
                     )
                     continue
+
+            # (c) Absolute area below minimum room size
+            if area < MIN_ROOM_AREA_PX:
+                logger.warning(
+                    f"Fix1: dropped sub-minimum-area bbox '{rn}' "
+                    f"(area={area:.0f} < {MIN_ROOM_AREA_PX} px²)"
+                )
+                continue
+
         geom_filtered.append(room)
     rooms = geom_filtered
     n_geom = pre_geom - len(rooms)
     if n_geom > 0:
-        logger.info(f"Fix1: geometric filter removed {n_geom} text-label bbox(es)")
+        logger.info(f"Fix1: geometric filter removed {n_geom} bbox(es)")
 
     # Remediation Fix #2: Resolve bbox overlaps in non-circulation room types.
     # This must happen AFTER geometric filter but BEFORE semantic filtering
@@ -988,56 +1001,10 @@ def prepare_sft_annotation(annotation: Dict) -> Dict:
             )
     logger.debug(f"After OOB filter: {len(rooms)} rooms")
 
-    # Step 2c: Minimum bounding-box area guard
-    # (vlm-sft-fitness-evaluation BUG-3)
-    #
-    # OCR detects text labels like "2BR" and creates room annotations
-    # from the text bounding box (50×30 px, area ~1,500–2,500 px²).
-    # These are 50× smaller than the smallest legitimate room annotation
-    # (~30,000 px²) and teach the VLM that bedrooms are postage-stamp-
-    # sized text labels.  A threshold of 10,000 px² (~0.5"×0.5" at
-    # 200 DPI) excludes all text-label detections while preserving the
-    # smallest real rooms (closets, risers).
-    MIN_ROOM_AREA_PX = 10_000
-    pre_area = len(rooms)
-
-    # Fix 4: Explicit abbreviation-aware rejection.
-    # If room_name matches a known abbreviation pattern AND the bbox
-    # fails geometric thresholds, reject it explicitly (not coincidentally
-    # via area).  Abbreviations with room-sized bboxes are expanded.
-    _ABBREV_PATTERN = re.compile(
-        r'^(\d*)(BR|LR|LV|BA|MBR|STU|0BR|1BR|2BR|3BR|4BR|BDRM)(\d*)$',
-        re.IGNORECASE,
-    )
-    abbrev_filtered = []
-    for room in rooms:
-        rn = (room.get("room_name") or room.get("name", "")).strip().upper()
-        bbox = room.get("bbox", [])
-        area = _bbox_area(bbox) if len(bbox) == 4 else 0
-        if _ABBREV_PATTERN.match(rn):
-            if area < MIN_ROOM_AREA_PX:
-                logger.warning(
-                    f"Fix4: rejected abbreviation '{rn}' "
-                    f"(area={area:.0f} < {MIN_ROOM_AREA_PX})"
-                )
-                continue
-            else:
-                # Abbreviation with room-sized bbox — expand and keep
-                logger.debug(f"Fix4: kept abbreviation '{rn}' (area={area:.0f}, room-sized)")
-        abbrev_filtered.append(room)
-    rooms = abbrev_filtered
-
-    rooms = [
-        r for r in rooms
-        if _bbox_area(r.get("bbox", [])) >= MIN_ROOM_AREA_PX
-    ]
-    n_tiny = pre_area - len(rooms)
-    if n_tiny > 0:
-        logger.warning(
-            f"Dropped {n_tiny} text-label annotation(s) "
-            f"(area < {MIN_ROOM_AREA_PX} px²)"
-        )
-    logger.debug(f"After min-area filter: {len(rooms)} rooms")
+    # Step 2c: removed.
+    # Area-based bbox rejection was consolidated into Step 0c-iv (geometric
+    # filter) where all spatial/shape concerns are handled in one place.
+    # No area checks belong in the semantic/confidence/taxonomy stage.
 
     # Step 3: Normalize ALL room types through canonical taxonomy
     # (pipeline-revalidation-analysis §3 Fix A)
