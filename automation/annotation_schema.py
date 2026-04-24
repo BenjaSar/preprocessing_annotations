@@ -4,14 +4,14 @@ SFT-Ready Annotation Schema — Mandatory Output Format.
 Implements the standardized JSON schema for floorplan annotations required
 for Vision-Language Model fine-tuning (SFT).
 
-Schema structure:
+    Schema structure:
     {
         "image_file": "...",
         "image_size": {"width": int, "height": int},
         "roomsRecognized": [
             {
                 "id": int,
-                "type": "<MANDATORY_CLASS>",
+                "type": "<MANDATORY_CLASS or MANDATORY_CLASS w/ suffix>",
                 "name": "<original_label>",
                 "nameUnique": "<type - zone - seq>",
                 "coordinates": {"bbox": [x1, y1, x2, y2], "polygon": [...]},
@@ -22,15 +22,29 @@ Schema structure:
                     "text_tokens_total": int,
                     "source": "ocr|vlm|ocr+vlm|synthetic"
                 },
+                "attributes": {
+                    "has_windows": bool,
+                    "window_count": int,
+                    "has_skylights": bool,
+                    "has_openings": bool,
+                    "window_instances": [
+                        {"bbox": [...], "confidence": float, "detection_tier": str}
+                    ]
+                },
                 "extended_type": "...",  # for backward compatibility
                 "provenance": {...}  # detection/classification/ocr sources
             }
         ]
     }
+
+    Design: room type (semantic) and window presence (visual attribute) are
+    orthogonal axes.  "type" holds the base mandatory class or its suffixed
+    form; "attributes" holds structured detection data.  The two are produced
+    independently and composed at export time via add_window_suffix().
 """
 
 from typing import Dict, List, Optional, Any
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 import logging
 from collections import defaultdict
 
@@ -78,10 +92,34 @@ class RoomProvenance:
 
 
 @dataclass
+class WindowInstance:
+    """A single window detection spatially associated with a room."""
+    bbox: List[float]           # [x1, y1, x2, y2] in image pixels
+    confidence: float = 0.0
+    detection_tier: str = "none"  # "pdf_layers" | "object_detector" | "vlm_prompt"
+
+
+@dataclass
+class RoomAttributes:
+    """
+    Visual attributes detected on a room — independent of room type.
+
+    Populated by the window detector after spatial association with room
+    regions.  Default is "no attributes detected", which is the correct
+    representation when detection has not run or found nothing.
+    """
+    has_windows: bool = False
+    window_count: int = 0
+    has_skylights: bool = False
+    has_openings: bool = False
+    window_instances: List[WindowInstance] = field(default_factory=list)
+
+
+@dataclass
 class SFTRoom:
     """Mandatory SFT-ready room annotation."""
     id: int  # Sequential room ID (1-indexed)
-    type: str  # Mandatory class (e.g., "CONFERENCE", "CORRIDOR")
+    type: str  # Mandatory class or suffixed form (e.g., "CONFERENCE w/ windows")
     name: str  # Original label (immutable)
     name_unique: str  # Disambiguated name (e.g., "CORRIDOR - Art - 01")
     coordinates: RoomCoordinates
@@ -89,6 +127,7 @@ class SFTRoom:
     coverage: RoomCoverage
     confidence_detail: ConfidenceDetail
     provenance: RoomProvenance
+    attributes: RoomAttributes = field(default_factory=RoomAttributes)
     extended_type: Optional[str] = None  # For backward compatibility (e.g., "conference_room")
     name_expanded: Optional[str] = None  # Abbreviation expansion (e.g., "BR" → "BEDROOM")
 
@@ -225,6 +264,7 @@ class SFTAnnotationBuilder:
         detection_method: str = "unknown",
         detection_model: Optional[str] = None,
         ocr_backend: Optional[str] = None,
+        window_mapping: Optional[Any] = None,  # RoomWindowMapping from window_detector
     ) -> SFTRoom:
         """
         Build a single SFT-ready room annotation.
@@ -248,6 +288,9 @@ class SFTAnnotationBuilder:
             detection_method: "ocr", "vlm", "synthetic".
             detection_model: Model name ("PaddleOCR", "Claude", "Qwen", etc.).
             ocr_backend: OCR engine name.
+            window_mapping: Optional RoomWindowMapping from window_detector.
+                            If provided, populates attributes and composes the
+                            final type string via add_window_suffix().
 
         Returns:
             SFTRoom dataclass instance.
@@ -288,9 +331,44 @@ class SFTAnnotationBuilder:
             ocr_backend=ocr_backend,
         )
 
+        # Build attributes from window mapping (orthogonal to room type)
+        attributes = RoomAttributes()
+        if window_mapping is not None:
+            win_instances = [
+                WindowInstance(
+                    bbox=list(w.bbox),
+                    confidence=w.confidence,
+                    detection_tier=w.source_tier.value
+                    if hasattr(w.source_tier, "value")
+                    else str(w.source_tier),
+                )
+                for w in (window_mapping.intersecting_windows or [])
+            ]
+            attributes = RoomAttributes(
+                has_windows=window_mapping.has_windows,
+                window_count=window_mapping.window_count,
+                has_skylights=window_mapping.has_skylights,
+                has_openings=window_mapping.has_openings,
+                window_instances=win_instances,
+            )
+
+        # Compose final type string: base type + window suffix (if any)
+        # Import here to avoid circular import (taxonomy ← annotation_schema)
+        try:
+            from .taxonomy import add_window_suffix
+        except ImportError:
+            from taxonomy import add_window_suffix
+
+        final_type = add_window_suffix(
+            mandatory_type,
+            has_windows=attributes.has_windows,
+            has_skylights=attributes.has_skylights,
+            has_openings=attributes.has_openings,
+        )
+
         return SFTRoom(
             id=room_id,
-            type=mandatory_type,
+            type=final_type,
             name=original_name,
             name_unique=name_unique,
             coordinates=coordinates,
@@ -298,6 +376,7 @@ class SFTAnnotationBuilder:
             coverage=coverage,
             confidence_detail=conf_detail,
             provenance=provenance,
+            attributes=attributes,
             extended_type=extended_type,
             name_expanded=name_expanded,
         )
@@ -318,6 +397,22 @@ class SFTAnnotationBuilder:
                 "text_tokens_matched": room.coverage.text_tokens_matched,
                 "text_tokens_total": room.coverage.text_tokens_total,
                 "source": room.coverage.source,
+            },
+            # Structured visual attributes — always present, defaults to all-False
+            # when window detection has not run or found nothing.
+            "attributes": {
+                "has_windows": room.attributes.has_windows,
+                "window_count": room.attributes.window_count,
+                "has_skylights": room.attributes.has_skylights,
+                "has_openings": room.attributes.has_openings,
+                "window_instances": [
+                    {
+                        "bbox": wi.bbox,
+                        "confidence": wi.confidence,
+                        "detection_tier": wi.detection_tier,
+                    }
+                    for wi in room.attributes.window_instances
+                ],
             },
         }
 
@@ -340,7 +435,7 @@ class SFTAnnotationBuilder:
             "ocr_backend": room.provenance.ocr_backend,
         }
 
-        # Add confidence detail (optional, for debugging)
+        # Add confidence detail (for debugging)
         result["confidence_detail"] = {
             "detection": room.confidence_detail.detection,
             "classification": room.confidence_detail.classification,

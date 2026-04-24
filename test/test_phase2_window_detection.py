@@ -152,13 +152,19 @@ def test_window_suffix_application():
 
     from automation.taxonomy import add_window_suffix
 
-    # Test cases
+    # Test cases.
+    # Window presence is a visual attribute orthogonal to room type — any
+    # mandatory type can receive a suffix.  CORRIDOR w/ windows is valid:
+    # it means the detector found windows in that corridor.  The eligibility
+    # sets (WINDOW_ELIGIBLE etc.) have been removed; the detector decides.
     test_cases = [
-        ("CONFERENCE", True, False, False, "CONFERENCE w/ windows"),
-        ("PRIVATE OFFICE", True, False, False, "PRIVATE OFFICE w/ windows"),
-        ("GYMNASIUM", False, True, False, "GYMNASIUM w/ skylights"),
-        ("PARKING GARAGE", False, False, True, "PARKING GARAGE w/ side openings"),
-        ("CORRIDOR", True, False, False, "CORRIDOR"),  # Not window-eligible
+        ("CONFERENCE",     True,  False, False, "CONFERENCE w/ windows"),
+        ("PRIVATE OFFICE", True,  False, False, "PRIVATE OFFICE w/ windows"),
+        ("GYMNASIUM",      False, True,  False, "GYMNASIUM w/ skylights"),
+        ("PARKING GARAGE", False, False, True,  "PARKING GARAGE w/ side openings"),
+        ("CORRIDOR",       True,  False, False, "CORRIDOR w/ windows"),   # any type is eligible
+        ("STORAGE ROOM",   True,  False, False, "STORAGE ROOM w/ windows"),
+        ("RESTROOM",       False, False, False, "RESTROOM"),              # no flags → no suffix
     ]
 
     for base_type, has_win, has_sky, has_open, expected in test_cases:

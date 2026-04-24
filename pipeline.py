@@ -582,8 +582,8 @@ class AnnotationPipeline:
                     stats["images_annotated"] += 1
                     stats["rooms_detected"] += len(result.rooms)
 
-                    # Save annotation
-                    self._save_annotation(result, ann_path, ocr_results.get(img_path.name, []))
+                    # Save annotation (img_path needed for window detector)
+                    self._save_annotation(result, ann_path, ocr_results.get(img_path.name, []), img_path)
 
                     if img_path.name in image_status:
                         image_status[img_path.name]["annotated"] = True
@@ -1061,16 +1061,27 @@ class AnnotationPipeline:
             return result
 
     def _save_annotation(
-        self, result, output_path: Path, ocr_rooms: List[RoomCandidate]
+        self,
+        result,
+        output_path: Path,
+        ocr_rooms: List[RoomCandidate],
+        img_path: Optional[Path] = None,
     ) -> None:
         """
         Save VLM annotation result, merging with OCR data.
-        
-        Outputs both legacy format ("rooms", "ocr_rooms") and SFT format ("roomsRecognized")
-        for backward compatibility during gradual migration.
-        
+
+        Outputs both legacy format ("rooms", "ocr_rooms") and SFT format
+        ("roomsRecognized") for backward compatibility during gradual migration.
+
         CRITICAL: room_name field is IMMUTABLE — original OCR/VLM label preserved.
         name_expanded field tracks abbreviation expansions separately.
+
+        Args:
+            result:      VLM annotation result.
+            output_path: Destination JSON path.
+            ocr_rooms:   OCR-detected room candidates for this image.
+            img_path:    Source image path — used to load image_array for the
+                         window detector (Tier 2/3 require pixel data).
         """
         # Build legacy format (for backward compatibility)
         data = {
@@ -1142,26 +1153,81 @@ class AnnotationPipeline:
         # Setting to False here ensures a safe default if post-processing is skipped
         data["sft_ready"] = False
 
-        # Phase 2: Apply window detection and suffix augmentation
+        # Phase 2: Window detection — runs in parallel with room classification.
+        # Results are fused into the roomsRecognized attributes block and used
+        # to compose the final type string (base type + optional suffix).
         try:
-            # Import add_window_suffix with fallback for different module import contexts
-            try:
-                from .automation.taxonomy import add_window_suffix
-            except ImportError:
-                from automation.taxonomy import add_window_suffix
-            
-            # Convert rooms to format expected by window detector
+            # Load image array for Tier 2/3 detection (best-effort)
+            image_array = None
+            if img_path is not None:
+                try:
+                    from PIL import Image as _PIL_Image
+                    import numpy as _np
+                    image_array = _np.array(_PIL_Image.open(img_path).convert("RGB"))
+                except Exception as _e:
+                    logger.debug(f"Could not load image for window detector: {_e}")
+
+            # Rooms in the format window_detector.map_windows_to_rooms() expects
             rooms_for_detection = [
                 {
                     "id": idx,
                     "type": r.get("type", "UNKNOWN"),
-                    "bbox": r.get("bbox", [0, 0, 100, 100]),
+                    # bbox is stored as [x, y, w, h] in legacy format;
+                    # window_detector uses [x1, y1, x2, y2]
+                    "bbox": (
+                        [r["bbox"][0], r["bbox"][1],
+                         r["bbox"][0] + r["bbox"][2], r["bbox"][1] + r["bbox"][3]]
+                        if len(r.get("bbox", [])) == 4 else r.get("bbox", [])
+                    ),
                 }
                 for idx, r in enumerate(data["rooms"])
             ]
 
+            window_mappings = self.window_detector.detect_windows(
+                image_array=image_array,
+                rooms=rooms_for_detection,
+                pdf_path=None,       # PDF path not tracked at this stage; Tier 1 is skipped
+                vlm_backend=None,    # VLM backend reserved for future Tier 3 activation
+            )
+
+            # Build a mapping_by_id for O(1) lookup
+            mapping_by_id = {m.room_id: m for m in window_mappings}
+
+            # Re-build roomsRecognized entries with window attributes wired in.
+            # We rebuild rather than mutate so the type field and attributes block
+            # are always consistent (both derived from the same mapping).
+            new_sft_rooms = []
+            for idx, vlm_room in enumerate(result.rooms, start=1):
+                mandatory_type = normalize_to_mandatory(vlm_room.category)
+                extended_type  = get_extended_type(vlm_room.category)
+                bbox = vlm_room.bbox
+                if len(bbox) == 4:
+                    x, y, w, h = bbox
+                    bbox_x1y1x2y2 = [x, y, x + w, y + h]
+                else:
+                    bbox_x1y1x2y2 = bbox
+
+                sft_room = self.sft_builder.build_room(
+                    room_id=idx,
+                    mandatory_type=mandatory_type,
+                    original_name=vlm_room.room_name,
+                    room_number=vlm_room.room_number,
+                    bbox=bbox_x1y1x2y2,
+                    detection_score=0.9,
+                    classification_match_type="vlm",
+                    ocr_confidence=1.0,
+                    source="vlm_only",
+                    extended_type=extended_type,
+                    detection_method="vlm",
+                    detection_model=self.config.vlm.backend,
+                    window_mapping=mapping_by_id.get(idx - 1),  # 0-indexed in mapping
+                )
+                new_sft_rooms.append(self.sft_builder.to_dict(sft_room))
+
+            data["roomsRecognized"] = new_sft_rooms
+
         except Exception as e:
-            logger.warning(f"Window detection failed, continuing without suffixes: {e}")
+            logger.warning(f"Window detection failed, continuing without attributes: {e}")
 
         with open(output_path, "w") as f:
             json.dump(data, f, indent=2)
@@ -1244,59 +1310,75 @@ class AnnotationPipeline:
         # Setting to False here ensures a safe default if post-processing is skipped
         data["sft_ready"] = False
 
-        # Phase 2: Apply window detection and suffix augmentation
+        # Phase 2: Window detection — parallel branch to room classification.
+        # img_path is already available in this method's scope.
         try:
-            # Import add_window_suffix with fallback for different module import contexts
+            # Load image array for Tier 2/3 detection (best-effort)
+            image_array = None
             try:
-                from .automation.taxonomy import add_window_suffix
-            except ImportError:
-                from automation.taxonomy import add_window_suffix
-            
-            # Convert rooms to format expected by window detector
+                from PIL import Image as _PIL_Image
+                import numpy as _np
+                image_array = _np.array(_PIL_Image.open(img_path).convert("RGB"))
+            except Exception as _e:
+                logger.debug(f"Could not load image for window detector: {_e}")
+
             rooms_for_detection = [
                 {
                     "id": idx,
                     "type": r.get("category", "UNKNOWN"),
-                    "bbox": r.get("bbox", [0, 0, 100, 100]),
+                    "bbox": (
+                        [r["bbox"][0], r["bbox"][1],
+                         r["bbox"][0] + r["bbox"][2], r["bbox"][1] + r["bbox"][3]]
+                        if len(r.get("bbox", [])) == 4 else r.get("bbox", [])
+                    ),
                 }
                 for idx, r in enumerate(data["rooms"])
             ]
 
-            # Detect windows (Tier 1: PDF layers, Tier 2: CubiCasa5K, Tier 3: VLM)
             window_mappings = self.window_detector.detect_windows(
-                image_array=None,  # Would need to load image for CubiCasa5K
+                image_array=image_array,
                 rooms=rooms_for_detection,
-                pdf_path=None,  # Would be the source PDF path if available
-                vlm_backend=None,  # Could pass VLM backend for fallback detection
+                pdf_path=None,   # PDF path not tracked at OCR-only stage
+                vlm_backend=None,
             )
 
-            # Apply window suffixes to room types in legacy format
-            apply_window_suffixes(data["rooms"], window_mappings)
+            mapping_by_id = {m.room_id: m for m in window_mappings}
 
-            # Also apply suffixes to SFT format
-            for idx, sft_room in enumerate(data["roomsRecognized"]):
-                room_id = idx
-                mapping = next(
-                    (m for m in window_mappings if m.room_id == room_id), None
+            # Re-build roomsRecognized with window attributes and composed type string
+            new_sft_rooms = []
+            for idx, ocr_room in enumerate(rooms, start=1):
+                mandatory_type = normalize_to_mandatory(ocr_room.room_name)
+                extended_type  = get_extended_type(ocr_room.room_name)
+                bbox = ocr_room.bbox
+                if isinstance(bbox, (tuple, list)) and len(bbox) == 4:
+                    x, y, w, h = bbox
+                    bbox_x1y1x2y2 = [x, y, x + w, y + h]
+                else:
+                    bbox_x1y1x2y2 = list(bbox) if isinstance(bbox, tuple) else bbox
+
+                sft_room = self.sft_builder.build_room(
+                    room_id=idx,
+                    mandatory_type=mandatory_type,
+                    original_name=ocr_room.room_name,
+                    room_number=ocr_room.room_number,
+                    bbox=bbox_x1y1x2y2,
+                    detection_score=0.95,
+                    classification_match_type="exact" if mandatory_type else "fallback",
+                    ocr_confidence=ocr_room.confidence,
+                    source="ocr_only",
+                    extended_type=extended_type,
+                    name_expanded=ocr_room.name_expanded,
+                    detection_method="ocr",
+                    detection_model="PaddleOCR",
+                    ocr_backend="PaddleOCR",
+                    window_mapping=mapping_by_id.get(idx - 1),
                 )
-                if mapping:
-                    base_type = sft_room.get("type", "UNKNOWN")
-                    suffixed_type = add_window_suffix(
-                        base_type,
-                        has_windows=mapping.has_windows,
-                        has_skylights=mapping.has_skylights,
-                        has_openings=mapping.has_openings,
-                    )
-                    sft_room["type"] = suffixed_type
-                    sft_room["window_detection"] = {
-                        "has_windows": mapping.has_windows,
-                        "has_skylights": mapping.has_skylights,
-                        "has_openings": mapping.has_openings,
-                        "window_count": mapping.window_count,
-                    }
+                new_sft_rooms.append(self.sft_builder.to_dict(sft_room))
+
+            data["roomsRecognized"] = new_sft_rooms
 
         except Exception as e:
-            logger.warning(f"Window detection failed, continuing without suffixes: {e}")
+            logger.warning(f"Window detection failed, continuing without attributes: {e}")
 
         output_path = annotations_dir / f"{img_path.stem}.json"
         with open(output_path, "w") as f:

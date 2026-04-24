@@ -15,10 +15,16 @@ import logging
 logger = logging.getLogger(__name__)
 
 try:
-    from .taxonomy import MANDATORY_CLASSES, VALID_TYPES, normalize_to_mandatory, get_extended_type
+    from .taxonomy import (
+        MANDATORY_CLASSES, VALID_TYPES, normalize_to_mandatory,
+        get_extended_type, strip_window_suffix,
+    )
     from .abbreviations import ABBREVIATION_MAP as _ABBREVIATION_MAP
 except ImportError:
-    from taxonomy import MANDATORY_CLASSES, VALID_TYPES, normalize_to_mandatory, get_extended_type
+    from taxonomy import (
+        MANDATORY_CLASSES, VALID_TYPES, normalize_to_mandatory,
+        get_extended_type, strip_window_suffix,
+    )
     from abbreviations import ABBREVIATION_MAP as _ABBREVIATION_MAP
 
 
@@ -506,10 +512,16 @@ def validate_for_sft(room: Dict) -> Tuple[bool, Dict[str, bool]]:
     """
     name = room.get("room_name") or room.get("name", "")
 
-    # Normalize type using mandatory SFT taxonomy
+    # Validate against the base mandatory type.
+    # strip_window_suffix() removes any "w/ windows" / "w/ skylights" / "w/ side
+    # openings" suffix first — those are visual attributes, not taxonomy entries.
+    # normalize_to_mandatory() then resolves the base string to VALID_TYPES.
+    # This makes the two-step logic explicit rather than relying on substring
+    # matching inside normalize_to_mandatory() to accidentally strip the suffix.
     room_type = room.get("type") or room.get("category") or "STORAGE ROOM"
     if isinstance(room_type, str):
-        room_type = normalize_to_mandatory(room_type)
+        base_type = strip_window_suffix(room_type)
+        room_type = normalize_to_mandatory(base_type)
 
     checks = {
         "has_name": bool(name.strip()),

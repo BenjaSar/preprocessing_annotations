@@ -7,9 +7,12 @@ via extended_type for non-SFT use cases.
 
 ALL room type mappings throughout the pipeline import from here.
 
-Window/skylight/opening variants (e.g., "CONFERENCE w/ windows") are NOT
-determined by text matching — they are computed by spatial intersection of
-detected windows with room bboxes (see window_detector.py).
+Window/skylight/opening suffixes (e.g., "CONFERENCE w/ windows") are NOT
+determined by room type — they are visual attributes computed by spatial
+intersection of window detector output with room bboxes (window_detector.py).
+Any base type can receive a window suffix; eligibility is not restricted by
+room category.  Use add_window_suffix() to compose, strip_window_suffix() to
+decompose back to the base mandatory type.
 
 Usage
 -----
@@ -403,34 +406,18 @@ VLM_PROMPT_CATEGORIES: List[str] = [
     "WAREHOUSE",
 ]
 
-# Window-eligible classes (all others get a base type without window suffix)
-# Classes that can have windows: offices, classrooms, conference, meeting, etc.
-WINDOW_ELIGIBLE: Set[str] = {
-    "RESIDENTIAL UNIT",  # apartment units typically have windows
-    "PRIVATE OFFICE",
-    "OPEN OFFICE",
-    "CONFERENCE",
-    "MEETING",
-    "MULTIPURPOSE ROOM",
-    "CLASSROOM",
-    "LECTURE HALL",
-    "TRAINING ROOM",
-    "LOBBY",
-    "RESTAURANT",
-    "CAFETERIA",
-    # RETAIL can have windows
-    # GYMNASIUM, PARKING GARAGE are usually skylights, not windows
-}
+# ---------------------------------------------------------------------------
+# Window-suffix constants
+# ---------------------------------------------------------------------------
+# The three suffix strings that add_window_suffix() can append.
+# Defined here as constants so window_detector.py and downstream consumers
+# can reference them without string literals.
+WINDOW_SUFFIX = "w/ windows"
+SKYLIGHT_SUFFIX = "w/ skylights"
+OPENING_SUFFIX = "w/ side openings"
 
-SKYLIGHT_ELIGIBLE: Set[str] = {
-    "GYMNASIUM",
-    "WAREHOUSE",
-    "PARKING GARAGE",
-}
-
-OPENING_ELIGIBLE: Set[str] = {
-    "PARKING GARAGE",
-}
+# Ordered from most specific to least — used by strip_window_suffix().
+_ALL_SUFFIXES = (SKYLIGHT_SUFFIX, OPENING_SUFFIX, WINDOW_SUFFIX)
 
 
 # ---------------------------------------------------------------------------
@@ -573,33 +560,66 @@ def get_vlm_categories_string() -> str:
     return ", ".join(VLM_PROMPT_CATEGORIES)
 
 
-def add_window_suffix(
-    base_type: str, has_windows: bool = False, has_skylights: bool = False,
-    has_openings: bool = False
-) -> str:
+def strip_window_suffix(suffixed_type: str) -> str:
     """
-    Apply window/skylight/opening suffix to a mandatory type.
+    Remove a window/skylight/opening suffix and return the base mandatory type.
 
-    These suffixes are determined by spatial detection, not text matching.
+    Inverse of add_window_suffix().  Safe to call on types that have no suffix.
+
+    Examples:
+        "CONFERENCE w/ windows" → "CONFERENCE"
+        "GYMNASIUM w/ skylights" → "GYMNASIUM"
+        "CONFERENCE" → "CONFERENCE"
 
     Args:
-        base_type: Mandatory class name (must be in VALID_TYPES).
-        has_windows: True if detected windows intersect this room.
-        has_skylights: True if detected skylights intersect this room.
-        has_openings: True if detected side openings exist (PARKING GARAGE).
+        suffixed_type: Type string, optionally containing a window suffix.
 
     Returns:
-        Suffixed type string (e.g., "CONFERENCE w/ windows").
+        Base mandatory class name.
+    """
+    if not suffixed_type:
+        return suffixed_type
+    for suffix in _ALL_SUFFIXES:
+        candidate = f" {suffix}"
+        if suffixed_type.endswith(candidate):
+            return suffixed_type[: -len(candidate)]
+    return suffixed_type
+
+
+def add_window_suffix(
+    base_type: str,
+    has_windows: bool = False,
+    has_skylights: bool = False,
+    has_openings: bool = False,
+) -> str:
+    """
+    Compose a final SFT type string from a base type and window attributes.
+
+    Window presence is a visual attribute (orthogonal to room type) derived
+    from object-detection output — NOT from room category membership.
+    Any base type can receive any suffix; there are no eligibility restrictions.
+
+    Priority when multiple flags are True: skylights > openings > windows.
+
+    Args:
+        base_type:    Mandatory class name (must be in VALID_TYPES).
+        has_windows:  True if the window detector found windows in this room.
+        has_skylights: True if skylights were detected.
+        has_openings: True if side openings were detected (e.g., parking).
+
+    Returns:
+        Suffixed string (e.g., "CONFERENCE w/ windows"), or base_type unchanged
+        if no flags are True or base_type is not a known mandatory class.
     """
     if not base_type or base_type not in VALID_TYPES:
         return base_type
 
     # Priority: skylights > openings > windows > base
-    if has_skylights and base_type in SKYLIGHT_ELIGIBLE:
-        return f"{base_type} w/ skylights"
-    if has_openings and base_type in OPENING_ELIGIBLE:
-        return f"{base_type} w/ side openings"
-    if has_windows and base_type in WINDOW_ELIGIBLE:
-        return f"{base_type} w/ windows"
+    if has_skylights:
+        return f"{base_type} {SKYLIGHT_SUFFIX}"
+    if has_openings:
+        return f"{base_type} {OPENING_SUFFIX}"
+    if has_windows:
+        return f"{base_type} {WINDOW_SUFFIX}"
 
     return base_type
