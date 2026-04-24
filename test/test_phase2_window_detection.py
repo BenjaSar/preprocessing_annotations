@@ -152,19 +152,44 @@ def test_window_suffix_application():
 
     from automation.taxonomy import add_window_suffix
 
-    # Test cases.
-    # Window presence is a visual attribute orthogonal to room type — any
-    # mandatory type can receive a suffix.  CORRIDOR w/ windows is valid:
-    # it means the detector found windows in that corridor.  The eligibility
-    # sets (WINDOW_ELIGIBLE etc.) have been removed; the detector decides.
+    # Test cases validate two things:
+    #   (a) Eligible types receive the correct suffix when detection flags are True.
+    #   (b) Non-eligible types are returned UNCHANGED even when flags are True —
+    #       because "CORRIDOR w/ windows" is not a defined SFT class.
+    #
+    # Eligible base types (from mandatory taxonomy specification):
+    #   PRIVATE OFFICE, OPEN OFFICE, CONFERENCE, MEETING, MULTIPURPOSE ROOM,
+    #   CLASSROOM, LECTURE HALL, TRAINING ROOM, LOBBY  → "w/ windows"
+    #   GYMNASIUM, WAREHOUSE                           → "w/ skylights"
+    #   PARKING GARAGE                                 → "w/ side openings"
+    #
+    # Everything else is NOT eligible, regardless of what the detector found.
     test_cases = [
-        ("CONFERENCE",     True,  False, False, "CONFERENCE w/ windows"),
-        ("PRIVATE OFFICE", True,  False, False, "PRIVATE OFFICE w/ windows"),
-        ("GYMNASIUM",      False, True,  False, "GYMNASIUM w/ skylights"),
-        ("PARKING GARAGE", False, False, True,  "PARKING GARAGE w/ side openings"),
-        ("CORRIDOR",       True,  False, False, "CORRIDOR w/ windows"),   # any type is eligible
-        ("STORAGE ROOM",   True,  False, False, "STORAGE ROOM w/ windows"),
-        ("RESTROOM",       False, False, False, "RESTROOM"),              # no flags → no suffix
+        # ── Eligible: windows ───────────────────────────────────────────────
+        ("CONFERENCE",       True,  False, False, "CONFERENCE w/ windows"),
+        ("PRIVATE OFFICE",   True,  False, False, "PRIVATE OFFICE w/ windows"),
+        ("OPEN OFFICE",      True,  False, False, "OPEN OFFICE w/ windows"),
+        ("MEETING",          True,  False, False, "MEETING w/ windows"),
+        ("MULTIPURPOSE ROOM",True,  False, False, "MULTIPURPOSE ROOM w/ windows"),
+        ("CLASSROOM",        True,  False, False, "CLASSROOM w/ windows"),
+        ("LECTURE HALL",     True,  False, False, "LECTURE HALL w/ windows"),
+        ("TRAINING ROOM",    True,  False, False, "TRAINING ROOM w/ windows"),
+        ("LOBBY",            True,  False, False, "LOBBY w/ windows"),
+        # ── Eligible: skylights ─────────────────────────────────────────────
+        ("GYMNASIUM",        False, True,  False, "GYMNASIUM w/ skylights"),
+        ("WAREHOUSE",        False, True,  False, "WAREHOUSE w/ skylights"),
+        # ── Eligible: side openings ─────────────────────────────────────────
+        ("PARKING GARAGE",   False, False, True,  "PARKING GARAGE w/ side openings"),
+        # ── NOT eligible — detector flag True but no SFT class exists ────────
+        ("CORRIDOR",         True,  False, False, "CORRIDOR"),          # not in any eligible set
+        ("STORAGE ROOM",     True,  False, False, "STORAGE ROOM"),      # not eligible
+        ("RESIDENTIAL UNIT", True,  False, False, "RESIDENTIAL UNIT"),  # not eligible
+        ("RESTROOM",         True,  False, False, "RESTROOM"),          # not eligible
+        ("RESTAURANT",       True,  False, False, "RESTAURANT"),        # removed from old set
+        ("CAFETERIA",        True,  False, False, "CAFETERIA"),         # removed from old set
+        # ── No flags → base type always returned ────────────────────────────
+        ("CONFERENCE",       False, False, False, "CONFERENCE"),
+        ("GYMNASIUM",        False, False, False, "GYMNASIUM"),
     ]
 
     for base_type, has_win, has_sky, has_open, expected in test_cases:
