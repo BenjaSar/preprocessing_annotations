@@ -144,6 +144,45 @@ class AnnotationPipeline:
         # Initialize SFT annotation builder (used for mandatory schema output)
         self.sft_builder = SFTAnnotationBuilder()
 
+        # Set by process() at the start of each run; used by _source_pdf_for()
+        self._input_path: Optional[Path] = None
+
+    # ── PDF path reconstruction ───────────────────────────────────────────────
+
+    def _source_pdf_for(self, img_path: Optional[Path]) -> Optional[Path]:
+        """
+        Attempt to reconstruct the source PDF path from an extracted image path.
+
+        Images are named ``{pdf_stem}_page{N:03d}.png`` by the PDFExtractor.
+        This method strips the ``_pageNNN`` suffix and looks for a matching
+        ``.pdf`` file in the pipeline's input directory (self._input_path).
+
+        Used by window detection to enable Tier 1 (PDF layer extraction)
+        without threading the pdf_path through every save method signature.
+
+        Returns:
+            Path to the source PDF if it can be found, otherwise None.
+            A None return causes Tier 1 to be skipped gracefully.
+        """
+        if img_path is None or self._input_path is None:
+            return None
+        try:
+            import re
+            stem = img_path.stem  # e.g. "326 ROCKAWAY - AVI-ON LAYOUT_page001"
+            pdf_stem = re.sub(r"_page\d+$", "", stem)
+            if not pdf_stem or pdf_stem == stem:
+                return None  # Not a page-extracted image
+
+            # Look for the PDF in the input path (file or directory)
+            candidate = (
+                self._input_path
+                if self._input_path.suffix.lower() == ".pdf"
+                else self._input_path / f"{pdf_stem}.pdf"
+            )
+            return candidate if candidate.is_file() else None
+        except Exception:
+            return None
+
     @property
     def pdf_extractor(self) -> PDFExtractor:
         if self._pdf_extractor is None:
@@ -262,6 +301,10 @@ class AnnotationPipeline:
 
         input_path = Path(input_dir)
         output_dir = Path(output_dir)
+
+        # Store input_path on self so save methods can reconstruct PDF paths
+        # for Tier 1 window detection without changing every method signature.
+        self._input_path = input_path
 
         # Setup output directories
         images_dir = output_dir / "images"
@@ -1186,8 +1229,9 @@ class AnnotationPipeline:
             window_mappings = self.window_detector.detect_windows(
                 image_array=image_array,
                 rooms=rooms_for_detection,
-                pdf_path=None,       # PDF path not tracked at this stage; Tier 1 is skipped
-                vlm_backend=None,    # VLM backend reserved for future Tier 3 activation
+                pdf_path=self._source_pdf_for(img_path),  # Tier 1: PDF layers if available
+                vlm_backend=self.vlm_annotator,            # Tier 3: already loaded VLM
+                img_path=img_path,                         # Tier 3 prefers path over array
             )
 
             # Build a mapping_by_id for O(1) lookup
@@ -1338,8 +1382,9 @@ class AnnotationPipeline:
             window_mappings = self.window_detector.detect_windows(
                 image_array=image_array,
                 rooms=rooms_for_detection,
-                pdf_path=None,   # PDF path not tracked at OCR-only stage
-                vlm_backend=None,
+                pdf_path=self._source_pdf_for(img_path),  # Tier 1: PDF layers if available
+                vlm_backend=self.vlm_annotator,            # Tier 3: already loaded VLM
+                img_path=img_path,                         # Tier 3 prefers path over array
             )
 
             mapping_by_id = {m.room_id: m for m in window_mappings}

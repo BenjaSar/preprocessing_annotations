@@ -14,6 +14,8 @@ Integration: Called after room detection, before SFT annotation serialization.
 """
 
 import logging
+import tempfile
+import os
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -83,6 +85,7 @@ class WindowDetector:
         self.cubicasa_model = None
         self.tier_results: Dict[WindowDetectionTier, List[WindowDetection]] = {}
         self.has_shapely = HAS_SHAPELY
+        self._cubicasa_logged_once = False  # suppress repeated "not implemented" noise
 
         if not HAS_SHAPELY:
             logger.warning(
@@ -235,14 +238,14 @@ class WindowDetector:
         Returns:
             Loaded model or None if unavailable.
         """
-        # Placeholder: model loading would be implemented here
-        # Steps:
-        # 1. Check if model checkpoint exists (download if not)
-        # 2. Load model in eval mode
-        # 3. Move to GPU if available
-        # 4. Return model
-
-        logger.debug("CubiCasa5K model loading not yet implemented")
+        # CubiCasa5K integration is not yet implemented.
+        # Log only on the first call to avoid polluting logs on every image.
+        if not self._cubicasa_logged_once:
+            logger.info(
+                "Tier 2 (CubiCasa5K): model not yet integrated — skipping. "
+                "Window detection will fall back to Tier 3 (VLM prompt)."
+            )
+            self._cubicasa_logged_once = True
         return None
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -250,41 +253,115 @@ class WindowDetector:
     # ─────────────────────────────────────────────────────────────────────────
 
     def detect_windows_from_vlm_prompt(
-        self, image_array: np.ndarray, vlm_backend: Optional[Any] = None
+        self,
+        image_array: Optional[np.ndarray] = None,
+        vlm_backend: Optional[Any] = None,
+        img_path: Optional[Path] = None,
     ) -> List[WindowDetection]:
         """
-        Detect windows using VLM prompting (fallback tier).
+        Detect windows using the VLM backend's window-detection capability (Tier 3).
 
-        Sends image to VLM with prompt: "Identify all windows and their bounding boxes."
+        All concrete VLM backends (ClaudeBackend, Qwen2_5VLBackend, UnslothQwenBackend)
+        implement a ``detect_windows(image_path)`` method that sends the image with a
+        structured prompt and parses a JSON response containing per-window bboxes,
+        confidence scores, and type labels ("window" | "skylight" | "side_opening").
+
+        This method is a bridge from the WindowDetector interface to that existing
+        backend method, converting the returned List[Dict] into List[WindowDetection].
+
+        Preference order for the image source:
+            1. img_path (file path) — passed directly to the backend; no encoding
+            2. image_array (numpy array) — saved to a temp PNG and cleaned up after
 
         Args:
-            image_array: Floorplan image as numpy array.
-            vlm_backend: Optional VLM backend instance (Claude, Qwen, etc.).
+            image_array: Floorplan image as numpy array (fallback if img_path absent).
+            vlm_backend: VLM backend instance (ClaudeBackend / Qwen2_5VLBackend /
+                         UnslothQwenBackend).  Must not be None.
+            img_path:    Direct path to the source image.  Preferred over image_array.
 
         Returns:
-            List of WindowDetection objects parsed from VLM response.
+            List of WindowDetection objects.  Each WindowDetection carries
+            ``metadata={"type": "window"|"skylight"|"side_opening"}`` so that
+            map_windows_to_rooms() can set has_windows / has_skylights / has_openings
+            correctly.
         """
-        windows = []
-
         if vlm_backend is None:
-            logger.debug("VLM backend not provided; skipping Tier 3")
-            return windows
+            logger.debug("Tier 3 (VLM): backend not provided; skipping")
+            return []
 
+        # ── Resolve the image path the backend will use ───────────────────────
+        tmp_file: Optional[str] = None
+        effective_path: Optional[Path] = None
+
+        if img_path is not None and Path(img_path).is_file():
+            effective_path = Path(img_path)
+        elif image_array is not None:
+            # Write numpy array to a temp PNG so the backend can open it
+            try:
+                from PIL import Image as _PIL_Image
+                tmp_fd, tmp_file = tempfile.mkstemp(suffix=".png")
+                os.close(tmp_fd)
+                _PIL_Image.fromarray(image_array).save(tmp_file)
+                effective_path = Path(tmp_file)
+            except Exception as _e:
+                logger.warning(f"Tier 3 (VLM): could not write temp image: {_e}")
+                return []
+
+        if effective_path is None:
+            logger.debug("Tier 3 (VLM): no image source available; skipping")
+            return []
+
+        # ── Call the backend's detect_windows() method ────────────────────────
         try:
-            # Placeholder: VLM inference would happen here
-            # Steps:
-            # 1. Encode image as base64 (if API) or pass directly (if local)
-            # 2. Call VLM with window-detection prompt
-            # 3. Parse response JSON for window bboxes
-            # 4. Convert to WindowDetection objects with confidence scores
+            logger.info(
+                f"Tier 3 (VLM): running window detection on {effective_path.name} "
+                f"using {vlm_backend.__class__.__name__}"
+            )
+            raw: List[Dict[str, Any]] = vlm_backend.detect_windows(effective_path)
 
-            logger.debug("VLM window prompting not yet implemented")
+            if not raw:
+                logger.debug("Tier 3 (VLM): no windows returned by backend")
+                return []
 
+            # ── Convert List[Dict] → List[WindowDetection] ───────────────────
+            windows: List[WindowDetection] = []
+            for entry in raw:
+                bbox = entry.get("bbox", [])
+                if len(bbox) != 4:
+                    continue
+                x1, y1, x2, y2 = bbox
+                # Guard against degenerate bboxes
+                if x2 <= x1 or y2 <= y1:
+                    continue
+
+                window_type = entry.get("type", "window")  # "window"|"skylight"|"side_opening"
+                conf = float(entry.get("confidence", 0.7))
+
+                windows.append(
+                    WindowDetection(
+                        bbox=(float(x1), float(y1), float(x2), float(y2)),
+                        confidence=conf,
+                        source_tier=WindowDetectionTier.VLM_PROMPT,
+                        metadata={"type": window_type},
+                    )
+                )
+
+            logger.info(
+                f"Tier 3 (VLM): detected {len(windows)} window(s) in {effective_path.name}"
+            )
             return windows
 
         except Exception as e:
             logger.warning(f"Tier 3 (VLM prompt) detection failed: {e}")
             return []
+
+        finally:
+            # Clean up temp file if we created one
+            if tmp_file is not None:
+                try:
+                    os.unlink(tmp_file)
+                except OSError:
+                    pass
 
     # ─────────────────────────────────────────────────────────────────────────
     # Spatial Intersection: Map windows to rooms
@@ -357,8 +434,17 @@ class WindowDetector:
                 try:
                     if room_poly.intersects(window_poly):
                         intersecting.append(window)
-                        has_windows = True  # For now, all windows are treated as "windows"
-                        # Future: distinguish skylights, side openings by geometry/metadata
+                        # Use metadata["type"] to set the correct attribute flag.
+                        # The VLM backend distinguishes "window", "skylight", and
+                        # "side_opening" in its response; that distinction is preserved
+                        # through the WindowDetection.metadata field and applied here.
+                        window_type = (window.metadata or {}).get("type", "window")
+                        if window_type == "skylight":
+                            has_skylights = True
+                        elif window_type in ("side_opening", "opening"):
+                            has_openings = True
+                        else:
+                            has_windows = True
                 except Exception as e:
                     logger.debug(f"Intersection check failed: {e}")
 
@@ -384,21 +470,30 @@ class WindowDetector:
         rooms: Optional[List[Dict[str, Any]]] = None,
         pdf_path: Optional[Path] = None,
         vlm_backend: Optional[Any] = None,
+        img_path: Optional[Path] = None,
     ) -> List[RoomWindowMapping]:
         """
         Execute three-tier window detection pipeline.
 
-        Tries Tier 1 (PDF layers) first, then Tier 2 (CubiCasa5K) if needed,
-        then Tier 3 (VLM) as fallback.
+        Tier priority (highest accuracy first):
+          Tier 1: PDF layer extraction — zero-cost, perfect when PDF layers available.
+          Tier 2: CubiCasa5K model   — high accuracy on rasterized images (not yet active).
+          Tier 3: VLM prompting      — uses the already-loaded VLM backend; active.
+
+        Each tier runs only if the previous tier(s) found nothing.
 
         Args:
-            image_array: Floorplan image as numpy array (required for Tiers 2-3).
-            rooms: List of room dictionaries with geometry (required for mapping).
-            pdf_path: Path to source PDF (enables Tier 1).
-            vlm_backend: VLM backend instance (enables Tier 3).
+            image_array: Floorplan image as numpy array (used by Tier 2; Tier 3
+                         prefers img_path but falls back to this).
+            rooms:       List of room dicts with 'id' and 'bbox'/'polygon' fields.
+            pdf_path:    Path to the source PDF — enables Tier 1.
+            vlm_backend: VLM backend instance — enables Tier 3.
+            img_path:    Direct path to the source image — passed to Tier 3 so the
+                         backend can open it directly without re-encoding.
 
         Returns:
-            List of RoomWindowMapping with window presence flags per room.
+            List of RoomWindowMapping — one entry per room in rooms, with
+            has_windows / has_skylights / has_openings / window_count populated.
         """
         if rooms is None:
             logger.warning("No rooms provided; skipping window detection")
@@ -406,30 +501,37 @@ class WindowDetector:
 
         windows: List[WindowDetection] = []
 
-        # Tier 1: PDF layer extraction (if PDF available)
+        # ── Tier 1: PDF layer extraction ──────────────────────────────────────
         if pdf_path:
             tier1_windows = self.detect_windows_from_pdf_layers(pdf_path)
             windows.extend(tier1_windows)
             self.tier_results[WindowDetectionTier.PDF_LAYERS] = tier1_windows
+            if tier1_windows:
+                logger.info(f"Tier 1 (PDF layers): found {len(tier1_windows)} window(s)")
 
-        # Tier 2: CubiCasa5K (if image available and Tier 1 didn't find windows)
+        # ── Tier 2: CubiCasa5K ────────────────────────────────────────────────
         if image_array is not None and not windows:
             tier2_windows = self.detect_windows_from_cubicasa5k(image_array)
             windows.extend(tier2_windows)
             self.tier_results[WindowDetectionTier.CUBICASA5K] = tier2_windows
 
-        # Tier 3: VLM prompting (fallback)
-        if not windows and vlm_backend is not None and image_array is not None:
-            tier3_windows = self.detect_windows_from_vlm_prompt(
-                image_array, vlm_backend
-            )
-            windows.extend(tier3_windows)
-            self.tier_results[WindowDetectionTier.VLM_PROMPT] = tier3_windows
+        # ── Tier 3: VLM prompting ─────────────────────────────────────────────
+        # Activates when Tiers 1-2 found nothing and a VLM backend is available.
+        # Prefers img_path (no re-encoding) but falls back to image_array.
+        if not windows and vlm_backend is not None:
+            if img_path is not None or image_array is not None:
+                tier3_windows = self.detect_windows_from_vlm_prompt(
+                    image_array=image_array,
+                    vlm_backend=vlm_backend,
+                    img_path=img_path,
+                )
+                windows.extend(tier3_windows)
+                self.tier_results[WindowDetectionTier.VLM_PROMPT] = tier3_windows
 
         if not windows:
             logger.debug("No windows detected across all tiers")
 
-        # Map windows to rooms via spatial intersection
+        # ── Spatial association: map window detections to room regions ─────────
         mappings = self.map_windows_to_rooms(windows, rooms)
 
         return mappings
