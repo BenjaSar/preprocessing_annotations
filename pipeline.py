@@ -140,12 +140,19 @@ class AnnotationPipeline:
         self._region_extractor = None
         self._window_detector = None
         self._bbox_visualizer = None
-        
+
         # Initialize SFT annotation builder (used for mandatory schema output)
         self.sft_builder = SFTAnnotationBuilder()
 
         # Set by process() at the start of each run; used by _source_pdf_for()
         self._input_path: Optional[Path] = None
+
+        # Set by run() at the start of each run; used by the bbox_visualizer
+        # property to write debug overlays under <output_dir>/debug_overlays/.
+        # Previously the visualizer probed self.config for an output_dir
+        # attribute that PipelineConfig does not define, so debug overlays
+        # were silently never written.
+        self._output_dir: Optional[Path] = None
 
     # ── PDF path reconstruction ───────────────────────────────────────────────
 
@@ -267,9 +274,12 @@ class AnnotationPipeline:
     @property
     def bbox_visualizer(self) -> BboxVisualizer:
         if self._bbox_visualizer is None:
-            # Only create if debug overlays are enabled
-            debug_dir = Path(self.config.output_dir) / "debug_overlays" if hasattr(self.config, 'output_dir') else None
+            debug_dir = self._output_dir / "debug_overlays" if self._output_dir else None
             self._bbox_visualizer = BboxVisualizer(output_dir=str(debug_dir) if debug_dir else None)
+            if debug_dir:
+                logger.info(f"Debug bbox overlays enabled → {debug_dir}")
+            else:
+                logger.warning("Debug bbox overlays disabled (no output_dir set)")
         return self._bbox_visualizer
 
     def run(
@@ -305,6 +315,10 @@ class AnnotationPipeline:
         # Store input_path on self so save methods can reconstruct PDF paths
         # for Tier 1 window detection without changing every method signature.
         self._input_path = input_path
+
+        # Store output_dir on self so the lazy bbox_visualizer property can
+        # locate the debug_overlays subdirectory.
+        self._output_dir = output_dir
 
         # Setup output directories
         images_dir = output_dir / "images"
@@ -1191,7 +1205,37 @@ class AnnotationPipeline:
         
         # Add roomsRecognized to data
         data["roomsRecognized"] = sft_rooms
-        
+
+        # Bbox-format-sync invariant.
+        # The annotation carries the same bbox in two representations during
+        # the xywh→xyxy migration:
+        #   - data["rooms"][i]["bbox"]                              = [x, y, w, h]
+        #   - data["roomsRecognized"][i]["coordinates"]["bbox"]      = [x, y, x+w, y+h]
+        # Drift between the two is a silent SFT-data corruption source, so we
+        # assert the relationship on every save.  Once the legacy "rooms" key
+        # is removed (final step of the migration), drop this block.
+        _legacy_rooms = data.get("rooms", [])
+        _sft_rooms = data.get("roomsRecognized", [])
+        if len(_legacy_rooms) == len(_sft_rooms):
+            for _i, (_lr, _sr) in enumerate(zip(_legacy_rooms, _sft_rooms)):
+                _lb = _lr.get("bbox", [])
+                _sb = (_sr.get("coordinates") or {}).get("bbox", [])
+                if len(_lb) == 4 and len(_sb) == 4:
+                    _x, _y, _w, _h = _lb
+                    _expected = [_x, _y, _x + _w, _y + _h]
+                    if [float(v) for v in _sb] != [float(v) for v in _expected]:
+                        logger.error(
+                            f"Bbox-sync invariant violated at index {_i}: "
+                            f"rooms[].bbox={_lb} (xywh) → expected "
+                            f"roomsRecognized[].coordinates.bbox={_expected}, "
+                            f"got {_sb}"
+                        )
+        elif _legacy_rooms or _sft_rooms:
+            logger.error(
+                f"Bbox-sync invariant violated: rooms[] has {len(_legacy_rooms)} entries, "
+                f"roomsRecognized[] has {len(_sft_rooms)} entries"
+            )
+
         # Add preliminary sft_ready flag (will be recomputed in post-processing step)
         # Setting to False here ensures a safe default if post-processing is skipped
         data["sft_ready"] = False

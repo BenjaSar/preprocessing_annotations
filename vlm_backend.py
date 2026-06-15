@@ -243,9 +243,13 @@ Return ONLY a JSON array, e.g.: [{"room_id": "room_0", "room_type": "CONFERENCE"
                 rooms = [rooms]
             
             # Apply hallucination detection before processing
+            rooms_before_halluc = len(rooms)
             rooms = self._truncate_repetitive_patterns(rooms)
-            
-            # Cap rooms at 25 (as per prompt specification)
+            # Step 2: Log stage-transition counter (after hallucination detection)
+            if rooms_before_halluc != len(rooms):
+                 logger.debug(f"Stage-transition [after-halluc-detect]: {len(rooms)} rooms (dropped {rooms_before_halluc - len(rooms)})")
+             
+             # Cap rooms at 25 (as per prompt specification)
             if len(rooms) > 25:
                 logger.warning(
                     f"VLM generated {len(rooms)} rooms, exceeding prompt limit of 25. "
@@ -283,12 +287,36 @@ Return ONLY a JSON array, e.g.: [{"room_id": "room_0", "room_type": "CONFERENCE"
                     y2_pct = max(0, min(100, y2_pct))
                     
                     # Scale to actual pixel coordinates: x-coords use width, y-coords use height
-                    bbox = [
-                        int(x1_pct * img_width / 100),
-                        int(y1_pct * img_height / 100),
-                        int(x2_pct * img_width / 100),
-                        int(y2_pct * img_height / 100)
-                    ]
+                    x1_px = int(x1_pct * img_width / 100)
+                    y1_px = int(y1_pct * img_height / 100)
+                    x2_px = int(x2_pct * img_width / 100)
+                    y2_px = int(y2_pct * img_height / 100)
+                    bbox = [x1_px, y1_px, x2_px, y2_px]
+                    
+                    # Step 5: Log zero-dimension bbox validation
+                    width = x2_px - x1_px
+                    height = y2_px - y1_px
+                    if width <= 0 or height <= 0:
+                        logger.debug(
+                            f"Room {idx} ({room.get('room_name', '?')}): zero-dimension bbox "
+                            f"[{x1_px},{y1_px},{x2_px},{y2_px}] (w={width}, h={height}), skipping"
+                        )
+                        dropped_count += 1
+                        continue
+                    
+                    # Step 7: Coordinate-range assertion (pixel coords within image bounds)
+                    if not (0 <= x1_px < img_width and 0 <= x2_px <= img_width and x1_px <= x2_px):
+                        logger.debug(
+                            f"Room {idx}: x-coords [{x1_px},{x2_px}] out of range [0,{img_width}], skipping"
+                        )
+                        dropped_count += 1
+                        continue
+                    if not (0 <= y1_px < img_height and 0 <= y2_px <= img_height and y1_px <= y2_px):
+                        logger.debug(
+                            f"Room {idx}: y-coords [{y1_px},{y2_px}] out of range [0,{img_height}], skipping"
+                        )
+                        dropped_count += 1
+                        continue
                 
                 normalized.append({
                     "room_id": room.get("room_id", f"room_{idx}"),
@@ -688,12 +716,36 @@ Rules:
                     y2_pct = max(0, min(100, y2_pct))
                     
                     # Scale to actual pixel coordinates: x-coords use width, y-coords use height
-                    bbox = [
-                        int(x1_pct * img_width / 100),
-                        int(y1_pct * img_height / 100),
-                        int(x2_pct * img_width / 100),
-                        int(y2_pct * img_height / 100)
-                    ]
+                    x1_px = int(x1_pct * img_width / 100)
+                    y1_px = int(y1_pct * img_height / 100)
+                    x2_px = int(x2_pct * img_width / 100)
+                    y2_px = int(y2_pct * img_height / 100)
+                    bbox = [x1_px, y1_px, x2_px, y2_px]
+                    
+                    # Step 5: Log zero-dimension bbox validation
+                    width = x2_px - x1_px
+                    height = y2_px - y1_px
+                    if width <= 0 or height <= 0:
+                        logger.debug(
+                            f"Room {idx} ({room.get('room_name', '?')}): zero-dimension bbox "
+                            f"[{x1_px},{y1_px},{x2_px},{y2_px}] (w={width}, h={height}), skipping"
+                        )
+                        dropped_count += 1
+                        continue
+                    
+                    # Step 7: Coordinate-range assertion (pixel coords within image bounds)
+                    if not (0 <= x1_px < img_width and 0 <= x2_px <= img_width and x1_px <= x2_px):
+                        logger.debug(
+                            f"Room {idx}: x-coords [{x1_px},{x2_px}] out of range [0,{img_width}], skipping"
+                        )
+                        dropped_count += 1
+                        continue
+                    if not (0 <= y1_px < img_height and 0 <= y2_px <= img_height and y1_px <= y2_px):
+                        logger.debug(
+                            f"Room {idx}: y-coords [{y1_px},{y2_px}] out of range [0,{img_height}], skipping"
+                        )
+                        dropped_count += 1
+                        continue
                 
                 normalized.append({
                     "room_id": room.get("room_id", f"room_{idx}"),

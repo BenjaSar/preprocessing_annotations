@@ -47,6 +47,7 @@ class BboxVisualizer:
             True if visualization saved, False if skipped or error
         """
         if not self.output_dir:
+            logger.debug("BboxVisualizer.draw_bboxes: no output_dir configured, skipping")
             return False
 
         try:
@@ -62,12 +63,16 @@ class BboxVisualizer:
 
             color_map = {
                 "PRIVATE OFFICE": (255, 0, 0),      # Red
+                "OPEN OFFICE": (0, 190, 210),       # Cyan
                 "CONFERENCE": (0, 255, 0),          # Green
                 "CORRIDOR": (0, 0, 255),            # Blue
+                "LOBBY": (255, 127, 0),             # Orange
                 "RESTROOM": (255, 255, 0),          # Yellow
                 "STAIRWELL": (255, 0, 255),         # Magenta
                 "MECHANICAL": (0, 255, 255),        # Cyan
-                "ELECTRICAL": (128, 0, 0),          # Dark red
+                "ELECTRICAL ROOM": (128, 0, 0),     # Dark red
+                "STORAGE ROOM": (166, 86, 40),      # Brown
+                "RESIDENTIAL UNIT": (55, 126, 184), # Steel blue
                 "other": (128, 128, 128),           # Gray
             }
 
@@ -76,7 +81,16 @@ class BboxVisualizer:
                 if not bbox or len(bbox) < 4:
                     continue
 
-                room_type = room.get("room_type", "other")
+                # Room dicts produced by the VLM use "type" or "category"
+                # (and sometimes both); "room_type" is not a field anywhere
+                # in the pipeline schema, so the previous lookup always
+                # fell through to the "other" gray.
+                room_type = (
+                    room.get("type")
+                    or room.get("category")
+                    or room.get("room_type")
+                    or "other"
+                )
                 color = color_map.get(room_type, color_map["other"])
 
                 try:

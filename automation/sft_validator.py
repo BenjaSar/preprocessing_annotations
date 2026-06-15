@@ -1047,6 +1047,52 @@ def prepare_sft_annotation(annotation: Dict) -> Dict:
             continue
         sft_ready.append(room)
 
+    # Step 4b: Degenerate-bbox detector (Fix 9).
+    #
+    # The Qwen2.5-VL-7B backend has been observed to emit "stripe-partition"
+    # bboxes — a single row or column of identical-shape rectangles at one
+    # x or y coordinate — when it cannot localize individual rooms.  Labels
+    # in those cases are still plausible (read off page text), but the
+    # coordinates do not bound any actual room.
+    #
+    # The signal must NOT trigger on legitimate uniform grids (e.g., a floor
+    # of identical offices arranged in rows × columns), where rooms share
+    # dimensions but vary across BOTH axes.  Two distinguishing properties:
+    #
+    #   (a) Stripe pattern: ≥70% of rooms share a single exact x value OR
+    #       a single exact y value.  In a real grid this fraction is at
+    #       most ~1/n_columns or ~1/n_rows — well below 70%.
+    #   (b) Zero-area bboxes: bboxes with width=0 or height=0 (placeholder
+    #       boxes the VLM emits when it runs out of stripe space).
+    #
+    # Uniform width/height alone is NOT a degeneracy signal; identical-size
+    # offices share dimensions without sharing position.
+    degenerate_reasons: List[str] = []
+    n = len(sft_ready)
+    if n >= 3:
+        from collections import Counter
+        xs = [r["bbox"][0] for r in sft_ready if len(r.get("bbox", [])) == 4]
+        ys = [r["bbox"][1] for r in sft_ready if len(r.get("bbox", [])) == 4]
+        if xs:
+            x_value, x_count = Counter(xs).most_common(1)[0]
+            y_value, y_count = Counter(ys).most_common(1)[0]
+            if x_count / n >= 0.7:
+                degenerate_reasons.append(
+                    f"{x_count}/{n} rooms share x={x_value} (vertical-stripe partition)"
+                )
+            if y_count / n >= 0.7:
+                degenerate_reasons.append(
+                    f"{y_count}/{n} rooms share y={y_value} (horizontal-stripe partition)"
+                )
+    zero_dims = [
+        i for i, r in enumerate(sft_ready)
+        if len(r.get("bbox", [])) == 4 and (r["bbox"][2] == 0 or r["bbox"][3] == 0)
+    ]
+    if zero_dims:
+        degenerate_reasons.append(
+            f"{len(zero_dims)} room(s) have zero-width or zero-height bbox: indices {zero_dims}"
+        )
+
     # Step 5: Clean up contamination
     annotation.pop("ocr_rooms", None)  # Remove unfiltered OCR
     annotation.pop("panels", None)  # Remove equipment (not spatial rooms)
@@ -1058,6 +1104,7 @@ def prepare_sft_annotation(annotation: Dict) -> Dict:
     MIN_ROOMS_FOR_SFT = 3
     annotation["sft_ready"] = (
         len(sft_ready) >= MIN_ROOMS_FOR_SFT and  # Fix 8: minimum room count
+        not degenerate_reasons and  # Fix 9: VLM-localization sanity check
         "panels" not in annotation and  # No equipment
         "ocr_rooms" not in annotation  # No contamination
     )
@@ -1065,6 +1112,14 @@ def prepare_sft_annotation(annotation: Dict) -> Dict:
         logger.warning(
             f"Fix8: {len(sft_ready)} rooms detected but below minimum "
             f"({MIN_ROOMS_FOR_SFT}) — sft_ready=False"
+        )
+    if degenerate_reasons:
+        annotation["degenerate_bbox_reasons"] = degenerate_reasons
+        for reason in degenerate_reasons:
+            logger.warning(f"Fix9 degenerate-bbox: {reason}")
+        logger.warning(
+            f"Fix9: VLM produced degenerate bbox geometry — sft_ready=False "
+            f"({len(degenerate_reasons)} signal(s))"
         )
     logger.info(
         f"SFT preparation complete: {len(sft_ready)} rooms, sft_ready={annotation['sft_ready']}"
