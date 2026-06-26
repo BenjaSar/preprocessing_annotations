@@ -84,13 +84,33 @@ class ImageResizer:
 
     @staticmethod
     def resize_in_place(image_path: str | Path, max_kb: int = 3500) -> None:
-        """Resize image file in place (targets 3.5MB to stay <5MB after base64 encoding)."""
+        """Resize image to fit API size constraints, writing atomically via a temp file.
+
+        Uses a temp file + rename so the original is never partially overwritten,
+        and the source image is not destroyed if a PermissionError or OOM occurs.
+        """
+        import tempfile
+        import os
         image_path = Path(image_path)
         resized = ImageResizer.resize_for_vlm(image_path, max_kb)
 
-        # Save back as PNG with aggressive optimization
-        resized.save(image_path, "PNG", optimize=True)
-        logger.info(f"Resized {image_path.name} to fit API constraints")
+        # Write to a temp file in the same directory, then rename atomically.
+        # Same-directory placement ensures the rename is on the same filesystem
+        # (cross-device renames would fail with OSError on some platforms).
+        tmp_fd, tmp_path = tempfile.mkstemp(
+            suffix=".png", dir=image_path.parent, prefix=".resize_tmp_"
+        )
+        try:
+            os.close(tmp_fd)
+            resized.save(tmp_path, "PNG", optimize=True)
+            os.replace(tmp_path, image_path)
+            logger.info(f"Resized {image_path.name} to fit API constraints")
+        except Exception:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
 
 
 class SemanticRoomValidator:
@@ -801,9 +821,14 @@ def _merge_vlm_and_ocr(vlm_rooms: List[Dict], ocr_rooms: List[Dict]) -> List[Dic
     return merged
 
 
-def prepare_sft_annotation(annotation: Dict) -> Dict:
+def prepare_sft_annotation(annotation: Dict, min_rooms_for_sft: int = 1) -> Dict:
     """
     Convert annotation to SFT-ready format.
+
+    Args:
+        annotation: Raw annotation dictionary.
+        min_rooms_for_sft: Minimum rooms required for sft_ready=True (default 1).
+            Images with ≥3 rooms also receive sft_recommended=True.
 
     CRITICAL FIXES:
     - Merges VLM-detected rooms with OCR-detected compound names
@@ -820,6 +845,9 @@ def prepare_sft_annotation(annotation: Dict) -> Dict:
     # Initialize validator and normalizer
     validator = SemanticRoomValidator()
     normalizer = TaxonomyNormalizer()
+
+    # Per-step rejection counter — attached to annotation for run-level aggregation.
+    drop_attribution: Dict[str, int] = {}
 
     # CRITICAL FIX #2: Merge VLM and OCR results instead of OR logic
     vlm_rooms = annotation.get("rooms", [])
@@ -846,6 +874,7 @@ def prepare_sft_annotation(annotation: Dict) -> Dict:
     _synthetic = [r for r in rooms if r.get("source") == "synthetic_residential"]
     rooms = [r for r in rooms if r.get("source") != "synthetic_residential"]
     if _synthetic:
+        drop_attribution["synthetic"] = len(_synthetic)
         annotation.setdefault("synthetic_rooms", []).extend(_synthetic)
         logger.info(
             f"Excluded {len(_synthetic)} synthetic room(s) from SFT path "
@@ -960,6 +989,7 @@ def prepare_sft_annotation(annotation: Dict) -> Dict:
         geom_filtered.append(room)
     rooms = geom_filtered
     n_geom = pre_geom - len(rooms)
+    drop_attribution["geometric"] = n_geom
     if n_geom > 0:
         logger.info(f"Fix1: geometric filter removed {n_geom} bbox(es)")
 
@@ -969,6 +999,7 @@ def prepare_sft_annotation(annotation: Dict) -> Dict:
     pre_overlap = len(rooms)
     rooms = _resolve_bbox_overlaps(rooms)
     n_resolved = pre_overlap - len(rooms)
+    drop_attribution["overlap"] = n_resolved
     if n_resolved > 0:
         logger.info(f"Remediation Fix #2: overlap resolution merged/removed {n_resolved} room(s)")
 
@@ -976,6 +1007,7 @@ def prepare_sft_annotation(annotation: Dict) -> Dict:
     pre_semantic = len(rooms)
     rooms = validator.filter_rooms(rooms)
     n_semantic = pre_semantic - len(rooms)
+    drop_attribution["semantic"] = n_semantic
     if n_semantic > 0:
         logger.info(f"Step 1: semantic filter removed {n_semantic} room(s) ({len(rooms)} remaining)")
     logger.debug(f"After semantic filter: {len(rooms)} rooms")
@@ -984,6 +1016,7 @@ def prepare_sft_annotation(annotation: Dict) -> Dict:
     pre_confidence = len(rooms)
     rooms = filter_by_confidence(rooms, min_confidence=0.85)
     n_confidence = pre_confidence - len(rooms)
+    drop_attribution["confidence"] = n_confidence
     if n_confidence > 0:
         logger.info(f"Step 2: confidence filter removed {n_confidence} room(s) ({len(rooms)} remaining)")
     else:
@@ -1006,6 +1039,7 @@ def prepare_sft_annotation(annotation: Dict) -> Dict:
         pre_oob = len(rooms)
         rooms = [r for r in rooms if _bbox_in_bounds(r.get("bbox", []), img_w, img_h)]
         n_dropped = pre_oob - len(rooms)
+        drop_attribution["oob"] = n_dropped
         if n_dropped > 0:
             logger.warning(
                 f"Dropped {n_dropped} out-of-bounds room(s) "
@@ -1038,6 +1072,7 @@ def prepare_sft_annotation(annotation: Dict) -> Dict:
             logger.debug(f"Normalized '{room_name}' → {normalized}")
 
     # Step 4: SFT validation
+    pre_sft = len(rooms)
     sft_ready = []
     for room in rooms:
         is_valid, checks = validate_for_sft(room)
@@ -1046,44 +1081,13 @@ def prepare_sft_annotation(annotation: Dict) -> Dict:
             logger.debug(f"Room rejected: {room.get('name')} - {failed_checks}")
             continue
         sft_ready.append(room)
+    drop_attribution["sft_validation"] = pre_sft - len(sft_ready)
 
-    # Step 4b: Degenerate-bbox detector (Fix 9).
-    #
-    # The Qwen2.5-VL-7B backend has been observed to emit "stripe-partition"
-    # bboxes — a single row or column of identical-shape rectangles at one
-    # x or y coordinate — when it cannot localize individual rooms.  Labels
-    # in those cases are still plausible (read off page text), but the
-    # coordinates do not bound any actual room.
-    #
-    # The signal must NOT trigger on legitimate uniform grids (e.g., a floor
-    # of identical offices arranged in rows × columns), where rooms share
-    # dimensions but vary across BOTH axes.  Two distinguishing properties:
-    #
-    #   (a) Stripe pattern: ≥70% of rooms share a single exact x value OR
-    #       a single exact y value.  In a real grid this fraction is at
-    #       most ~1/n_columns or ~1/n_rows — well below 70%.
-    #   (b) Zero-area bboxes: bboxes with width=0 or height=0 (placeholder
-    #       boxes the VLM emits when it runs out of stripe space).
-    #
-    # Uniform width/height alone is NOT a degeneracy signal; identical-size
-    # offices share dimensions without sharing position.
+    # Step 4b: Zero-dimension bbox guard.
+    # Stripe detection is now handled upstream in hallucination_detector.detect_hallucinations()
+    # (Pattern 5, 60% threshold) so stripes rarely reach this stage.
+    # Only check for zero-dimension bboxes that somehow survived geometric filter.
     degenerate_reasons: List[str] = []
-    n = len(sft_ready)
-    if n >= 3:
-        from collections import Counter
-        xs = [r["bbox"][0] for r in sft_ready if len(r.get("bbox", [])) == 4]
-        ys = [r["bbox"][1] for r in sft_ready if len(r.get("bbox", [])) == 4]
-        if xs:
-            x_value, x_count = Counter(xs).most_common(1)[0]
-            y_value, y_count = Counter(ys).most_common(1)[0]
-            if x_count / n >= 0.7:
-                degenerate_reasons.append(
-                    f"{x_count}/{n} rooms share x={x_value} (vertical-stripe partition)"
-                )
-            if y_count / n >= 0.7:
-                degenerate_reasons.append(
-                    f"{y_count}/{n} rooms share y={y_value} (horizontal-stripe partition)"
-                )
     zero_dims = [
         i for i, r in enumerate(sft_ready)
         if len(r.get("bbox", [])) == 4 and (r["bbox"][2] == 0 or r["bbox"][3] == 0)
@@ -1093,34 +1097,74 @@ def prepare_sft_annotation(annotation: Dict) -> Dict:
             f"{len(zero_dims)} room(s) have zero-width or zero-height bbox: indices {zero_dims}"
         )
 
+    # Step 4c: Room-scale + content gate (F-D + FIX-1).
+    # Two independent signals:
+    #   (a) area >= ROOM_MIN_AREA — rejects label-sized boxes.
+    #   (b) content_density >= MIN_CONTENT_DENSITY — rejects boxes over blank space
+    #       (hallucinations on roof/site sheets and empty margins score ~0;
+    #       real rooms with walls/fixtures score 0.05-0.19).
+    # content_density is attached by SAM refine_annotations. When absent (SAM off),
+    # the density check is skipped and area alone applies (backward compatible).
+    ROOM_MIN_AREA = 40_000          # ~200x200px at 200 DPI; separates rooms from labels
+    MIN_CONTENT_DENSITY = 0.03      # below this the box is over blank space, not a room
+    for room in sft_ready:
+        bbox = room.get("bbox", [])
+        area = bbox[2] * bbox[3] if len(bbox) == 4 else 0
+        area_ok = area >= ROOM_MIN_AREA
+        density = room.get("content_density")
+        density_ok = density is None or density >= MIN_CONTENT_DENSITY
+        room["is_room_scale"] = area_ok and density_ok
+
+    pre_strip = len(sft_ready)
+    sft_ready = [r for r in sft_ready if r.get("is_room_scale")]
+    n_stripped = pre_strip - len(sft_ready)
+    if n_stripped:
+        drop_attribution["not_room_scale"] = n_stripped
+        logger.info(
+            f"F-D: stripped {n_stripped} non-room box(es) "
+            f"(area<{ROOM_MIN_AREA} or density<{MIN_CONTENT_DENSITY}); "
+            f"{len(sft_ready)} kept"
+        )
+
+    # FIX-B: distinguish "rooms detected but all mislocalized" from "no rooms".
+    # When the VLM produced detections but every one failed the content gate
+    # (boxes over blank space — localization failure on dense floors), the page
+    # has real rooms that need manual annotation, NOT a blank/non-floor page.
+    annotation["localization_failed"] = (pre_strip > 0 and len(sft_ready) == 0)
+
     # Step 5: Clean up contamination
     annotation.pop("ocr_rooms", None)  # Remove unfiltered OCR
     annotation.pop("panels", None)  # Remove equipment (not spatial rooms)
 
     # Step 6: Return with corrected sft_ready logic
     annotation["rooms"] = sft_ready
-    # CRITICAL: Only mark as SFT-ready if we actually detected rooms AND no contamination
-    # Fix 8: Require minimum 3 annotations per image for SFT inclusion
-    MIN_ROOMS_FOR_SFT = 3
-    annotation["sft_ready"] = (
-        len(sft_ready) >= MIN_ROOMS_FOR_SFT and  # Fix 8: minimum room count
-        not degenerate_reasons and  # Fix 9: VLM-localization sanity check
-        "panels" not in annotation and  # No equipment
-        "ocr_rooms" not in annotation  # No contamination
+
+    clean = (
+        not degenerate_reasons and
+        "panels" not in annotation and
+        "ocr_rooms" not in annotation
     )
-    if len(sft_ready) > 0 and len(sft_ready) < MIN_ROOMS_FOR_SFT:
+    annotation["sft_ready"] = len(sft_ready) >= min_rooms_for_sft and clean
+    # sft_recommended: higher-quality tier requiring ≥3 rooms, regardless of min_rooms_for_sft.
+    SFT_RECOMMENDED_MIN = 3
+    annotation["sft_recommended"] = len(sft_ready) >= SFT_RECOMMENDED_MIN and clean
+
+    if 0 < len(sft_ready) < min_rooms_for_sft:
         logger.warning(
-            f"Fix8: {len(sft_ready)} rooms detected but below minimum "
-            f"({MIN_ROOMS_FOR_SFT}) — sft_ready=False"
+            f"Fix8: {len(sft_ready)} rooms below configured minimum "
+            f"({min_rooms_for_sft}) — sft_ready=False"
         )
+        drop_attribution["min_rooms_gate"] = min_rooms_for_sft - len(sft_ready)
+
     if degenerate_reasons:
+        drop_attribution["degenerate_bbox"] = len(degenerate_reasons)
         annotation["degenerate_bbox_reasons"] = degenerate_reasons
         for reason in degenerate_reasons:
-            logger.warning(f"Fix9 degenerate-bbox: {reason}")
-        logger.warning(
-            f"Fix9: VLM produced degenerate bbox geometry — sft_ready=False "
-            f"({len(degenerate_reasons)} signal(s))"
-        )
+            logger.warning(f"Degenerate-bbox: {reason}")
+
+    # Attach per-step drop counts (omit zero-valued entries for readability).
+    annotation["drop_attribution"] = {k: v for k, v in drop_attribution.items() if v}
+
     logger.info(
         f"SFT preparation complete: {len(sft_ready)} rooms, sft_ready={annotation['sft_ready']}"
     )

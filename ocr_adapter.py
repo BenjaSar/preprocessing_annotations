@@ -189,16 +189,25 @@ class PaddleOCRBackend(OCRBackend):
             # Try GPU first if configured for CUDA
             use_gpu = (self.config.device == "cuda")
             
+            # Detection input-size limit. Default 960 downsamples large floor
+            # plans and drops small in-plan labels; raise it so labels stay legible.
+            det_limit = getattr(self.config, "det_limit_side_len", 4608)
+
             # Attempt GPU initialization with fallback
             try:
                 self.ocr = PaddleOCR(
                     use_angle_cls=True,  # Enable text line orientation classification
                     lang='en' if 'en' in self.config.languages else 'ch',
-                    use_gpu=use_gpu
+                    use_gpu=use_gpu,
+                    det_limit_side_len=det_limit,
+                    det_limit_type='max',
                 )
                 self.initialized = True
                 device_str = 'GPU' if use_gpu else 'CPU'
-                logger.info(f"PaddleOCR initialized on device: {device_str} (paddlepaddle-gpu 2.6.2)")
+                logger.info(
+                    f"PaddleOCR initialized on device: {device_str} "
+                    f"(det_limit_side_len={det_limit})"
+                )
             except RuntimeError as e:
                 # Catch cuDNN loading errors and other GPU-specific issues
                 if use_gpu and ('cudnn' in str(e).lower() or 'cuda' in str(e).lower()):
@@ -210,10 +219,15 @@ class PaddleOCRBackend(OCRBackend):
                     self.ocr = PaddleOCR(
                         use_angle_cls=True,
                         lang='en' if 'en' in self.config.languages else 'ch',
-                        use_gpu=False
+                        use_gpu=False,
+                        det_limit_side_len=det_limit,
+                        det_limit_type='max',
                     )
                     self.initialized = True
-                    logger.info("PaddleOCR initialized on device: CPU (fallback from GPU)")
+                    logger.info(
+                        f"PaddleOCR initialized on device: CPU "
+                        f"(fallback; det_limit_side_len={det_limit})"
+                    )
                 else:
                     # Re-raise if not a cuDNN issue
                     raise
@@ -278,14 +292,11 @@ class PaddleOCRBackend(OCRBackend):
                     )
                     detections.append(detection_obj)
 
-            # Diagnostic: log every raw detection so we can see what PaddleOCR
-            # actually reads before any filtering occurs.  This is intentionally
-            # at WARNING level so it survives PaddlePaddle's logger-level reset.
-            logger.warning(
+            logger.info(
                 f"PaddleOCR raw detections: {len(detections)} text regions found"
             )
             for det in detections:
-                logger.warning(
+                logger.info(
                     f"  RAW OCR | text={det.text!r:30s} conf={det.confidence:.3f} "
                     f"bbox=({det.bbox[0]:.0f},{det.bbox[1]:.0f},{det.bbox[2]:.0f},{det.bbox[3]:.0f})"
                 )

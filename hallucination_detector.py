@@ -1,10 +1,20 @@
 """
 Hallucination detection for VLM room detections.
 
-This module provides shared hallucination detection utilities used by multiple VLM backends.
+Single module for all hallucination/degeneracy checks.  All VLM backends
+(ClaudeBackend, Qwen2_5VLBackend, UnslothQwenBackend) call detect_hallucinations()
+rather than carrying their own duplicate detectors.
+
+Patterns detected:
+  1. Identical bbox repetition (autoregressive loop at same location)
+  2. Grid pattern (NxM regular grid — hallucinated when not a real residential layout)
+  3. Incremental y-delta (same x-coords, constant y increment)
+  4. Uniform bbox sizes with low name diversity (generic loop output)
+  5. Stripe artifact (>60% of rooms share one x1 or y1 value)
 """
 
 import logging
+from collections import Counter
 from typing import Any, Dict, List
 
 logger = logging.getLogger(__name__)
@@ -74,35 +84,32 @@ def detect_hallucinations(rooms: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     # Apply detection patterns on normalized (fraction-space) bboxes
     detected_hallucination = False
     
-    # Pattern 1: Detect identical bboxes (indicates infinite loop at same location)
-    # If we see 3+ identical bboxes, keep only the first one
+    # Pattern 1: Identical bbox loop — discard ALL when any single bbox accounts
+    # for ≥50% of rooms.  "Keep first" is wrong: the loop seed (room[0]) is itself
+    # a fabricated template location, not a real room.  Including it as a "valid"
+    # survivor causes fake sft_ready pages with wrong spatial data.
     try:
-        seen_bboxes = {}
-        first_unique_indices = []
-        duplicate_start = None
-        
+        seen_bboxes: dict = {}
+        n_rooms = len(normalized_rooms)
+
         for i, room in enumerate(normalized_rooms):
-            bbox = tuple(room.get("bbox", []))
+            bbox = room.get("bbox", [])
             if bbox and len(bbox) == 4:
-                # Convert to a hashable tuple for comparison
-                # Work in normalized fraction space (0.0-1.0), quantize to 1/100
                 bbox_key = tuple(int(v * 100) for v in bbox)
-                
-                if bbox_key not in seen_bboxes:
-                    seen_bboxes[bbox_key] = []
-                    first_unique_indices.append(i)
-                seen_bboxes[bbox_key].append(i)
-        
-        # Check if any bbox appears 3+ times
+                seen_bboxes.setdefault(bbox_key, []).append(i)
+
         for bbox_key, indices in seen_bboxes.items():
-            if len(indices) >= 3:
-                duplicate_start = min(indices[1:])  # start of duplicates (skip first)
+            # Require absolute floor ≥3 duplicates AND fraction ≥50%.
+            # Without the floor, a 2-room page where both have distinct bboxes
+            # would fire: each singleton has count=1, n_rooms=2, 1/2=0.5 ≥ 0.5
+            # → both rooms wrongly discarded.
+            if len(indices) >= 3 and len(indices) / n_rooms >= 0.5:
                 logger.warning(
-                    f"Detected identical bbox hallucination at room {indices[0]}: "
-                    f"bbox appears {len(indices)} times (indices {indices}). "
-                    f"Truncating list at position {duplicate_start}"
+                    f"Identical bbox loop: {len(indices)}/{n_rooms} rooms share bbox "
+                    f"(indices {indices[:5]}{'...' if len(indices)>5 else ''}). "
+                    f"Discarding all — loop seed is not a real room."
                 )
-                return rooms[:duplicate_start]
+                return []
     except (TypeError, ValueError, IndexError):
         pass
     
@@ -153,9 +160,11 @@ def detect_hallucinations(rooms: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         except (TypeError, ValueError, IndexError):
             pass
     
-    # Pattern 3: Check for pattern with same x-coords, incrementing y by consistent delta
-    # This is the original pattern detector
-    if len(normalized_rooms) >= 4:
+    # Pattern 3: Check for pattern with same x-coords, incrementing y by consistent delta.
+    # Min rooms raised 4→5 to reduce false positives on short legitimate sequences.
+    # Min delta lowered 0.15→0.04 to catch label-box column increments (~100px in 2250px tile
+    # = 0.044 normalized) which the original 0.15 threshold consistently missed.
+    if len(normalized_rooms) >= 5:
         for i in range(len(normalized_rooms) - 3):
             r0, r1, r2, r3 = normalized_rooms[i:i+4]
             
@@ -183,9 +192,9 @@ def detect_hallucinations(rooms: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 delta_23 = b3[1] - b2[1]
                 
                 # Allow ±5% tolerance on delta consistency
-                if (abs(delta_01 - delta_12) < 0.05 and 
-                    abs(delta_12 - delta_23) < 0.05 and 
-                    0.15 < delta_01 < 0.35):
+                if (abs(delta_01 - delta_12) < 0.05 and
+                    abs(delta_12 - delta_23) < 0.05 and
+                    0.04 < delta_01 < 0.35):
                     
                     logger.warning(
                         f"Detected y-delta hallucination pattern at room {i}: "
@@ -256,6 +265,18 @@ def detect_hallucinations(rooms: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                         total_names = len([n for n in names if n])
                         name_uniqueness = unique_names / total_names if total_names > 0 else 0.0
 
+                        # cv==0 (stdev=0) across N rooms is the signature of template
+                        # output regardless of name diversity: a genuine detection system
+                        # produces at least rounding-level variance across distinct positions.
+                        if width_cv == 0.0 and height_cv == 0.0:
+                            logger.warning(
+                                f"Identical dimensions (cv=0.000 both axes) across "
+                                f"{len(bboxes)} rooms — template output regardless of "
+                                f"name diversity ({unique_names}/{total_names}={name_uniqueness:.2f}). "
+                                f"Discarding all."
+                            )
+                            return rooms[:0]
+
                         # Uniform size AND low name diversity → hallucination
                         if width_cv < 0.05 and height_cv < 0.05:
                             if name_uniqueness < 0.40:
@@ -278,5 +299,33 @@ def detect_hallucinations(rooms: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                                 )
         except (ValueError, TypeError, statistics.StatisticsError, ImportError):
             pass
-    
+
+    # Pattern 5: Stripe artifact — >60% of rooms share one x1 or y1 value.
+    # VLMs that cannot localise individual rooms emit an incrementing stripe
+    # (same row or column) rather than admitting uncertainty.
+    # Threshold 60% is more aggressive than the legacy Fix9 (70%) so it
+    # catches stripes before they reach the SFT post-processing gate.
+    # Bucket coordinates into 5px bins before counting so that 1-2px jitter
+    # (common when the model adds minor offsets to an otherwise fixed column)
+    # does not prevent the stripe from being detected.
+    # 5px << 130px (minimum legitimate room step) so no false positives.
+    _STRIPE_BIN = 5
+    n = len(rooms)
+    if n >= 3:
+        x1s = [round(r["bbox"][0] / _STRIPE_BIN) for r in rooms if len(r.get("bbox", [])) == 4]
+        y1s = [round(r["bbox"][1] / _STRIPE_BIN) for r in rooms if len(r.get("bbox", [])) == 4]
+        if x1s:
+            _, x_max = Counter(x1s).most_common(1)[0]
+            _, y_max = Counter(y1s).most_common(1)[0]
+            if y_max / n > 0.6:
+                logger.warning(
+                    f"Stripe artifact: {y_max}/{n} rooms share same y1 (±{_STRIPE_BIN}px) — discarding all"
+                )
+                return []
+            if x_max / n > 0.6:
+                logger.warning(
+                    f"Stripe artifact: {x_max}/{n} rooms share same x1 (±{_STRIPE_BIN}px) — discarding all"
+                )
+                return []
+
     return rooms

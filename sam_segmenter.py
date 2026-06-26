@@ -151,14 +151,18 @@ class RoomSegmenter:
         image_path: str | Path,
         point: Tuple[int, int],
         include_mask: bool = True,
+        label_bbox: Optional[List[int]] = None,
     ) -> SegmentationResult:
         """
-        Segment a room from a single point prompt.
+        Segment a room from a label centroid, optionally constrained by a box prompt.
 
         Args:
             image_path: Path to the floor plan image.
             point: (x, y) point inside the room (typically label center).
             include_mask: Whether to include the full mask in result.
+            label_bbox: Optional [x, y, w, h] label box. When provided, used as a
+                SAM box prompt (F-B) to confine segmentation to the room around
+                the label rather than the whole floor plate.
 
         Returns:
             SegmentationResult with refined bbox and optional mask.
@@ -168,16 +172,23 @@ class RoomSegmenter:
         input_point = np.array([[point[0], point[1]]])
         input_label = np.array([1])  # 1 = foreground
 
+        # F-B: box prompt from label bbox (xywh -> xyxy) constrains SAM region
+        box = None
+        if label_bbox is not None and len(label_bbox) == 4:
+            bx, by, bw, bh = label_bbox
+            box = np.array([bx, by, bx + bw, by + bh])
+
+        # Always request 3 candidates so mask selection can avoid the floor-plate.
         masks, scores, _ = self.predictor.predict(
             point_coords=input_point,
             point_labels=input_label,
-            multimask_output=self.config.multimask_output,
+            box=box,
+            multimask_output=True,
         )
 
-        # Select best mask
-        best_idx = np.argmax(scores)
-        mask = masks[best_idx]
-        confidence = float(scores[best_idx])
+        # F-A: pick a room-scale mask, NOT argmax(score) (which favours the
+        # largest floor-plate region on floor plans).
+        mask, confidence = self._select_room_mask(masks, scores)
 
         # Extract bounding box and contour from mask
         bbox, contour = self._mask_to_bbox(mask)
@@ -191,6 +202,42 @@ class RoomSegmenter:
         )
 
         return result
+
+    def _select_room_mask(
+        self, masks: np.ndarray, scores: np.ndarray
+    ) -> Tuple[np.ndarray, float]:
+        """
+        Select a room-scale mask from SAM multimask candidates (F-A).
+
+        SAM scores favour the largest (whole-floor) mask on floor plans.
+        Instead: among masks whose area is below max_expand_frac of the image,
+        pick the highest-scoring. If none qualify (all are floor-plate-sized),
+        fall back to the smallest mask available.
+
+        Args:
+            masks: (N, H, W) boolean masks from predictor.predict.
+            scores: (N,) confidence scores.
+
+        Returns:
+            (selected_mask, confidence).
+        """
+        img_area = masks.shape[1] * masks.shape[2]
+        max_area = img_area * self.config.max_expand_frac
+
+        areas = [int(m.sum()) for m in masks]
+
+        # Candidates below the over-segmentation ceiling
+        valid = [i for i, a in enumerate(areas) if 0 < a <= max_area]
+        if valid:
+            best_idx = max(valid, key=lambda i: scores[i])
+        else:
+            # All masks too large -> take the smallest non-empty one
+            non_empty = [i for i, a in enumerate(areas) if a > 0]
+            if not non_empty:
+                return masks[0], float(scores[0])
+            best_idx = min(non_empty, key=lambda i: areas[i])
+
+        return masks[best_idx], float(scores[best_idx])
 
     def segment_from_labels(
         self,
@@ -263,47 +310,139 @@ class RoomSegmenter:
         self,
         image_path: str | Path,
         annotations: List[dict],
+        img_width: int = 0,
+        img_height: int = 0,
+        max_expand_frac: float = 0.25,
     ) -> List[dict]:
         """
-        Refine VLM annotations with SAM segmentation.
+        Expand label-sized bboxes to room-boundary bboxes using SAM.
 
-        Takes VLM-generated annotations and replaces bboxes with
-        SAM-refined boundaries.
+        For each annotation, seeds SAM with the label centroid, segments the
+        enclosing room, and replaces the label bbox with the room mask bbox.
+
+        Guardrails (keep original on fail):
+          - SAM bbox area > max_expand_frac * image_area → over-segmentation
+            (SAM grabbed the full floor or a multi-room region)
+          - SAM bbox area < original label area → collapse (SAM shrunk)
 
         Args:
-            image_path: Path to the floor plan image.
-            annotations: List of annotation dicts with 'bbox' keys.
+            image_path:      Path to the floor plan image.
+            annotations:     List of annotation dicts with 'bbox' [x,y,w,h].
+            img_width:       Image width in px (auto-read from file if 0).
+            img_height:      Image height in px (auto-read from file if 0).
+            max_expand_frac: Max fraction of image area any single SAM box may occupy.
 
         Returns:
-            List of annotations with refined bboxes.
+            List of annotations with expanded bboxes (original preserved as
+            'original_bbox'; sam_expanded=True marks successful expansions).
         """
+        # Resolve image dimensions for guardrail checks
+        if img_width == 0 or img_height == 0:
+            try:
+                from PIL import Image as _PIL
+                with _PIL.open(image_path) as _img:
+                    img_width, img_height = _img.size
+            except Exception:
+                img_width, img_height = 4500, 3375  # safe fallback
+
+        # Grayscale array for per-room content-density (FIX-1). Boxes over blank
+        # space (hallucinations) have near-zero non-white density; real rooms
+        # contain walls/fixtures and score higher.
+        try:
+            from PIL import Image as _PIL
+            _gray = np.asarray(_PIL.open(image_path).convert("L"))
+        except Exception:
+            _gray = None
+
+        img_area = img_width * img_height
+        max_sam_area = img_area * max_expand_frac
+
         refined = []
+        expanded = 0
+        kept_original = 0
 
         for ann in annotations:
             bbox = ann.get("bbox", [0, 0, 100, 100])
 
-            # Use bbox center as prompt point
-            center_x = bbox[0] + bbox[2] // 2
-            center_y = bbox[1] + bbox[3] // 2
+            # Centroid of label box → SAM prompt point
+            if len(bbox) == 4:
+                bx, by, bw, bh = bbox
+                center_x = bx + bw // 2
+                center_y = by + bh // 2
+                original_area = max(1, bw * bh)
+            else:
+                center_x, center_y, original_area = 50, 50, 1
 
             try:
                 result = self.segment_from_point(
-                    image_path, (center_x, center_y), include_mask=False
+                    image_path, (center_x, center_y), include_mask=False,
+                    label_bbox=bbox if len(bbox) == 4 else None,
                 )
 
-                # Update annotation with refined bbox
+                rx, ry, rw, rh = result.bbox
+                sam_area = rw * rh
+
+                # Guardrail 1: over-segmentation
+                if sam_area > max_sam_area:
+                    logger.debug(
+                        f"SAM over-seg guardrail: {sam_area:.0f} > {max_sam_area:.0f} "
+                        f"({max_expand_frac:.0%} of image). Keeping original."
+                    )
+                    refined_ann = ann.copy()
+                    refined_ann["sam_expanded"] = False
+                    refined_ann["sam_skip_reason"] = "over_segmentation"
+                    refined.append(refined_ann)
+                    kept_original += 1
+                    continue
+
+                # Guardrail 2: collapse
+                if sam_area < original_area:
+                    logger.debug(
+                        f"SAM collapse guardrail: sam_area={sam_area} < "
+                        f"original={original_area}. Keeping original."
+                    )
+                    refined_ann = ann.copy()
+                    refined_ann["sam_expanded"] = False
+                    refined_ann["sam_skip_reason"] = "collapse"
+                    refined.append(refined_ann)
+                    kept_original += 1
+                    continue
+
                 refined_ann = ann.copy()
                 refined_ann["bbox"] = result.bbox
-                refined_ann["sam_confidence"] = result.confidence
                 refined_ann["original_bbox"] = bbox
+                refined_ann["sam_confidence"] = result.confidence
+                refined_ann["sam_expanded"] = True
                 refined.append(refined_ann)
+                expanded += 1
 
             except Exception as e:
-                logger.warning(
-                    f"SAM refinement failed for annotation, keeping original: {e}"
-                )
-                refined.append(ann)
+                logger.warning(f"SAM segment failed, keeping original: {e}")
+                refined_ann = ann.copy()
+                refined_ann["sam_expanded"] = False
+                refined_ann["sam_skip_reason"] = "error"
+                refined.append(refined_ann)
+                kept_original += 1
 
+        # FIX-1: attach content-density (non-white fraction) on each room's final
+        # bbox. Consumed by the SFT room-scale gate to drop blank-space boxes.
+        if _gray is not None:
+            for ann in refined:
+                b = ann.get("bbox", [])
+                if len(b) == 4:
+                    x, y, w, h = [int(v) for v in b]
+                    x2, y2 = min(x + w, _gray.shape[1]), min(y + h, _gray.shape[0])
+                    x, y = max(0, x), max(0, y)
+                    if x2 > x and y2 > y:
+                        sub = _gray[y:y2, x:x2]
+                        ann["content_density"] = float((sub < 200).sum()) / sub.size
+                    else:
+                        ann["content_density"] = 0.0
+
+        logger.info(
+            f"SAM refine_annotations: {expanded} expanded, "
+            f"{kept_original} kept original (of {len(annotations)} total)"
+        )
         return refined
 
     def visualize_segmentation(

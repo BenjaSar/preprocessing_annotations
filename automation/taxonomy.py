@@ -472,6 +472,43 @@ class NormalizationResult(NamedTuple):
     extended_type: Optional[str] = None  # One of EXTENDED_ONLY_TYPES if applicable
 
 
+# Single source of truth: extended class → nearest mandatory class.
+# Used by both the exact short-token lookup and the step-5 substring resolution.
+_EXTENDED_TO_MANDATORY = {
+    "mechanical": "ELECTRICAL ROOM",
+    "machine_room": "ELECTRICAL ROOM",
+    "boiler": "ELECTRICAL ROOM",
+    "pump_room": "ELECTRICAL ROOM",
+    "compactor": "STORAGE ROOM",
+    "riser": "ELECTRICAL ROOM",
+    "elevator": "CORRIDOR",
+    "bicycle_storage": "STORAGE ROOM",
+    "bedroom": "RESIDENTIAL UNIT",
+    "living_room": "RESIDENTIAL UNIT",
+    "laundry": "RESIDENTIAL UNIT",
+    "garage": "PARKING GARAGE",
+    "studio": "RESIDENTIAL UNIT",
+    "carpentry": "MULTIPURPOSE ROOM",
+    "community_facility": "MULTIPURPOSE ROOM",
+    "cctv": "ELECTRICAL ROOM",
+    "other": "STORAGE ROOM",
+}
+
+# Exact variant string → mandatory class, built once at import.
+# Lets short tokens (≤4 chars) that are EXACT members of a mandatory/extended
+# variant list (e.g. "BR1", "LR", "0BR") resolve correctly instead of being
+# blanket-dumped to STORAGE ROOM by the short-token guard. Exact match only —
+# no substring — so noise tokens ("RM", "A1") are unaffected.
+_EXACT_VARIANT_TO_MANDATORY: dict = {}
+for _mandatory, _variants in MANDATORY_CLASSES.items():
+    for _v in _variants:
+        _EXACT_VARIANT_TO_MANDATORY.setdefault(_v.upper(), _mandatory)
+for _extended, _variants in EXTENDED_TYPES.items():
+    _mapped = _EXTENDED_TO_MANDATORY.get(_extended, "STORAGE ROOM")
+    for _v in _variants:
+        _EXACT_VARIANT_TO_MANDATORY.setdefault(_v.upper(), _mapped)
+
+
 def normalize_to_mandatory(raw: str) -> str:
     """
     Normalize any raw room type string to a mandatory SFT class.
@@ -509,9 +546,14 @@ def normalize_to_mandatory(raw: str) -> str:
     if raw_upper in _SURFACE_TO_MANDATORY:
         return _SURFACE_TO_MANDATORY[raw_upper]
 
-    # 3b. Short-token guard (same logic as before)
+    # 3b. Short-token guard. Before defaulting to STORAGE, try an EXACT lookup
+    # against mandatory/extended variant lists so valid short codes (BR1, LR,
+    # 0BR, BD) resolve correctly. Exact match only — noise tokens still fall
+    # through to STORAGE ROOM.
     if len(raw_upper) <= 4:
-        logger.debug(f"Short token '{raw}' not in exact map → STORAGE ROOM")
+        if raw_upper in _EXACT_VARIANT_TO_MANDATORY:
+            return _EXACT_VARIANT_TO_MANDATORY[raw_upper]
+        logger.debug(f"Short token '{raw}' no exact match → STORAGE ROOM")
         return "STORAGE ROOM"
 
     # 4. Substring containment in mandatory classes
@@ -529,27 +571,7 @@ def normalize_to_mandatory(raw: str) -> str:
                     f"Substring match (extended): '{raw}' → '{extended}', "
                     f"mapping to nearest mandatory"
                 )
-                # Map extended types to nearest mandatory equivalents
-                fallback_map = {
-                    "mechanical": "ELECTRICAL ROOM",
-                    "machine_room": "ELECTRICAL ROOM",
-                    "boiler": "ELECTRICAL ROOM",
-                    "pump_room": "ELECTRICAL ROOM",
-                    "compactor": "STORAGE ROOM",
-                    "riser": "ELECTRICAL ROOM",
-                    "elevator": "CORRIDOR",
-                    "bicycle_storage": "STORAGE ROOM",
-                    "bedroom": "RESIDENTIAL UNIT",
-                    "living_room": "RESIDENTIAL UNIT",
-                    "laundry": "RESIDENTIAL UNIT",
-                    "garage": "PARKING GARAGE",
-                    "studio": "RESIDENTIAL UNIT",
-                    "carpentry": "MULTIPURPOSE ROOM",
-                    "community_facility": "MULTIPURPOSE ROOM",
-                    "cctv": "ELECTRICAL ROOM",
-                    "other": "STORAGE ROOM",
-                }
-                return fallback_map.get(extended, "STORAGE ROOM")
+                return _EXTENDED_TO_MANDATORY.get(extended, "STORAGE ROOM")
 
     logger.debug(f"No match for room type: '{raw}' → STORAGE ROOM (fallback)")
     return "STORAGE ROOM"

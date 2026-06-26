@@ -10,6 +10,7 @@ import argparse
 import json
 import logging
 import sys
+import time
 from dataclasses import asdict
 from pathlib import Path
 from typing import Dict, List, Optional, Union
@@ -32,6 +33,7 @@ try:
         filter_by_confidence, validate_for_sft, prepare_sft_annotation,
         SFTAnnotationBuilder, build_annotation_json
     )
+    from .automation.sft_validator import _merge_vlm_and_ocr
     from .automation.taxonomy import normalize_to_mandatory, get_extended_type
     from .automation.abbreviation_ocr_recovery import (
         AbbreviationOCRRecovery, ResidentialAbbreviationRecovery
@@ -55,6 +57,7 @@ except ImportError:
         filter_by_confidence, validate_for_sft, prepare_sft_annotation,
         SFTAnnotationBuilder, build_annotation_json
     )
+    from automation.sft_validator import _merge_vlm_and_ocr
     from automation.taxonomy import normalize_to_mandatory, get_extended_type
     from automation.abbreviation_ocr_recovery import (
         AbbreviationOCRRecovery, ResidentialAbbreviationRecovery
@@ -212,7 +215,7 @@ class AnnotationPipeline:
             self._ocr_extractor = TwoPassOCRExtractor(
                 ocr_config=self.config.ocr,
                 vlm_backend=vlm_backend,
-                confidence_threshold=0.7,  # Use VLM fallback for confidence < 0.7
+                confidence_threshold=0.92,  # PaddleOCR routinely returns >0.97; trigger VLM fallback only for genuinely uncertain tokens
             )
         return self._ocr_extractor
 
@@ -326,6 +329,29 @@ class AnnotationPipeline:
 
         images_dir.mkdir(parents=True, exist_ok=True)
         annotations_dir.mkdir(parents=True, exist_ok=True)
+
+        # Per-page per-stage metrics log.
+        # Appended throughout run() so a crash mid-run still preserves prior rows.
+        _metrics_path = output_dir / "run_metrics.jsonl"
+        _metrics_fh = open(_metrics_path, "a")
+
+        def _emit_metric(page_id: str, stage: str, t0: float,
+                         outcome: str, reject_reason: str = "",
+                         room_count_in: int = 0, room_count_out: int = 0) -> None:
+            record = {
+                "page_id": page_id,
+                "stage": stage,
+                "duration_ms": round((time.time() - t0) * 1000),
+                "outcome": outcome,
+                "reject_reason": reject_reason,
+                "room_count_in": room_count_in,
+                "room_count_out": room_count_out,
+            }
+            _metrics_fh.write(json.dumps(record) + "\n")
+            _metrics_fh.flush()
+
+        # Accumulate per-step drop counts across all pages for run summary.
+        run_drop_attribution: Dict[str, int] = {}
 
         stats = {
             "pdfs_processed": 0,
@@ -490,13 +516,8 @@ class AnnotationPipeline:
                         page_type, reason = page_classifier.classify_page(page)
                         if page_type != "floor_plan":
                             import shutil
-                            # copy+delete instead of move: keeps a recovery path
-                            # in skipped_pages/ if classification is a false positive
-                            # on a scanned or ambiguous page, while still removing
-                            # the image from images_dir so OCR does not process it.
                             dst = skipped_dir / img_candidate.name
-                            shutil.copy2(str(img_candidate), str(dst))
-                            img_candidate.unlink()
+                            shutil.move(str(img_candidate), str(dst))
                             _classified_skips.add(img_candidate.name)
                             skipped_count += 1
                             # Update tracking dict for classified-away images
@@ -599,6 +620,7 @@ class AnnotationPipeline:
                     logger.info(f"  Skipping {img_path.name} (annotation exists)")
                     continue
 
+                _t0_vlm = time.time()
                 try:
                     # Step 3a: Pre-resize image on disk to reduce I/O for the
                     # VLM annotator.  This is best-effort: if it fails (e.g.
@@ -622,9 +644,17 @@ class AnnotationPipeline:
 
                     # Get VLM result (handles both Claude and Qwen backends)
                     result = self._get_vlm_result(img_path)
-                    
-                    # Apply semantic reconciliation if enabled
+
+                    # FIX-A: Drop VLM rooms with no OCR corroboration within 300px.
+                    # Rooms detected from margin text (BOM tables, notes) have no
+                    # OCR room candidate nearby — OCR already filtered those regions.
+                    # Only applied when OCR found ≥1 room (avoids suppressing all rooms
+                    # on pages where OCR finds nothing).
                     ocr_list = ocr_results.get(img_path.name, [])
+                    if ocr_list:
+                        result.rooms = self._filter_vlm_rooms_by_ocr_proximity(
+                            result.rooms, ocr_list, radius_px=300
+                        )
                     if self.config.use_semantic_reconciliation and ocr_list:
                         # Convert OCR RoomCandidate objects to dicts for reconciler
                         ocr_dicts = []
@@ -638,6 +668,8 @@ class AnnotationPipeline:
                     
                     stats["images_annotated"] += 1
                     stats["rooms_detected"] += len(result.rooms)
+                    _emit_metric(img_path.stem, "vlm_annotation", _t0_vlm, "ok",
+                                 room_count_out=len(result.rooms))
 
                     # Save annotation (img_path needed for window detector)
                     self._save_annotation(result, ann_path, ocr_results.get(img_path.name, []), img_path)
@@ -662,7 +694,7 @@ class AnnotationPipeline:
                             stage="raw_vlm"
                         )
                     except Exception as viz_err:
-                        logger.debug(f"Bbox visualization failed: {viz_err}")
+                        logger.warning(f"Bbox visualization failed: {viz_err}")
                     
                     # GPU memory cleanup between images
                     try:
@@ -676,6 +708,8 @@ class AnnotationPipeline:
                     
                 except Exception as e:
                     logger.error(f"  {img_path.name}: VLM annotation failed - {e}")
+                    _emit_metric(img_path.stem, "vlm_annotation", _t0_vlm, "error",
+                                 reject_reason=str(e)[:120])
                     # Step 6: Skip-reason tagging
                     log_skip_reason(img_path.name, f"VLM error: {str(e)[:80]}", stage="vlm_annotation")
 
@@ -734,6 +768,58 @@ class AnnotationPipeline:
                         f"  {img_path.name}: Failed to save OCR annotation - {e}"
                     )
 
+        # Step 3.5: SAM label→room expansion (optional, pre-filter).
+        # Must run BEFORE Step 4 geometric filter so SAM-expanded room-boundary
+        # boxes pass the 2.5% / 10000px² thresholds that correctly reject label boxes.
+        if self.config.use_sam:
+            self._print_step("STEP 3.5: SAM label→room boundary expansion")
+
+            for img_path in self._iter_images(images_dir):
+                ann_path = annotations_dir / f"{img_path.stem}.json"
+                if not ann_path.exists():
+                    continue
+                try:
+                    with open(ann_path) as _f:
+                        ann = json.load(_f)
+
+                    rooms = ann.get("rooms", [])
+                    ocr_rooms = ann.get("ocr_rooms", [])
+
+                    if rooms or ocr_rooms:
+                        img_w = ann.get("image_size", {}).get("width", 0)
+                        img_h = ann.get("image_size", {}).get("height", 0)
+
+                        if rooms:
+                            expanded_rooms = self.sam_segmenter.refine_annotations(
+                                img_path, rooms,
+                                img_width=img_w, img_height=img_h,
+                                max_expand_frac=self.config.sam.max_expand_frac,
+                            )
+                            # F-C: dedup near-identical masks from adjacent labels
+                            ann["rooms"] = self._dedup_rooms_by_iou(expanded_rooms)
+
+                        if ocr_rooms:
+                            expanded_ocr = self.sam_segmenter.refine_annotations(
+                                img_path, ocr_rooms,
+                                img_width=img_w, img_height=img_h,
+                                max_expand_frac=self.config.sam.max_expand_frac,
+                            )
+                            ann["ocr_rooms"] = self._dedup_rooms_by_iou(expanded_ocr)
+
+                        ann["sam_expanded"] = True
+                        with open(ann_path, "w") as _f:
+                            json.dump(ann, _f, indent=2)
+
+                        n_exp = sum(1 for r in ann.get("rooms", []) + ann.get("ocr_rooms", [])
+                                    if r.get("sam_expanded"))
+                        logger.info(
+                            f"  {img_path.name}: SAM expanded {n_exp} of "
+                            f"{len(rooms)+len(ocr_rooms)} boxes"
+                        )
+
+                except Exception as e:
+                    logger.error(f"  {img_path.name}: SAM expansion failed - {e}")
+
         # Step 4: Annotation post-processing (label normalization, quality checks, region extraction)
         self._print_step("STEP 4: Post-processing annotations")
 
@@ -762,8 +848,26 @@ class AnnotationPipeline:
 
                 # Step 4a: SFT-grade filtering and semantic validation
                 original_room_count = len(annotation.get("rooms", []) or annotation.get("ocr_rooms", []))
-                annotation = prepare_sft_annotation(annotation)
+                _t0_sft = time.time()
+                annotation = prepare_sft_annotation(
+                    annotation,
+                    min_rooms_for_sft=self.config.min_rooms_for_sft,
+                )
                 filtered_room_count = len(annotation.get("rooms", []))
+                _sft_outcome = "sft_ready" if annotation.get("sft_ready") else "filtered"
+                _sft_reject = ""
+                if annotation.get("degenerate_bbox_reasons"):
+                    _sft_reject = "degenerate_bbox"
+                elif filtered_room_count == 0:
+                    _sft_reject = "no_rooms"
+                elif filtered_room_count < 3:
+                    _sft_reject = "below_min_rooms"
+                _emit_metric(ann_path.stem, "sft_filter", _t0_sft, _sft_outcome,
+                             reject_reason=_sft_reject,
+                             room_count_in=original_room_count,
+                             room_count_out=filtered_room_count)
+                for step, count in annotation.get("drop_attribution", {}).items():
+                    run_drop_attribution[step] = run_drop_attribution.get(step, 0) + count
 
                 if filtered_room_count < original_room_count:
                     logger.info(
@@ -784,7 +888,6 @@ class AnnotationPipeline:
                     room["type"] = canonical       # canonical field (QualityChecker, RegionExtractor)
                     room["category"] = canonical   # keep for backward compat
                     logger.debug(f"    {ann_path.name}: '{raw_type}' → '{canonical}'")
-                quality_summary["annotations_normalized"] += 1
 
                 # Step 4c: Check annotation quality
                 issues = self.quality_checker.check_annotation(annotation)
@@ -821,6 +924,10 @@ class AnnotationPipeline:
                         img_path = _candidate
                         break
                 if img_path is not None and rooms:
+                    logger.info(
+                        f"    {ann_path.name}: Starting region extraction "
+                        f"({len(rooms)} rooms) ..."
+                    )
                     extracted = self.region_extractor.extract_regions(
                         str(img_path), annotation, str(regions_dir), prefix="room"
                     )
@@ -836,10 +943,26 @@ class AnnotationPipeline:
                 # not clutter processed_annotations/ or inflate image counts.
                 room_count = len(annotation.get("rooms", []))
                 is_sft_ready = annotation.get("sft_ready", False)
+                localization_failed = annotation.get("localization_failed", False)
 
-                if not is_sft_ready and room_count == 0:
-                    # This is an empty annotation — move source image to skipped_pages/
-                    # for human review (may be cover page, title block, or OCR failure)
+                if not is_sft_ready and room_count == 0 and localization_failed:
+                    # FIX-B: rooms WERE detected but all mislocalized (boxes over
+                    # blank space). The page has real rooms needing manual
+                    # annotation — keep the processed annotation (with its dropped
+                    # boxes recorded) and let the review prioritizer flag it.
+                    # Do NOT move to skipped_pages/ — that loses a real floor plan.
+                    processed_path = processed_dir / ann_path.name
+                    with open(processed_path, "w") as f:
+                        json.dump(annotation, f, indent=2)
+                    logger.warning(
+                        f"    {ann_path.name}: localization failed "
+                        f"(rooms detected but all mislocalized) — kept for review, not skipped"
+                    )
+                    quality_summary["total_annotations"] += 1
+
+                elif not is_sft_ready and room_count == 0:
+                    # Genuinely empty annotation — move to skipped_pages/
+                    # (cover page, title block, roof/site sheet, or OCR failure)
                     image_file = None
                     for _ext in self._IMAGE_EXTS:
                         _candidate = images_dir / f"{ann_path.stem}{_ext}"
@@ -862,11 +985,46 @@ class AnnotationPipeline:
                                 f"    {ann_path.name}: Failed to move to skipped_pages/: {move_err}"
                             )
                 else:
+                    # Rebuild roomsRecognized from the filtered rooms[] survivors.
+                    # prepare_sft_annotation shrinks rooms[] but never updates
+                    # roomsRecognized, leaving stale entries for dropped boxes.
+                    # Rebuild ensures both keys carry identical room sets.
+                    surviving_rooms = annotation.get("rooms", [])
+                    if surviving_rooms:
+                        new_rr = []
+                        for idx, room in enumerate(surviving_rooms, start=1):
+                            name = room.get("room_name") or room.get("name", "")
+                            number = room.get("room_number", "")
+                            cat = room.get("type") or room.get("category") or name
+                            raw_bbox = room.get("bbox", [0, 0, 0, 0])
+                            if len(raw_bbox) == 4:
+                                bx, by, bw, bh = [int(v) for v in raw_bbox]
+                                bbox_xyxy = [bx, by, bx + bw, by + bh]
+                            else:
+                                bbox_xyxy = [int(v) for v in raw_bbox]
+                            sft_room = self.sft_builder.build_room(
+                                room_id=idx,
+                                mandatory_type=cat,
+                                original_name=name,
+                                room_number=number,
+                                bbox=bbox_xyxy,
+                                detection_score=room.get("detection_score", 0.9),
+                                classification_match_type=room.get("classification_match_type", "ocr"),
+                                ocr_confidence=room.get("ocr_confidence", room.get("confidence", 0.9)),
+                                source=room.get("source", "processed"),
+                                extended_type=room.get("extended_type", ""),
+                                detection_method=room.get("detection_method", "ocr"),
+                                detection_model=room.get("detection_model", "pipeline"),
+                            )
+                            new_rr.append(self.sft_builder.to_dict(sft_room))
+                        annotation["roomsRecognized"] = new_rr
+
                     # Normal case: write processed annotation
                     processed_path = processed_dir / ann_path.name
                     with open(processed_path, "w") as f:
                         json.dump(annotation, f, indent=2)
                     quality_summary["total_annotations"] += 1
+                    quality_summary["annotations_normalized"] += 1
 
             except Exception as e:
                 logger.error(
@@ -894,35 +1052,9 @@ class AnnotationPipeline:
         stats["total_quality_issues"] = quality_summary["total_issues"]
         stats["room_regions_extracted"] = quality_summary["regions_extracted"]
 
-        # Step 5: SAM refinement (optional)
-        if self.config.use_sam:
-            self._print_step("STEP 5: SAM boundary refinement")
-
-            for img_path in self._iter_images(images_dir):
-                ann_path = annotations_dir / f"{img_path.stem}.json"
-
-                if not ann_path.exists():
-                    continue
-
-                try:
-                    with open(ann_path) as f:
-                        ann = json.load(f)
-
-                    rooms = ann.get("rooms", [])
-                    if rooms:
-                        refined = self.sam_segmenter.refine_annotations(
-                            img_path, rooms
-                        )
-                        ann["rooms"] = refined
-                        ann["sam_refined"] = True
-
-                        with open(ann_path, "w") as f:
-                            json.dump(ann, f, indent=2)
-
-                        logger.info(f"  {img_path.name}: Refined {len(refined)} rooms")
-
-                except Exception as e:
-                    logger.error(f"  {img_path.name}: SAM refinement failed - {e}")
+        # Step 5: (removed) SAM now runs in Step 3.5, before the geometric filter,
+        # so expanded room-boundary boxes pass the size thresholds that correctly
+        # reject label-sized boxes.
 
         # Step 6: Prioritize for review
         self._print_step("STEP 6: Prioritizing for human review")
@@ -1010,23 +1142,223 @@ class AnnotationPipeline:
                 + (f" ({total_classified} skipped by classifier)." if total_classified else ".")
             )
 
+        # Write run-level drop attribution summary and close metrics log.
+        if run_drop_attribution:
+            _summary_record = {
+                "page_id": "__run_summary__",
+                "stage": "drop_attribution_totals",
+                "duration_ms": 0,
+                "outcome": "summary",
+                "reject_reason": "",
+                "drop_attribution": run_drop_attribution,
+            }
+            _metrics_fh.write(json.dumps(_summary_record) + "\n")
+        _metrics_fh.close()
+        stats["drop_attribution"] = run_drop_attribution
+        logger.info(
+            f"run_metrics.jsonl written: {_metrics_path}"
+        )
+        if run_drop_attribution:
+            logger.info(f"Drop attribution totals: {run_drop_attribution}")
+
+        logger.info("Pipeline run() complete — all steps finished.")
         return stats
 
     def _get_vlm_result(self, img_path: Path):
-        """Get VLM annotation result, handling both Claude and Qwen/Unsloth backends."""
+        """Get VLM annotation result, with optional tiled inference for local backends."""
         vlm = self.vlm_annotator
         backend_name = self.config.vlm.backend.lower()
         is_local_vlm = backend_name in ("qwen", "unsloth")
-        
+
         if is_local_vlm:
-            # Qwen and Unsloth backends return list of dicts from detect_rooms()
-            rooms_dicts = vlm.detect_rooms(img_path)
+            rooms_dicts = self._detect_rooms_maybe_tiled(img_path, vlm)
             result = self._qwen_dicts_to_vlm_result(rooms_dicts, img_path)
         else:
-            # Claude backend returns VLMAnnotationResult from annotate()
+            # Claude: tiling would quadruple API cost; skip silently unless explicit
+            if self.config.use_tiling:
+                logger.debug("Tiling skipped for Claude backend (API cost); using full-image")
             result = vlm.annotate(img_path)
-        
+
         return result
+
+    @staticmethod
+    def _dedup_rooms_by_iou(rooms: List[dict], iou_threshold: float = 0.5) -> List[dict]:
+        """Drop duplicate room boxes produced by SAM for adjacent labels (F-C).
+
+        Two distinct label centroids inside one enclosing region yield the same
+        SAM mask. Keep the higher-priority box (sam_expanded first, then larger
+        area); drop any later box overlapping a kept box with IoU >= threshold.
+        Operates on xywh bboxes.
+        """
+        def _iou_xywh(a, b):
+            ax1, ay1, aw, ah = a
+            bx1, by1, bw, bh = b
+            ax2, ay2, bx2, by2 = ax1 + aw, ay1 + ah, bx1 + bw, by1 + bh
+            ix1, iy1 = max(ax1, bx1), max(ay1, by1)
+            ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+            if ix2 <= ix1 or iy2 <= iy1:
+                return 0.0
+            inter = (ix2 - ix1) * (iy2 - iy1)
+            union = aw * ah + bw * bh - inter
+            return inter / union if union > 0 else 0.0
+
+        def _priority(r):
+            b = r.get("bbox", [])
+            area = b[2] * b[3] if len(b) == 4 else 0
+            return (1 if r.get("sam_expanded") else 0, area)
+
+        ordered = sorted(rooms, key=_priority, reverse=True)
+        kept: List[dict] = []
+        dropped = 0
+        for room in ordered:
+            b = room.get("bbox", [])
+            if len(b) != 4:
+                kept.append(room)
+                continue
+            if any(
+                len(k.get("bbox", [])) == 4 and _iou_xywh(b, k["bbox"]) >= iou_threshold
+                for k in kept
+            ):
+                dropped += 1
+                continue
+            kept.append(room)
+        if dropped:
+            logger.info(f"F-C dedup: removed {dropped} duplicate SAM box(es)")
+        return kept
+
+    def _filter_vlm_rooms_by_ocr_proximity(self, vlm_rooms, ocr_rooms, radius_px: int = 300):
+        """FIX-A: Drop VLM rooms whose centroid has no OCR room candidate within radius_px.
+
+        VLM rooms detected from margin text (BOM tables, notes blocks) have no
+        OCR corroboration nearby because OCR already filters those regions via
+        documentation/equipment exclusion patterns.  VLM rooms inside the actual
+        floor plan body always have OCR labels within a short distance.
+
+        Args:
+            vlm_rooms:  List of RoomAnnotation objects from the VLM backend.
+            ocr_rooms:  List of RoomCandidate objects from PaddleOCR.
+            radius_px:  Max centroid-to-centroid distance to count as corroborated.
+
+        Returns:
+            Filtered list of RoomAnnotation objects.
+        """
+        # Pre-compute OCR centroids (OCR bbox is xywh)
+        ocr_centroids = []
+        for ocr in ocr_rooms:
+            b = ocr.bbox
+            if len(b) == 4:
+                ox, oy, ow, oh = b
+                ocr_centroids.append((ox + ow // 2, oy + oh // 2))
+
+        kept = []
+        dropped = 0
+        for room in vlm_rooms:
+            bbox = room.bbox
+            if len(bbox) != 4:
+                kept.append(room)
+                continue
+            # VLM bbox is xywh
+            rx, ry, rw, rh = bbox
+            cx, cy = rx + rw // 2, ry + rh // 2
+
+            corroborated = any(
+                abs(cx - ox) <= radius_px and abs(cy - oy) <= radius_px
+                for ox, oy in ocr_centroids
+            )
+            if corroborated:
+                kept.append(room)
+            else:
+                logger.debug(
+                    f"FIX-A: dropped VLM room '{room.room_name}' at ({cx},{cy}) "
+                    f"— no OCR room within {radius_px}px"
+                )
+                dropped += 1
+
+        if dropped:
+            logger.info(
+                f"FIX-A OCR proximity filter: {dropped} margin/BOM room(s) dropped, "
+                f"{len(kept)} kept"
+            )
+        return kept
+
+    def _detect_rooms_maybe_tiled(self, img_path: Path, vlm) -> List[dict]:
+        """Run tiled or full-image room detection for local VLM backends.
+
+        Tiling activates when:
+          - config.use_tiling is True, AND
+          - max(img_w, img_h) > config.tile_trigger_px
+
+        Hallucination detection and the 25-room cap run AFTER tile merge (global),
+        not per-tile, so the limits apply to the full-image result.
+        """
+        if not self.config.use_tiling:
+            return vlm.detect_rooms(img_path)
+
+        from PIL import Image as _PIL
+        try:
+            full_img = _PIL.open(img_path).convert("RGB")
+        except Exception as e:
+            logger.warning(f"Tiling: could not open {img_path.name}: {e}. Falling back.")
+            return vlm.detect_rooms(img_path)
+
+        full_w, full_h = full_img.size
+        if max(full_w, full_h) <= self.config.tile_trigger_px:
+            logger.debug(
+                f"Tiling skipped: {full_w}x{full_h} <= trigger {self.config.tile_trigger_px}px"
+            )
+            return vlm.detect_rooms(img_path)
+
+        try:
+            from tile_splitter import TileSplitter
+        except ImportError:
+            logger.warning("tile_splitter not importable — falling back to full-image")
+            return vlm.detect_rooms(img_path)
+
+        # Adaptive grid: derive tile count from image size so each tile is about
+        # tile_target_px, capped at tile_cols x tile_rows. Finer grid on dense
+        # floors improves VLM room localization. tile_target_px=0 → fixed grid.
+        if self.config.tile_target_px > 0:
+            cols = max(2, min(self.config.tile_cols,
+                              round(full_w / self.config.tile_target_px)))
+            rows = max(2, min(self.config.tile_rows,
+                              round(full_h / self.config.tile_target_px)))
+        else:
+            cols, rows = self.config.tile_cols, self.config.tile_rows
+
+        splitter = TileSplitter(
+            cols=cols,
+            rows=rows,
+            overlap_pct=self.config.tile_overlap_pct,
+        )
+        tiles = splitter.split(full_img)
+        logger.info(
+            f"{img_path.name}: tiling {full_w}x{full_h} -> "
+            f"{len(tiles)} tiles ({cols}x{rows}, "
+            f"overlap={self.config.tile_overlap_pct:.0%})"
+        )
+
+        all_rooms: List[dict] = []
+        for tile_img, meta in tiles:
+            try:
+                tile_rooms = vlm.detect_rooms_from_image(tile_img)
+                tile_rooms = splitter.rescale_rooms(tile_rooms, meta)
+                logger.debug(
+                    f"  Tile ({meta.col},{meta.row}): {len(tile_rooms)} rooms detected"
+                )
+                all_rooms.extend(tile_rooms)
+            except Exception as e:
+                logger.warning(f"  Tile ({meta.col},{meta.row}) failed: {e} — skipping")
+
+        # Global hallucination check + NMS merge AFTER all tiles collected.
+        # Cap 40 (not 25): dense residential floors carry 30+ units; a 25 cap
+        # would discard real rooms that finer adaptive tiling just recovered.
+        all_rooms = vlm.detect_hallucinations(all_rooms)
+        merged = splitter.merge(all_rooms, iou_threshold=0.30, max_rooms=40)
+        logger.info(
+            f"{img_path.name}: tiling complete — {len(all_rooms)} raw -> "
+            f"{len(merged)} after NMS"
+        )
+        return merged
 
     def _qwen_dicts_to_vlm_result(self, rooms_dicts: List[dict], img_path: Path):
         """Convert Qwen backend dict output to VLMAnnotationResult."""
@@ -1171,52 +1503,57 @@ class AnnotationPipeline:
         if result.error:
             data["vlm_error"] = result.error
 
-        # Build SFT format ("roomsRecognized" key)
+        # Build SFT format ("roomsRecognized") from the merged VLM+OCR room list.
+        # When the VLM produces 0 valid rooms (stripe rejection), OCR rooms are
+        # used so that raw annotations reflect what OCR actually found.
+        merged_room_dicts = _merge_vlm_and_ocr(data["rooms"], data["ocr_rooms"])
+
         sft_rooms = []
-        for idx, vlm_room in enumerate(result.rooms, start=1):
-            # Normalize category to mandatory class
-            mandatory_type = normalize_to_mandatory(vlm_room.category)
-            extended_type = get_extended_type(vlm_room.category)
-            
-            # Convert bbox from [x, y, w, h] to [x1, y1, x2, y2]
-            bbox = vlm_room.bbox
-            if len(bbox) == 4:
-                x, y, w, h = bbox
-                bbox_x1y1x2y2 = [x, y, x + w, y + h]
+        for idx, room_dict in enumerate(merged_room_dicts, start=1):
+            name = room_dict.get("room_name") or room_dict.get("name", "")
+            number = room_dict.get("room_number", "")
+            cat = room_dict.get("category") or room_dict.get("type") or name
+            mandatory_type = normalize_to_mandatory(cat)
+            extended_type = get_extended_type(cat)
+            source = room_dict.get("source", "vlm_only")
+            ocr_conf = float(room_dict.get("confidence", 1.0))
+
+            # Normalise bbox to [x1,y1,x2,y2].  Legacy VLM rooms store xywh;
+            # OCR rooms store xywh tuples.  Both are in data["rooms"]/["ocr_rooms"].
+            raw_bbox = room_dict.get("bbox", [0, 0, 0, 0])
+            if len(raw_bbox) == 4:
+                bx, by, bw, bh = [int(v) for v in raw_bbox]
+                # xywh → xyxy
+                bbox_xyxy = [bx, by, bx + bw, by + bh]
             else:
-                bbox_x1y1x2y2 = bbox
-            
-            # Build SFT room with VLM source
+                bbox_xyxy = [int(v) for v in raw_bbox]
+
             sft_room = self.sft_builder.build_room(
                 room_id=idx,
                 mandatory_type=mandatory_type,
-                original_name=vlm_room.room_name,
-                room_number=vlm_room.room_number,
-                bbox=bbox_x1y1x2y2,
-                detection_score=0.9,  # VLM default
-                classification_match_type="vlm",  # VLM classification
-                ocr_confidence=1.0,  # VLM-generated, no OCR uncertainty
-                source="vlm_only",
+                original_name=name,
+                room_number=number,
+                bbox=bbox_xyxy,
+                detection_score=0.9 if "confidence" not in room_dict else ocr_conf,
+                classification_match_type="vlm" if source == "vlm_only" else "ocr",
+                ocr_confidence=ocr_conf,
+                source=source,
                 extended_type=extended_type,
-                detection_method="vlm",
-                detection_model=self.config.vlm.backend,
+                detection_method="vlm" if source == "vlm_only" else "ocr",
+                detection_model=self.config.vlm.backend if source == "vlm_only" else "PaddleOCR",
             )
             sft_rooms.append(self.sft_builder.to_dict(sft_room))
-        
+
         # Add roomsRecognized to data
         data["roomsRecognized"] = sft_rooms
 
-        # Bbox-format-sync invariant.
-        # The annotation carries the same bbox in two representations during
-        # the xywh→xyxy migration:
-        #   - data["rooms"][i]["bbox"]                              = [x, y, w, h]
-        #   - data["roomsRecognized"][i]["coordinates"]["bbox"]      = [x, y, x+w, y+h]
-        # Drift between the two is a silent SFT-data corruption source, so we
-        # assert the relationship on every save.  Once the legacy "rooms" key
-        # is removed (final step of the migration), drop this block.
+        # Bbox-format-sync invariant: verify that VLM-sourced entries in
+        # roomsRecognized carry xyxy bboxes that match the xywh in rooms[].
+        # Count divergence is expected when OCR-only rooms augment roomsRecognized,
+        # so skip the per-room check in that case.
         _legacy_rooms = data.get("rooms", [])
         _sft_rooms = data.get("roomsRecognized", [])
-        if len(_legacy_rooms) == len(_sft_rooms):
+        if _legacy_rooms and len(_legacy_rooms) == len(_sft_rooms):
             for _i, (_lr, _sr) in enumerate(zip(_legacy_rooms, _sft_rooms)):
                 _lb = _lr.get("bbox", [])
                 _sb = (_sr.get("coordinates") or {}).get("bbox", [])
@@ -1224,98 +1561,69 @@ class AnnotationPipeline:
                     _x, _y, _w, _h = _lb
                     _expected = [_x, _y, _x + _w, _y + _h]
                     if [float(v) for v in _sb] != [float(v) for v in _expected]:
-                        logger.error(
+                        raise ValueError(
                             f"Bbox-sync invariant violated at index {_i}: "
                             f"rooms[].bbox={_lb} (xywh) → expected "
                             f"roomsRecognized[].coordinates.bbox={_expected}, "
                             f"got {_sb}"
                         )
-        elif _legacy_rooms or _sft_rooms:
-            logger.error(
-                f"Bbox-sync invariant violated: rooms[] has {len(_legacy_rooms)} entries, "
-                f"roomsRecognized[] has {len(_sft_rooms)} entries"
-            )
 
         # Add preliminary sft_ready flag (will be recomputed in post-processing step)
         # Setting to False here ensures a safe default if post-processing is skipped
         data["sft_ready"] = False
 
-        # Phase 2: Window detection — runs in parallel with room classification.
-        # Results are fused into the roomsRecognized attributes block and used
-        # to compose the final type string (base type + optional suffix).
-        try:
-            # Load image array for Tier 2/3 detection (best-effort)
-            image_array = None
-            if img_path is not None:
-                try:
-                    from PIL import Image as _PIL_Image
-                    import numpy as _np
-                    image_array = _np.array(_PIL_Image.open(img_path).convert("RGB"))
-                except Exception as _e:
-                    logger.debug(f"Could not load image for window detector: {_e}")
+        # Window detection is opt-in (config.use_windows, default False).
+        # Tier 2 (CubiCasa5K) is not yet implemented; Tier 3 reuses the same
+        # VLM backend and adds a 300 s timeout per image with no quality gain.
+        # Only Tier 1 (PDF layer extraction) is safe to run automatically.
+        if self.config.use_windows:
+            try:
+                # Tier 1 only needs the PDF path; skip image-array load.
+                rooms_for_detection = [
+                    {
+                        "id": idx,
+                        "type": r.get("type", "UNKNOWN"),
+                        "bbox": (
+                            [r["bbox"][0], r["bbox"][1],
+                             r["bbox"][0] + r["bbox"][2], r["bbox"][1] + r["bbox"][3]]
+                            if len(r.get("bbox", [])) == 4 else r.get("bbox", [])
+                        ),
+                    }
+                    for idx, r in enumerate(data["rooms"])
+                ]
 
-            # Rooms in the format window_detector.map_windows_to_rooms() expects
-            rooms_for_detection = [
-                {
-                    "id": idx,
-                    "type": r.get("type", "UNKNOWN"),
-                    # bbox is stored as [x, y, w, h] in legacy format;
-                    # window_detector uses [x1, y1, x2, y2]
-                    "bbox": (
-                        [r["bbox"][0], r["bbox"][1],
-                         r["bbox"][0] + r["bbox"][2], r["bbox"][1] + r["bbox"][3]]
-                        if len(r.get("bbox", [])) == 4 else r.get("bbox", [])
-                    ),
-                }
-                for idx, r in enumerate(data["rooms"])
-            ]
-
-            window_mappings = self.window_detector.detect_windows(
-                image_array=image_array,
-                rooms=rooms_for_detection,
-                pdf_path=self._source_pdf_for(img_path),  # Tier 1: PDF layers if available
-                vlm_backend=self.vlm_annotator,            # Tier 3: already loaded VLM
-                img_path=img_path,                         # Tier 3 prefers path over array
-            )
-
-            # Build a mapping_by_id for O(1) lookup
-            mapping_by_id = {m.room_id: m for m in window_mappings}
-
-            # Re-build roomsRecognized entries with window attributes wired in.
-            # We rebuild rather than mutate so the type field and attributes block
-            # are always consistent (both derived from the same mapping).
-            new_sft_rooms = []
-            for idx, vlm_room in enumerate(result.rooms, start=1):
-                mandatory_type = normalize_to_mandatory(vlm_room.category)
-                extended_type  = get_extended_type(vlm_room.category)
-                bbox = vlm_room.bbox
-                if len(bbox) == 4:
-                    x, y, w, h = bbox
-                    bbox_x1y1x2y2 = [x, y, x + w, y + h]
-                else:
-                    bbox_x1y1x2y2 = bbox
-
-                sft_room = self.sft_builder.build_room(
-                    room_id=idx,
-                    mandatory_type=mandatory_type,
-                    original_name=vlm_room.room_name,
-                    room_number=vlm_room.room_number,
-                    bbox=bbox_x1y1x2y2,
-                    detection_score=0.9,
-                    classification_match_type="vlm",
-                    ocr_confidence=1.0,
-                    source="vlm_only",
-                    extended_type=extended_type,
-                    detection_method="vlm",
-                    detection_model=self.config.vlm.backend,
-                    window_mapping=mapping_by_id.get(idx - 1),  # 0-indexed in mapping
+                # Pass vlm_backend=None — Tier 3 (VLM window prompt) is disabled
+                # until Tier 2 (CubiCasa5K) is active.  Only Tier 1 (PDF layers)
+                # runs.  This eliminates the 300 s timeout from the hot path.
+                window_mappings = self._detect_windows_with_timeout(
+                    image_array=None,
+                    rooms_for_detection=rooms_for_detection,
+                    pdf_path=self._source_pdf_for(img_path),
+                    img_path=img_path,
                 )
-                new_sft_rooms.append(self.sft_builder.to_dict(sft_room))
 
-            data["roomsRecognized"] = new_sft_rooms
+                mapping_by_id = {m.room_id: m for m in window_mappings}
 
-        except Exception as e:
-            logger.warning(f"Window detection failed, continuing without attributes: {e}")
+                # Apply window attributes to already-built roomsRecognized entries.
+                updated = []
+                for idx, sft_room in enumerate(data["roomsRecognized"]):
+                    mapping = mapping_by_id.get(idx)
+                    if mapping and (mapping.has_windows or mapping.has_skylights or mapping.has_openings):
+                        coords = sft_room.get("coordinates", {})
+                        attrs = coords.get("attributes", {}) if coords else {}
+                        attrs.update({
+                            "has_windows": mapping.has_windows,
+                            "has_skylights": mapping.has_skylights,
+                            "has_openings": mapping.has_openings,
+                            "window_count": mapping.window_count,
+                        })
+                        if coords:
+                            coords["attributes"] = attrs
+                    updated.append(sft_room)
+                data["roomsRecognized"] = updated
+
+            except Exception as e:
+                logger.warning(f"Window detection failed, continuing without attributes: {e}")
 
         with open(output_path, "w") as f:
             json.dump(data, f, indent=2)
@@ -1398,80 +1706,82 @@ class AnnotationPipeline:
         # Setting to False here ensures a safe default if post-processing is skipped
         data["sft_ready"] = False
 
-        # Phase 2: Window detection — parallel branch to room classification.
-        # img_path is already available in this method's scope.
-        try:
-            # Load image array for Tier 2/3 detection (best-effort)
-            image_array = None
+        # Window detection is opt-in (config.use_windows, default False).
+        # Only Tier 1 (PDF layer extraction) is enabled; Tier 3 (VLM) is
+        # skipped by passing vlm_backend=None.
+        if self.config.use_windows:
             try:
-                from PIL import Image as _PIL_Image
-                import numpy as _np
-                image_array = _np.array(_PIL_Image.open(img_path).convert("RGB"))
-            except Exception as _e:
-                logger.debug(f"Could not load image for window detector: {_e}")
+                rooms_for_detection = [
+                    {
+                        "id": idx,
+                        "type": r.get("category", "UNKNOWN"),
+                        "bbox": (
+                            [r["bbox"][0], r["bbox"][1],
+                             r["bbox"][0] + r["bbox"][2], r["bbox"][1] + r["bbox"][3]]
+                            if len(r.get("bbox", [])) == 4 else r.get("bbox", [])
+                        ),
+                    }
+                    for idx, r in enumerate(data["rooms"])
+                ]
 
-            rooms_for_detection = [
-                {
-                    "id": idx,
-                    "type": r.get("category", "UNKNOWN"),
-                    "bbox": (
-                        [r["bbox"][0], r["bbox"][1],
-                         r["bbox"][0] + r["bbox"][2], r["bbox"][1] + r["bbox"][3]]
-                        if len(r.get("bbox", [])) == 4 else r.get("bbox", [])
-                    ),
-                }
-                for idx, r in enumerate(data["rooms"])
-            ]
-
-            window_mappings = self.window_detector.detect_windows(
-                image_array=image_array,
-                rooms=rooms_for_detection,
-                pdf_path=self._source_pdf_for(img_path),  # Tier 1: PDF layers if available
-                vlm_backend=self.vlm_annotator,            # Tier 3: already loaded VLM
-                img_path=img_path,                         # Tier 3 prefers path over array
-            )
-
-            mapping_by_id = {m.room_id: m for m in window_mappings}
-
-            # Re-build roomsRecognized with window attributes and composed type string
-            new_sft_rooms = []
-            for idx, ocr_room in enumerate(rooms, start=1):
-                mandatory_type = normalize_to_mandatory(ocr_room.room_name)
-                extended_type  = get_extended_type(ocr_room.room_name)
-                bbox = ocr_room.bbox
-                if isinstance(bbox, (tuple, list)) and len(bbox) == 4:
-                    x, y, w, h = bbox
-                    bbox_x1y1x2y2 = [x, y, x + w, y + h]
-                else:
-                    bbox_x1y1x2y2 = list(bbox) if isinstance(bbox, tuple) else bbox
-
-                sft_room = self.sft_builder.build_room(
-                    room_id=idx,
-                    mandatory_type=mandatory_type,
-                    original_name=ocr_room.room_name,
-                    room_number=ocr_room.room_number,
-                    bbox=bbox_x1y1x2y2,
-                    detection_score=0.95,
-                    classification_match_type="exact" if mandatory_type else "fallback",
-                    ocr_confidence=ocr_room.confidence,
-                    source="ocr_only",
-                    extended_type=extended_type,
-                    name_expanded=ocr_room.name_expanded,
-                    detection_method="ocr",
-                    detection_model="PaddleOCR",
-                    ocr_backend="PaddleOCR",
-                    window_mapping=mapping_by_id.get(idx - 1),
+                window_mappings = self._detect_windows_with_timeout(
+                    image_array=None,
+                    rooms_for_detection=rooms_for_detection,
+                    pdf_path=self._source_pdf_for(img_path),
+                    img_path=img_path,
                 )
-                new_sft_rooms.append(self.sft_builder.to_dict(sft_room))
 
-            data["roomsRecognized"] = new_sft_rooms
+                mapping_by_id = {m.room_id: m for m in window_mappings}
 
-        except Exception as e:
-            logger.warning(f"Window detection failed, continuing without attributes: {e}")
+                updated = []
+                for idx, sft_room in enumerate(data["roomsRecognized"]):
+                    mapping = mapping_by_id.get(idx)
+                    if mapping and (mapping.has_windows or mapping.has_skylights or mapping.has_openings):
+                        coords = sft_room.get("coordinates", {})
+                        attrs = coords.get("attributes", {}) if coords else {}
+                        attrs.update({
+                            "has_windows": mapping.has_windows,
+                            "has_skylights": mapping.has_skylights,
+                            "has_openings": mapping.has_openings,
+                            "window_count": mapping.window_count,
+                        })
+                        if coords:
+                            coords["attributes"] = attrs
+                    updated.append(sft_room)
+                data["roomsRecognized"] = updated
+
+            except Exception as e:
+                logger.warning(f"Window detection failed, continuing without attributes: {e}")
 
         output_path = annotations_dir / f"{img_path.stem}.json"
         with open(output_path, "w") as f:
             json.dump(data, f, indent=2)
+
+    def _detect_windows_with_timeout(self, image_array, rooms_for_detection,
+                                      pdf_path, img_path, timeout_sec: int = 300):
+        """Run detect_windows() with a hard wall-clock timeout.
+
+        Returns list of window mappings, or [] on timeout/error.
+        """
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(
+                self.window_detector.detect_windows,
+                image_array=image_array,
+                rooms=rooms_for_detection,
+                pdf_path=pdf_path,
+                vlm_backend=None,  # Tier 3 disabled until Tier 2 (CubiCasa5K) is active
+                img_path=img_path,
+            )
+            try:
+                return future.result(timeout=timeout_sec)
+            except concurrent.futures.TimeoutError:
+                logger.warning(
+                    f"Window detection timed out after {timeout_sec}s for "
+                    f"{img_path} — skipping window attributes for this image."
+                )
+                future.cancel()
+                return []
 
     def _save_config(self, config_path: Path) -> None:
         """Save pipeline configuration for reproducibility."""
@@ -1496,7 +1806,14 @@ class AnnotationPipeline:
             "pipeline": {
                 "use_vlm": self.config.use_vlm,
                 "use_sam": self.config.use_sam,
+                "use_windows": self.config.use_windows,
                 "use_semantic_reconciliation": self.config.use_semantic_reconciliation,
+                "min_rooms_for_sft": self.config.min_rooms_for_sft,
+                "use_tiling": self.config.use_tiling,
+                "tile_cols": self.config.tile_cols,
+                "tile_rows": self.config.tile_rows,
+                "tile_overlap_pct": self.config.tile_overlap_pct,
+                "tile_trigger_px": self.config.tile_trigger_px,
             },
         }
 
@@ -1532,6 +1849,39 @@ class AnnotationPipeline:
         if stats["images_extracted"] > 0:
             review_pct = stats["flagged_for_review"] / stats["images_extracted"] * 100
             print(f"  Review percentage:   {review_pct:.1f}%")
+
+        # Per-image room bbox table from processed_annotations (sft_ready only)
+        processed_dir = output_dir / "processed_annotations"
+        if processed_dir.exists():
+            ann_files = sorted(processed_dir.glob("*.json"))
+            if ann_files:
+                print("\nDetected rooms (sft_ready pages):")
+                MAX_ROOMS_SHOWN = 10  # cap per page to avoid flooding console
+                for ann_path in ann_files:
+                    try:
+                        with open(ann_path) as _f:
+                            ann = json.load(_f)
+                        if not ann.get("sft_ready"):
+                            continue
+                        rooms = ann.get("roomsRecognized", [])
+                        print(f"\n  {ann_path.stem}  ({len(rooms)} rooms)")
+                        for r in rooms[:MAX_ROOMS_SHOWN]:
+                            bbox = (r.get("coordinates") or {}).get("bbox", [])
+                            name = r.get("name", "?")[:28]
+                            rtype = r.get("type", "?")[:20]
+                            conf = r.get("confidence", 0.0)
+                            bbox_str = (
+                                f"[{bbox[0]},{bbox[1]},{bbox[2]},{bbox[3]}]"
+                                if len(bbox) == 4 else "[]"
+                            )
+                            print(
+                                f"    {rtype:<22} {name:<30} "
+                                f"bbox={bbox_str:<26} conf={conf:.2f}"
+                            )
+                        if len(rooms) > MAX_ROOMS_SHOWN:
+                            print(f"    ... +{len(rooms) - MAX_ROOMS_SHOWN} more rooms")
+                    except Exception:
+                        pass
 
         print(f"\nOutput directory: {output_dir}")
         print("\nGenerated files:")
@@ -1683,7 +2033,12 @@ Examples:
         "--use-semantic-reconciliation",
         action="store_true",
         help="Merge OCR text into VLM room polygons via spatial containment "
-             "(requires: pip install shapely)",
+             "(requires: pip install shapely). Now ON by default; this flag is a no-op.",
+    )
+    parser.add_argument(
+        "--no-semantic-reconciliation",
+        action="store_true",
+        help="Disable semantic reconciliation (override the default-on setting).",
     )
     parser.add_argument(
         "--vlm-backend",
@@ -1706,12 +2061,18 @@ Examples:
     )
     parser.add_argument(
         "--unsloth-model",
-        default="qwen2.5-vl-7b",
-        help="Model key for 'unsloth' backend. Options: qwen2.5-vl-7b (default, proven), "
-             "qwen3-vl-2b, qwen3-vl-4b, qwen3-vl-8b",
+        default="qwen3-vl-8b",
+        help="Model key for 'unsloth' backend. Options: qwen3-vl-8b (default, best grounding), "
+             "qwen2.5-vl-7b, qwen3-vl-2b, qwen3-vl-4b",
     )
     parser.add_argument(
         "--use-sam", action="store_true", help="Use SAM for boundary refinement"
+    )
+    parser.add_argument(
+        "--use-windows",
+        action="store_true",
+        help="Enable window detection (Tier 1 PDF layers only; Tier 3 VLM disabled "
+             "until Tier 2 CubiCasa5K is integrated). Default: off.",
     )
     parser.add_argument(
         "--high-detail",
@@ -1732,6 +2093,19 @@ Examples:
     parser.add_argument(
         "--verbose", "-v", action="store_true", help="Enable verbose logging"
     )
+    parser.add_argument(
+        "--min-rooms",
+        type=int,
+        default=1,
+        help="Minimum rooms per image for sft_ready=True (default: 1). "
+             "Images with ≥3 rooms also get sft_recommended=True regardless of this value.",
+    )
+    parser.add_argument(
+        "--no-tiling",
+        action="store_true",
+        help="Disable tiled VLM inference. Send full image to VLM in one pass. "
+             "Tiling is ON by default for local backends when max(w,h) > 3000px.",
+    )
 
     args = parser.parse_args()
 
@@ -1749,8 +2123,14 @@ Examples:
     # Apply CLI overrides
     config.use_vlm = args.use_vlm
     config.use_sam = args.use_sam
+    config.use_windows = args.use_windows
+    config.min_rooms_for_sft = args.min_rooms
+    if args.no_tiling:
+        config.use_tiling = False
     config.ocr.backend = args.ocr_backend
-    config.use_semantic_reconciliation = args.use_semantic_reconciliation
+    if args.no_semantic_reconciliation:
+        config.use_semantic_reconciliation = False
+    # --use-semantic-reconciliation is now a no-op (on by default); kept for compat
     config.vlm.backend = args.vlm_backend
     if args.vlm_model is not None:
         config.vlm.model = args.vlm_model

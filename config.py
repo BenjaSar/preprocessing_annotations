@@ -79,6 +79,14 @@ class OCRConfig:
     # Minimum confidence threshold for OCR results
     confidence_threshold: float = 0.5
 
+    # PaddleOCR text-detection input size limit (longest side).
+    # PaddleOCR's default (960) downsamples large floor-plan pages ~10x, shrinking
+    # small in-plan room labels below the detector's minimum text size — they are
+    # never detected (only large title-block text survives). 4608 keeps labels
+    # legible on both 4500px resized and 9600px original extractions (labels scale
+    # with resolution). Measured: default(960) → 0 unit labels; 4608 → 69.
+    det_limit_side_len: int = 4608
+
     # Whether to apply image preprocessing before OCR
     preprocess: bool = True
 
@@ -240,9 +248,10 @@ class VLMConfig:
     qwen_model: str = "Qwen/Qwen2.5-VL-7B-Instruct"
 
     # Unsloth model key (only used when backend='unsloth')
-    # Options: "qwen2.5-vl-7b" (default, proven), "qwen3-vl-2b", "qwen3-vl-4b", "qwen3-vl-8b"
-    # Override via --unsloth-model CLI flag
-    unsloth_model: str = "qwen2.5-vl-7b"
+    # Options: "qwen2.5-vl-7b", "qwen3-vl-2b", "qwen3-vl-4b", "qwen3-vl-8b" (default)
+    # qwen3-vl-8b has materially better spatial grounding on dense floor plans.
+    # Requires ~8-10GB VRAM at 4-bit. Override via --unsloth-model CLI flag.
+    unsloth_model: str = "qwen3-vl-8b"
 
     def __post_init__(self):
         if self.qwen_device is None:
@@ -305,6 +314,11 @@ class SAMConfig:
     # Whether to output multiple masks
     multimask_output: bool = True
 
+    # Max fraction of image area a single SAM bbox may occupy.
+    # Exceeding this triggers the over-segmentation guardrail and keeps the
+    # original label bbox instead of the SAM result.
+    max_expand_frac: float = 0.25
+
     def __post_init__(self):
         if self.device is None:
             self.device = _detect_device()
@@ -346,10 +360,36 @@ class PipelineConfig:
     use_sam: bool = False
     use_template_matching: bool = False
 
-    # Semantic reconciliation: merge OCR text with VLM room detections (Solution C)
-    # Requires use_vlm=True. When enabled, PaddleOCR text is matched to VLM room polygons
-    # via spatial containment and enriched with OCR-derived room names/numbers.
-    use_semantic_reconciliation: bool = False
+    # Semantic reconciliation: merge OCR text with VLM room detections (Solution C).
+    # Requires use_vlm=True. Enriches VLM rooms with OCR-derived room names/numbers
+    # and provides a spatial match signal used by the SFT validator to reject
+    # VLM rooms with no OCR corroboration (e.g., BOM/margin detections).
+    use_semantic_reconciliation: bool = True
+
+    # Window detection: Tier 1 (PDF layers) + Tier 2 (CubiCasa5K, not yet active)
+    # + Tier 3 (VLM prompt). Default False: Tier 2 is not implemented and Tier 3
+    # adds a 300 s timeout per image with no quality gain until Tier 2 is ready.
+    use_windows: bool = False
+
+    # Minimum rooms required to mark an image sft_ready=True.
+    # Default 1: any image with ≥1 valid room is included.
+    # Images with ≥3 rooms also get sft_recommended=True for higher-quality batches.
+    min_rooms_for_sft: int = 1
+
+    # Tiled VLM inference: splits large images so each tile has higher pixel
+    # density per room, improving spatial grounding.
+    # Activated only when max(img_w, img_h) > tile_trigger_px.
+    # 25-room cap and hallucination detection run AFTER tile merge, not per-tile.
+    use_tiling: bool = True
+    tile_cols: int = 4          # max columns (adaptive grid is capped here)
+    tile_rows: int = 4          # max rows
+    tile_overlap_pct: float = 0.10
+    tile_trigger_px: int = 3000
+    # Adaptive tiling: tile count derived from image size so each tile is about
+    # tile_target_px wide/tall. Dense floors (e.g. 4500px residential) get a
+    # finer grid (≈4x3) than the fixed 2x2, improving VLM room localization.
+    # 0 disables adaptive sizing (falls back to fixed tile_cols x tile_rows).
+    tile_target_px: int = 1200
 
     # Parallel processing
     num_workers: int = 4

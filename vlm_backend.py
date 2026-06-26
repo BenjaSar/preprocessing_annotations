@@ -90,14 +90,34 @@ class VLMBackend(ABC):
         return []
     
     def detect_hallucinations(self, rooms: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """
-        Detect and truncate autoregressive hallucination patterns in room detections.
-        
-        Wrapper around the shared hallucination_detector module.
-        This allows all VLM backends to use the same hallucination detection logic.
-        """
+        """Wrapper around the shared hallucination_detector module."""
         from hallucination_detector import detect_hallucinations as detect_hallucinations_util
         return detect_hallucinations_util(rooms)
+
+    def detect_rooms_from_image(self, image) -> List[Dict[str, Any]]:
+        """
+        Detect rooms from an in-memory PIL Image (used by TileSplitter).
+
+        Saves the image to a temp PNG, calls detect_rooms(path), cleans up.
+        Backends with native in-memory support can override this method.
+
+        Args:
+            image: PIL.Image.Image instance
+
+        Returns:
+            Same format as detect_rooms().
+        """
+        import tempfile, os
+        tmp_fd, tmp_path = tempfile.mkstemp(suffix=".png")
+        try:
+            os.close(tmp_fd)
+            image.save(tmp_path, "PNG")
+            return self.detect_rooms(tmp_path)
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
 
 
 class ClaudeBackend(VLMBackend):
@@ -190,9 +210,12 @@ class ClaudeBackend(VLMBackend):
                 ]
             )
             
-            # Parse response
+            # Parse response — pass image dimensions for percentage→pixel conversion.
+            from PIL import Image as _PIL_Image
+            with _PIL_Image.open(image_path) as _img:
+                _img_width, _img_height = _img.size
             response_text = message.content[0].text
-            rooms = self._parse_room_response(response_text)
+            rooms = self._parse_room_response(response_text, _img_width, _img_height)
             return rooms
             
         except Exception as e:
@@ -234,20 +257,22 @@ General Rules:
 
 Return ONLY a JSON array, e.g.: [{"room_id": "room_0", "room_type": "CONFERENCE", ...}, ...]"""
     
-    def _parse_room_response(self, response_text: str) -> List[Dict[str, Any]]:
-        """Parse JSON response from Claude."""
+    def _parse_room_response(self, response_text: str, img_width: int = 1000, img_height: int = 1000) -> List[Dict[str, Any]]:
+        """Parse JSON response from Claude (bbox values expected as 0-100 percentages)."""
         try:
             # Try to extract JSON array from response
             rooms = json.loads(response_text)
             if not isinstance(rooms, list):
                 rooms = [rooms]
             
-            # Apply hallucination detection before processing
+            # Single consolidated hallucination detector (hallucination_detector.py)
             rooms_before_halluc = len(rooms)
-            rooms = self._truncate_repetitive_patterns(rooms)
-            # Step 2: Log stage-transition counter (after hallucination detection)
+            rooms = self.detect_hallucinations(rooms)
             if rooms_before_halluc != len(rooms):
-                 logger.debug(f"Stage-transition [after-halluc-detect]: {len(rooms)} rooms (dropped {rooms_before_halluc - len(rooms)})")
+                logger.debug(
+                    f"Stage-transition [after-halluc-detect]: {len(rooms)} rooms "
+                    f"(dropped {rooms_before_halluc - len(rooms)})"
+                )
              
              # Cap rooms at 25 (as per prompt specification)
             if len(rooms) > 25:
@@ -331,10 +356,10 @@ Return ONLY a JSON array, e.g.: [{"room_id": "room_0", "room_type": "CONFERENCE"
             if dropped_count > 0:
                 logger.info(f"Dropped {dropped_count} rooms with invalid bboxes")
             
-            logger.debug(f"Parsed {len(normalized)} rooms from Qwen response")
+            logger.debug(f"Parsed {len(normalized)} rooms from Claude response")
             return normalized
         except (json.JSONDecodeError, AttributeError, ValueError) as e:
-            logger.error(f"Failed to parse Qwen response: {e}")
+            logger.error(f"Failed to parse Claude response: {e}")
             logger.debug(f"Response text: {response_text[:500]}")
             return []
     
@@ -1014,9 +1039,12 @@ class UnslothQwenBackend(VLMBackend):
                  logger.info(f"Resizing image from {width}x{height} to {new_size[0]}x{new_size[1]} (scale={resize_scale:.2f})")
                  image = image.resize(new_size, Image.Resampling.LANCZOS)
              
-             # Build room detection prompt
-             prompt = self._build_room_detection_prompt()
-             
+             # Build room detection prompt with actual pixel dimensions so the
+             # model produces pixel-coordinate bboxes (Qwen2.5-VL grounding
+             # training used pixel coords, not fractions).
+             img_width, img_height = image.size
+             prompt = self._build_room_detection_prompt(img_width, img_height)
+
              # Prepare chat messages in Unsloth format
              messages = [
                  {
@@ -1042,15 +1070,17 @@ class UnslothQwenBackend(VLMBackend):
                  return_tensors="pt",
              ).to(self.device)
              
-             # Generate response (deterministic decoding for reproducibility)
-             # Increased max_new_tokens to 1536 for 8B model which is less prone to loops
-             # (hallucination detection will catch any patterns that do emerge)
+             # 768 tokens is ample for ≤25 rooms at ~30 tokens/room.
+             # Smaller budget cuts off autoregressive hallucination loops early.
+             # eos_token_id stops generation the moment the JSON array closes.
+             eos_id = self.tokenizer.eos_token_id
              with torch.no_grad():
                  output_ids = self.model.generate(
                      **inputs,
-                     max_new_tokens=1536,
+                     max_new_tokens=768,
                      use_cache=True,
                      do_sample=False,
+                     eos_token_id=eos_id,
                  )
              
              # Decode response: only the generated tokens (exclude input prompt echo)
@@ -1111,176 +1141,54 @@ class UnslothQwenBackend(VLMBackend):
              gc.collect()
              return []
 
-    def _build_room_detection_prompt(self) -> str:
+    def _build_room_detection_prompt(self, img_width: int = 1000, img_height: int = 1000) -> str:
          """
-         Build prompt for room detection to prevent hallucination.
-         
-         Key improvements:
-         - Shortened category list prevents the model from treating it as a checklist
-         - Clear bbox format: fractions from 0.0 to 1.0 (not percentages) to avoid model confusion
-         - Explicit anti-hallucination instruction: "Do NOT invent or fabricate"
-         - Room count limit prevents 75-room generation
+         Build prompt for room detection using pixel coordinates.
+
+         Pixel coords match Qwen2.5-VL grounding training distribution,
+         which prevents the out-of-range fraction values (e.g. 1.2, 2.7)
+         that the old 0-1 fraction prompt consistently produced.
+
+         Args:
+             img_width: Actual image width in pixels (after any resizing).
+             img_height: Actual image height in pixels (after any resizing).
          """
-         return """You are a floor plan annotation expert. Analyze this architectural floor plan image and identify all labeled rooms and spaces that are actually visible in the image.
+         return f"""You are a floor plan annotation expert. The image is {img_width}x{img_height} pixels.
 
- TASK: For each room/space you can see labeled in the floor plan, extract:
-   - room_type: one of PRIVATE OFFICE, OPEN OFFICE, CONFERENCE, LOBBY, CORRIDOR, RESTROOM, STAIRWELL, ELECTRICAL ROOM, STORAGE ROOM, MEETING, or another descriptive type that fits
-   - room_name: the exact label text as written on the plan
-   - bbox: bounding box as [x1, y1, x2, y2] where each value is a decimal fraction from 0.0 to 1.0
-     representing the position as a fraction of image width/height.
-     (x1,y1) is top-left corner, (x2,y2) is bottom-right corner.
-     ALL values MUST be between 0.0 and 1.0.
+TASK: Identify every labeled room or space visible in this floor plan.
 
- INCLUDE only: physical rooms and labeled spaces (offices, restrooms, corridors, etc.)
- EXCLUDE: legends, title blocks, schedules, notes, equipment labels, panel lists
+For each room output:
+  - room_type: OFFICE, CONFERENCE, CORRIDOR, RESTROOM, LOBBY, KITCHEN, STORAGE, STAIRWELL, ELEVATOR, or OTHER
+  - room_name: exact label text from the plan
+  - bbox: [x1, y1, x2, y2] in INTEGER PIXELS (top-left origin).
+    x values in [0, {img_width}], y values in [0, {img_height}].
+  - confidence: 0.0-1.0
 
- Office rule: PRIVATE OFFICE = enclosed with walls/doors; OPEN OFFICE = shared open area
+INCLUDE: enclosed rooms and labeled spaces that are INSIDE the floor plan boundary lines (walls).
+EXCLUDE: legends, title blocks, BOM tables, schedules, notes, panel labels, and any text in the margins or corners of the image.
 
- Return ONLY a JSON array. Example format (do not copy exact values):
- [{"room_id": "room_0", "room_type": "CONFERENCE", "room_name": "Conf Rm A",
-   "bbox": [0.1, 0.2, 0.4, 0.5], "confidence": 0.9}]
+SPATIAL RULE: The architectural drawing is in the CENTER of the image surrounded by margins.
+Do NOT detect anything in margin areas (corners, edges, table blocks) even if they contain room names.
+A valid room detection must be inside the floor plan boundary walls, not in a table or text block.
 
- Rules:
- - ONLY include rooms that have visible labels in the image
- - Do NOT invent or fabricate rooms that are not shown
- - All bbox values MUST be decimals between 0.0 and 1.0 (not 0-100, not pixel coords)
- - Maximum 25 rooms
-  - Return valid JSON only, no markdown"""
+CRITICAL — the bbox must enclose the ENTIRE room: its surrounding walls/boundary,
+not just the label text. A room is much larger than its text label. Draw the box
+from wall to wall, with the label inside it.
 
-    def _truncate_repetitive_patterns(self, rooms: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-         """
-         Detect and truncate autoregressive hallucination patterns.
-         
-         Qwen3-VL can enter loops generating repetitive bboxes. This method detects
-         multiple hallucination patterns:
-         1. Identical bbox repetition: N rooms with exact same bbox
-         2. Grid pattern: rooms on regular grid (constant x-step AND y-step)
-         3. Incremental y-delta: same x-coords, incrementing y (original pattern)
-         """
-         if len(rooms) < 2:
-             return rooms
-         
-         # Pattern 1: Detect identical bboxes (indicates infinite loop at same location)
-         # If we see 3+ identical bboxes, keep only the first one
-         try:
-             seen_bboxes = {}
-             first_unique_indices = []
-             duplicate_start = None
-             
-             for i, room in enumerate(rooms):
-                 bbox = tuple(room.get("bbox", []))
-                 if bbox and len(bbox) == 4:
-                     # Convert to a hashable tuple for comparison
-                     bbox_key = tuple(int(v * 100) for v in bbox)  # quantize to nearest 1/100
-                     
-                     if bbox_key not in seen_bboxes:
-                         seen_bboxes[bbox_key] = []
-                         first_unique_indices.append(i)
-                     seen_bboxes[bbox_key].append(i)
-             
-             # Check if any bbox appears 3+ times
-             for bbox_key, indices in seen_bboxes.items():
-                 if len(indices) >= 3:
-                     duplicate_start = min(indices[1:])  # start of duplicates (skip first)
-                     logger.warning(
-                         f"Detected identical bbox hallucination at room {indices[0]}: "
-                         f"bbox appears {len(indices)} times (indices {indices}). "
-                         f"Truncating list at position {duplicate_start}"
-                     )
-                     return rooms[:duplicate_start]
-         except (TypeError, ValueError, IndexError):
-             pass
-         
-         # Pattern 2: Detect grid pattern (room grid like 3x3, 4x3, etc)
-         # If rooms form a regular grid with constant x-step and y-step, it's likely hallucinated
-         if len(rooms) >= 6:
-             try:
-                 # Extract all bboxes and check for grid regularity
-                 bboxes = []
-                 for room in rooms:
-                     bbox = room.get("bbox", [])
-                     if bbox and len(bbox) == 4:
-                         bboxes.append(bbox)
-                     else:
-                         break  # Stop if we hit an invalid bbox
-                 
-                 if len(bboxes) >= 6:
-                     # Check for grid pattern: collect all unique x1 and y1 values
-                     x1_values = set()
-                     y1_values = set()
-                     
-                     for bbox in bboxes:
-                         # Quantize to avoid floating point issues
-                         x1_key = int(bbox[0] * 100)
-                         y1_key = int(bbox[1] * 100)
-                         x1_values.add(x1_key)
-                         y1_values.add(y1_key)
-                     
-                     # Grid detection: if rooms fit into a regular grid pattern (e.g., 3x3, 2x3, 4x2)
-                     # then we expect num_rooms = num_x_values * num_y_values
-                     num_x = len(x1_values)
-                     num_y = len(y1_values)
-                     
-                     if num_x >= 2 and num_y >= 2 and (num_x * num_y) >= 6:
-                         # Check if actual rooms match grid dimensions (allowing some tolerance)
-                         expected_grid = num_x * num_y
-                         actual_rooms = len(bboxes)
-                         
-                         # If we have close to expected grid size, it's probably a hallucination
-                         if abs(actual_rooms - expected_grid) <= 1:
-                             logger.warning(
-                                 f"Detected grid pattern hallucination: "
-                                 f"{actual_rooms} rooms on {num_x}x{num_y} grid. "
-                                 f"Truncating entire list"
-                             )
-                             return rooms[:0]  # Return empty list
-             except (TypeError, ValueError, IndexError):
-                 pass
-         
-         # Pattern 3: Check for pattern with same x-coords, incrementing y by consistent delta
-         # This is the original pattern detector
-         if len(rooms) >= 4:
-             for i in range(len(rooms) - 3):
-                 r0, r1, r2, r3 = rooms[i:i+4]
-                 
-                 # Extract bboxes
-                 b0 = r0.get("bbox", [])
-                 b1 = r1.get("bbox", [])
-                 b2 = r2.get("bbox", [])
-                 b3 = r3.get("bbox", [])
-                 
-                 if not all(len(b) == 4 for b in [b0, b1, b2, b3]):
-                     continue
-                 
-                 try:
-                     # Check if x-coords match (same left/right edges)
-                     x0_match = abs(b0[0] - b1[0]) < 0.01 and abs(b0[2] - b1[2]) < 0.01
-                     x1_match = abs(b1[0] - b2[0]) < 0.01 and abs(b1[2] - b2[2]) < 0.01
-                     x2_match = abs(b2[0] - b3[0]) < 0.01 and abs(b2[2] - b3[2]) < 0.01
-                     
-                     if not (x0_match and x1_match and x2_match):
-                         continue
-                     
-                     # Check if y-coords increment by consistent delta
-                     delta_01 = b1[1] - b0[1]
-                     delta_12 = b2[1] - b1[1]
-                     delta_23 = b3[1] - b2[1]
-                     
-                     # Allow ±5% tolerance on delta consistency
-                     if (abs(delta_01 - delta_12) < 0.05 and 
-                         abs(delta_12 - delta_23) < 0.05 and 
-                         0.15 < delta_01 < 0.35):
-                         
-                         logger.warning(
-                             f"Detected y-delta hallucination pattern at room {i}: "
-                             f"repetitive bboxes with constant y-delta={delta_01:.3f}. "
-                             f"Truncating list at position {i}"
-                         )
-                         return rooms[:i]
-                 except (TypeError, ValueError, IndexError):
-                     continue
-         
-         return rooms
+Return ONLY a JSON array, no markdown:
+[{{"room_id": "<id>", "room_type": "<type>", "room_name": "<label>", "bbox": [<x1>, <y1>, <x2>, <y2>], "confidence": <0-1>}}]
+
+CRITICAL — bbox values must be the ACTUAL pixel location you observe in the image.
+Never reuse any numbers from this prompt text.
+
+Rules:
+- Only rooms with visible labels in the image.
+- Do NOT fabricate rooms.
+- Maximum 25 rooms.
+- Every room must be at a DISTINCT location — no two rooms share the same x1 and y1.
+- bbox must have positive width and height (x2 > x1, y2 > y1).
+- bbox must span the room's walls, not the label glyphs."""
+
 
     def _parse_room_response(self, response_text: str, img_width: int = 1000, img_height: int = 1000) -> List[Dict[str, Any]]:
         """Parse JSON response from Unsloth Qwen."""
@@ -1344,45 +1252,46 @@ class UnslothQwenBackend(VLMBackend):
             if not isinstance(rooms, list):
                 rooms = [rooms]
             
-            # Normalize response format with bbox validation
+            # Validate and normalise pixel-coordinate bboxes.
+            # The prompt now requests integer pixel coords in [0,img_width] x [0,img_height].
             normalized = []
             dropped_count = 0
             for idx, room in enumerate(rooms):
-                # Convert bbox fractions (0.0-1.0) to pixel coordinates using actual image dimensions
                 bbox = room.get("bbox")
                 if bbox and len(bbox) == 4:
                     try:
-                        x1_frac, y1_frac, x2_frac, y2_frac = [float(v) for v in bbox]
+                        x1, y1, x2, y2 = [float(v) for v in bbox]
                     except (ValueError, TypeError):
                         logger.debug(f"Room {idx}: non-numeric bbox values {bbox}, skipping")
                         dropped_count += 1
                         continue
-                    
-                    # Validation: allow slight tolerance for model quirks (0.0-1.2)
-                    # Many VLMs slightly overshoot the 1.0 boundary, so we clamp rather than reject
-                    if any(v < -0.05 or v > 1.2 for v in [x1_frac, y1_frac, x2_frac, y2_frac]):
-                        # Only skip if values are WAY out of bounds
+
+                    # Reject coords that are clearly fractions (all ≤ 1.0) — model
+                    # ignored the pixel instruction; discard rather than silently scale.
+                    if all(v <= 1.0 for v in [abs(x1), abs(y1), abs(x2), abs(y2)]):
                         logger.debug(
-                            f"Room {idx} ({room.get('room_name', '?')}): severely out-of-bounds bbox "
-                            f"[{x1_frac},{y1_frac},{x2_frac},{y2_frac}] (far outside 0.0-1.0), skipping"
+                            f"Room {idx} ({room.get('room_name', '?')}): "
+                            f"looks like fractions not pixels [{x1},{y1},{x2},{y2}], skipping"
                         )
                         dropped_count += 1
                         continue
-                    
-                    # Clamp to valid range [0.0, 1.0] for safety
-                    # This allows models slight flexibility while keeping coords valid
-                    x1_frac = max(0.0, min(1.0, x1_frac))
-                    y1_frac = max(0.0, min(1.0, y1_frac))
-                    x2_frac = max(0.0, min(1.0, x2_frac))
-                    y2_frac = max(0.0, min(1.0, y2_frac))
-                    
-                    # Scale to actual pixel coordinates: multiply fractions by image dimensions
-                    bbox = [
-                        int(x1_frac * img_width),
-                        int(y1_frac * img_height),
-                        int(x2_frac * img_width),
-                        int(y2_frac * img_height)
-                    ]
+
+                    # Clamp to image bounds
+                    x1 = max(0.0, min(float(img_width), x1))
+                    y1 = max(0.0, min(float(img_height), y1))
+                    x2 = max(0.0, min(float(img_width), x2))
+                    y2 = max(0.0, min(float(img_height), y2))
+
+                    # Reject zero-dimension bboxes
+                    if x2 <= x1 or y2 <= y1:
+                        logger.debug(
+                            f"Room {idx} ({room.get('room_name', '?')}): "
+                            f"zero-dimension bbox [{x1},{y1},{x2},{y2}], skipping"
+                        )
+                        dropped_count += 1
+                        continue
+
+                    bbox = [int(x1), int(y1), int(x2), int(y2)]
                 
                 normalized.append({
                     "room_id": room.get("room_id", f"room_{idx}"),
@@ -1398,8 +1307,8 @@ class UnslothQwenBackend(VLMBackend):
                 logger.info(f"Dropped {dropped_count} rooms with invalid bboxes")
             
             logger.debug(f"Parsed {len(normalized)} rooms from Unsloth response")
-            return normalized
-        
+            return self.detect_hallucinations(normalized)
+
         except (json.JSONDecodeError, AttributeError, ValueError) as e:
             logger.error(f"Failed to parse Unsloth Qwen response: {e}")
             logger.debug(f"Response text: {response_text[:500]}")

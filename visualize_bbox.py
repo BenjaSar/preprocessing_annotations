@@ -70,7 +70,7 @@ def _load_font(image_width: int):
 
 
 def draw_annotations(image_path: Path, annotation: dict, output_path: Path,
-                     opacity: float = 0.25) -> int:
+                     opacity: float = 0.25, min_area: int = 0) -> int:
     """Draw bounding boxes from roomsRecognized onto the source image.
 
     Args:
@@ -78,6 +78,7 @@ def draw_annotations(image_path: Path, annotation: dict, output_path: Path,
         annotation:  Parsed annotation dict (must contain 'roomsRecognized').
         output_path: Where to save the visualization PNG.
         opacity:     Fill opacity for bbox rectangles (0.0-1.0).
+        min_area:    Skip boxes whose pixel area (w*h) < min_area (P1).
 
     Returns:
         Number of rooms drawn.
@@ -101,6 +102,9 @@ def draw_annotations(image_path: Path, annotation: dict, output_path: Path,
             continue
 
         x1, y1, x2, y2 = [int(v) for v in bbox]
+        if min_area > 0 and (x2 - x1) * (y2 - y1) < min_area:
+            continue
+
         room_type = room.get("type", "UNKNOWN")
         room_name = room.get("name", "")
         color = _get_color(room_type)
@@ -148,7 +152,8 @@ def draw_annotations(image_path: Path, annotation: dict, output_path: Path,
 
 
 def draw_room_crops(image_path: Path, annotation: dict, output_dir: Path,
-                    padding_pct: float = 0.1, opacity: float = 0.25) -> int:
+                    padding_pct: float = 0.1, opacity: float = 0.25,
+                    min_area: int = 0) -> int:
     """Draw cropped room regions with bboxes annotated.
 
     Extracts individual rooms from the source image with padding, then draws
@@ -161,6 +166,7 @@ def draw_room_crops(image_path: Path, annotation: dict, output_dir: Path,
         output_dir:  Directory to save cropped region images.
         padding_pct: Percentage of bbox dimension to add as padding (default 0.1 = 10%).
         opacity:     Fill opacity for bbox rectangle (0.0-1.0).
+        min_area:    Skip boxes whose pixel area (w*h) < min_area (P1).
 
     Returns:
         Number of room crops drawn.
@@ -188,6 +194,9 @@ def draw_room_crops(image_path: Path, annotation: dict, output_dir: Path,
         try:
             x1, y1, x2, y2 = [int(v) for v in bbox]
         except (ValueError, TypeError):
+            continue
+
+        if min_area > 0 and (x2 - x1) * (y2 - y1) < min_area:
             continue
 
         # Compute padding (as percentage of bbox dimensions)
@@ -297,6 +306,21 @@ def main():
     parser.add_argument(
         "--verbose", "-v", action="store_true", help="Enable debug logging.",
     )
+    # P0-1: source selection
+    parser.add_argument(
+        "--source", default="processed_annotations",
+        choices=["annotations", "processed_annotations"],
+        help="Annotation set to draw. 'processed_annotations' (default) = final "
+             "SFT spaces after SAM expansion and filtering. "
+             "'annotations' = raw VLM/OCR output for debugging.",
+    )
+    # P1: area filter
+    parser.add_argument(
+        "--min-area", type=int, default=0,
+        dest="min_area",
+        help="Skip boxes whose pixel area (w*h) is below this value "
+             "(e.g. 40000 drops label-sized boxes). Default: 0 (no filter).",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -306,12 +330,27 @@ def main():
     )
 
     input_dir = Path(args.input)
-    annotations_dir = input_dir / "annotations"
     images_dir = input_dir / "images"
 
-    if not annotations_dir.is_dir():
+    # P0-1 + P0-2: resolve annotation source with fallback
+    requested_dir = input_dir / args.source
+    if requested_dir.is_dir() and any(requested_dir.glob("*.json")):
+        annotations_dir = requested_dir
+        logger.info(f"Source: {args.source}/")
+    elif args.source == "processed_annotations":
+        fallback = input_dir / "annotations"
+        if fallback.is_dir():
+            logger.warning(
+                f"processed_annotations/ absent or empty — falling back to annotations/"
+            )
+            annotations_dir = fallback
+        else:
+            logger.error(f"Neither processed_annotations/ nor annotations/ found in {input_dir}")
+            sys.exit(1)
+    else:
         logger.error(f"annotations/ not found in {input_dir}")
         sys.exit(1)
+
     if not images_dir.is_dir():
         logger.error(f"images/ not found in {input_dir}")
         sys.exit(1)
@@ -366,13 +405,15 @@ def main():
         # Generate overview (full image with all bboxes)
         out_name = json_path.stem + "_overview.png"
         out_path = overview_dir / out_name
-        drawn = draw_annotations(image_path, annotation, out_path, args.opacity)
+        drawn = draw_annotations(image_path, annotation, out_path, args.opacity,
+                                 min_area=args.min_area)
         total_rooms += drawn
         logger.debug(f"  Overview: {out_name} ({drawn} rooms)")
 
         # Generate room crops (individual rooms with bbox annotated)
         crops_drawn = draw_room_crops(image_path, annotation, regions_dir,
-                                      padding_pct=0.1, opacity=args.opacity)
+                                      padding_pct=0.1, opacity=args.opacity,
+                                      min_area=args.min_area)
         total_crops += crops_drawn
         logger.debug(f"  Room crops: {crops_drawn} regions saved")
 

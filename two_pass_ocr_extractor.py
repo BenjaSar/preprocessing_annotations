@@ -55,15 +55,17 @@ class TwoPassOCRExtractor:
         self,
         ocr_config: OCRConfig,
         vlm_backend: Optional[VLMBackend] = None,
-        confidence_threshold: float = 0.7,
+        confidence_threshold: float = 0.92,
     ):
         """
         Initialize two-pass OCR extractor.
-        
+
         Args:
             ocr_config: OCRConfig for Pass 1 (PaddleOCR)
             vlm_backend: VLMBackend for Pass 2 fallback (optional)
-            confidence_threshold: Use VLM fallback if confidence < this value (default: 0.7)
+            confidence_threshold: Use VLM fallback if confidence < this value (default: 0.92).
+                PaddleOCR typically returns >0.97 on legible floor plan text; 0.92 triggers
+                the fallback only for tokens that are genuinely ambiguous.
         
         Raises:
             ValueError: If confidence_threshold not in [0.0, 1.0]

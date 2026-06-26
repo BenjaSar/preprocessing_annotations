@@ -13,6 +13,13 @@ from PIL import Image, ImageDraw, ImageFont
 logger = logging.getLogger(__name__)
 
 
+def _attr(obj, name: str, default=None):
+    """Get attribute from dataclass or key from dict."""
+    if isinstance(obj, dict):
+        return obj.get(name, default)
+    return getattr(obj, name, default)
+
+
 class BboxVisualizer:
     """Draw bounding boxes on images for visual inspection."""
 
@@ -77,18 +84,14 @@ class BboxVisualizer:
             }
 
             for i, room in enumerate(rooms):
-                bbox = room.get("bbox")
+                bbox = _attr(room, "bbox")
                 if not bbox or len(bbox) < 4:
                     continue
 
-                # Room dicts produced by the VLM use "type" or "category"
-                # (and sometimes both); "room_type" is not a field anywhere
-                # in the pipeline schema, so the previous lookup always
-                # fell through to the "other" gray.
                 room_type = (
-                    room.get("type")
-                    or room.get("category")
-                    or room.get("room_type")
+                    _attr(room, "type")
+                    or _attr(room, "category")
+                    or _attr(room, "room_type")
                     or "other"
                 )
                 color = color_map.get(room_type, color_map["other"])
