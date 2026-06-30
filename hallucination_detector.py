@@ -20,7 +20,7 @@ from typing import Any, Dict, List
 logger = logging.getLogger(__name__)
 
 
-def detect_hallucinations(rooms: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def detect_hallucinations(rooms: List[Dict[str, Any]], check_stripes: bool = True) -> List[Dict[str, Any]]:
     """
     Detect and truncate autoregressive hallucination patterns in room detections.
     
@@ -265,10 +265,12 @@ def detect_hallucinations(rooms: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                         total_names = len([n for n in names if n])
                         name_uniqueness = unique_names / total_names if total_names > 0 else 0.0
 
-                        # cv==0 (stdev=0) across N rooms is the signature of template
-                        # output regardless of name diversity: a genuine detection system
-                        # produces at least rounding-level variance across distinct positions.
-                        if width_cv == 0.0 and height_cv == 0.0:
+                        # cv near-zero across N rooms is the signature of template output
+                        # regardless of name diversity: a genuine detection system produces
+                        # at least rounding-level variance across distinct positions.
+                        # Threshold 0.005 catches Qwen's 0.1-step grid (cv≈0.001) which
+                        # slips through the exact ==0.0 check due to float rounding.
+                        if width_cv < 0.005 and height_cv < 0.005:
                             logger.warning(
                                 f"Identical dimensions (cv=0.000 both axes) across "
                                 f"{len(bboxes)} rooms — template output regardless of "
@@ -309,9 +311,13 @@ def detect_hallucinations(rooms: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     # (common when the model adds minor offsets to an otherwise fixed column)
     # does not prevent the stripe from being detected.
     # 5px << 130px (minimum legitimate room step) so no false positives.
+    # Skipped on per-tile parsing (check_stripes=False): a narrow tile slicing
+    # one row/column of a real office grid legitimately has rooms sharing y1/x1,
+    # which is NOT a stripe hallucination. The gate runs once on the merged
+    # full-page set instead; sft_validator Fix9 is a further backstop.
     _STRIPE_BIN = 5
     n = len(rooms)
-    if n >= 3:
+    if check_stripes and n >= 3:
         x1s = [round(r["bbox"][0] / _STRIPE_BIN) for r in rooms if len(r.get("bbox", [])) == 4]
         y1s = [round(r["bbox"][1] / _STRIPE_BIN) for r in rooms if len(r.get("bbox", [])) == 4]
         if x1s:
