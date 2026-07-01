@@ -89,10 +89,10 @@ class VLMBackend(ABC):
         logger.debug(f"{self.__class__.__name__} does not implement window detection")
         return []
     
-    def detect_hallucinations(self, rooms: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def detect_hallucinations(self, rooms: List[Dict[str, Any]], check_stripes: bool = True) -> List[Dict[str, Any]]:
         """Wrapper around the shared hallucination_detector module."""
         from hallucination_detector import detect_hallucinations as detect_hallucinations_util
-        return detect_hallucinations_util(rooms)
+        return detect_hallucinations_util(rooms, check_stripes=check_stripes)
 
     def detect_rooms_from_image(self, image) -> List[Dict[str, Any]]:
         """
@@ -1101,9 +1101,12 @@ class UnslothQwenBackend(VLMBackend):
              img_width, img_height = image.size
              rooms = self._parse_room_response(response_text, img_width, img_height)
              
-             # F6: Detect and truncate hallucinations before rescaling
+             # F6: Detect and truncate hallucinations before rescaling.
+             # Skip stripe check here — this runs per-tile; a tile may legitimately
+             # hold one grid row. Stripe gate runs once on merged full-page set
+             # (pipeline) + sft_validator Fix9 backstop.
              rooms_before = len(rooms)
-             rooms = self.detect_hallucinations(rooms)
+             rooms = self.detect_hallucinations(rooms, check_stripes=False)
              rooms_after = len(rooms)
              if rooms_before != rooms_after:
                  logger.info(
@@ -1307,7 +1310,9 @@ Rules:
                 logger.info(f"Dropped {dropped_count} rooms with invalid bboxes")
             
             logger.debug(f"Parsed {len(normalized)} rooms from Unsloth response")
-            return self.detect_hallucinations(normalized)
+            # Per-parse (incl. per-tile): skip stripe check — a tile may legitimately
+            # hold one grid row. Stripe gate runs once on merged full-page set.
+            return self.detect_hallucinations(normalized, check_stripes=False)
 
         except (json.JSONDecodeError, AttributeError, ValueError) as e:
             logger.error(f"Failed to parse Unsloth Qwen response: {e}")

@@ -765,13 +765,22 @@ class MEPTextExtractor:
 
         return unmatched
 
+    # Maximum pixel dimension for OCR input. OCR must run on the SAME resolution
+    # as the annotation image_size field. PDF extraction produces 9600×7200 originals;
+    # Step 3a VLM pre-resize targets 4500px. If OCR runs on 9600px, its bbox coords
+    # are ≈2.13× larger than the annotation space → all OCR anchors mislocalized.
+    # Running at ≤4500px keeps coord spaces aligned. 4608 det_limit is still used
+    # (separately configured), giving full in-plan label recall at 4500px input.
+    _OCR_MAX_DIM_PX: int = 4500
+
     def extract_and_find_rooms(self, image_path: str | Path):
         """
         Extract text and find room candidates, returning BOTH results.
 
-        Returns a tuple (candidates, raw_detections) so callers can pass
-        raw_detections directly to AbbreviationOCRRecovery instead of
-        calling extract_text() a second time (avoids double OCR per image).
+        Resizes the image to ≤_OCR_MAX_DIM_PX before OCR so that OCR bbox
+        coordinates match the annotation image_size (also ≤4500px after Step 3a
+        VLM pre-resize). Without this, OCR on 9600px originals produces coords
+        ≈2.13× off, causing all OCR anchors to be mislocalized.
 
         Args:
             image_path: Path to the image file.
@@ -779,9 +788,114 @@ class MEPTextExtractor:
         Returns:
             Tuple of (List[RoomCandidate], List[TextDetection]).
         """
-        raw_detections = self.extract_text(image_path)
+        image_path = Path(image_path)
+        ocr_path = image_path  # default: use original
+
+        # Resize in-memory to ≤_OCR_MAX_DIM_PX if the image is larger
+        import tempfile, os
+        _tmp = None
+        try:
+            from PIL import Image as _PIL
+            with _PIL.open(image_path) as _img:
+                orig_w, orig_h = _img.size
+            if max(orig_w, orig_h) > self._OCR_MAX_DIM_PX:
+                scale = self._OCR_MAX_DIM_PX / max(orig_w, orig_h)
+                new_w, new_h = int(orig_w * scale), int(orig_h * scale)
+                logger.info(
+                    f"OCR resize: {orig_w}x{orig_h} → {new_w}x{new_h} "
+                    f"(scale={scale:.3f}) to match annotation coordinate space"
+                )
+                with _PIL.open(image_path) as _img:
+                    resized = _img.resize((new_w, new_h), _PIL.Resampling.LANCZOS)
+                _fd, _tmp = tempfile.mkstemp(suffix=".png")
+                os.close(_fd)
+                resized.save(_tmp, "PNG")
+                ocr_path = Path(_tmp)
+        except Exception as _e:
+            logger.warning(f"OCR pre-resize failed ({_e}), using original")
+
+        try:
+            raw_detections = self.extract_text(ocr_path)
+        finally:
+            if _tmp and os.path.exists(_tmp):
+                try:
+                    os.unlink(_tmp)
+                except OSError:
+                    pass
+
         candidates = self.find_room_candidates(raw_detections)
         return candidates, raw_detections
+
+    def compute_exclusion_zones(
+        self, detections: List[TextDetection], min_cluster_tokens: int = 3
+    ) -> List[Tuple[int, int, int, int]]:
+        """Compute bounding-box exclusion zones from excluded-token clusters (FIX-4).
+
+        Floor plans carry BOM tables, panel schedules, and title blocks whose text
+        was detected by OCR but excluded from room candidates via _is_excluded_token().
+        Rooms/spaces whose centroid lands inside one of these zones are mislocalized
+        (VLM/OCR read a layout element label and placed a detection in the margin).
+
+        Strategy:
+          1. Collect all TextDetections where _is_excluded_token() is True.
+          2. Cluster them spatially: any token within 300px of an existing cluster
+             is joined to it.  Isolated excluded tokens (n < min_cluster_tokens)
+             are ignored — they are rare equipment labels scattered in the drawing.
+          3. Return the bounding rectangle of each qualifying cluster, expanded by
+             50px on each side so a room centroid just outside the table still hits.
+
+        Args:
+            detections:          All raw TextDetection objects from extract_text().
+            min_cluster_tokens:  Minimum tokens in a cluster to form a zone (default 3).
+
+        Returns:
+            List of (x1, y1, x2, y2) exclusion zone rectangles in image pixel coords.
+        """
+        excluded_dets = [d for d in detections if _is_excluded_token(d.text)]
+        if not excluded_dets:
+            return []
+
+        # Simple greedy clustering by proximity (300px radius)
+        CLUSTER_RADIUS = 300
+        ZONE_PAD = 50
+        clusters: list = []   # each entry = list of TextDetection
+
+        for det in excluded_dets:
+            bx, by, bw, bh = det.bbox
+            cx, cy = bx + bw // 2, by + bh // 2
+            placed = False
+            for cluster in clusters:
+                for member in cluster:
+                    mx, my = member.bbox[0] + member.bbox[2] // 2, member.bbox[1] + member.bbox[3] // 2
+                    if abs(cx - mx) <= CLUSTER_RADIUS and abs(cy - my) <= CLUSTER_RADIUS:
+                        cluster.append(det)
+                        placed = True
+                        break
+                if placed:
+                    break
+            if not placed:
+                clusters.append([det])
+
+        zones = []
+        for cluster in clusters:
+            if len(cluster) < min_cluster_tokens:
+                continue
+            xs = [d.bbox[0] for d in cluster]
+            ys = [d.bbox[1] for d in cluster]
+            x2s = [d.bbox[0] + d.bbox[2] for d in cluster]
+            y2s = [d.bbox[1] + d.bbox[3] for d in cluster]
+            zones.append((
+                max(0, min(xs) - ZONE_PAD),
+                max(0, min(ys) - ZONE_PAD),
+                max(x2s) + ZONE_PAD,
+                max(y2s) + ZONE_PAD,
+            ))
+            logger.debug(
+                f"Exclusion zone: {len(cluster)} excluded tokens → "
+                f"[{zones[-1][0]},{zones[-1][1]},{zones[-1][2]},{zones[-1][3]}]"
+            )
+
+        return zones
 
     def get_label_centers(self, candidates: List[RoomCandidate]) -> List[Tuple[int, int]]:
         """

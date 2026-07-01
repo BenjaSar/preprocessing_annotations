@@ -1,297 +1,153 @@
 """
-CubiCasa5K Window Detection — Tier 2 Integration.
+CubiCasa5K icon detection — Tier 2 integration.
 
-CubiCasa5K is a multi-task CNN that outputs:
-  - Wall segmentation masks
-  - Icon segmentation (windows, doors, furniture)
-  - Junction heatmaps (for wall topology)
+Output layout (44-channel tensor, verified from checkpoint):
+  channels  0–20: junction heatmaps  (sigmoid applied in forward)
+  channels 21–32: room segmentation  (12 classes)
+  channels 33–43: icon segmentation  (11 classes, softmax over this slice)
 
-This module handles model loading, inference, and window extraction.
-
-Reference: https://github.com/CubiCasa/CubiCasa5k
-Paper: arXiv:1904.01920 "Raster-to-Vector: Revisiting Floorplan Transformation"
+Icon classes (index within the 11-class slice):
+  0=Empty, 1=Window, 2=Door, 3=Closet, 4=ElectricalAppliance,
+  5=Toilet, 6=Sink, 7=SaunaBench, 8=FirePlace, 9=Bathtub, 10=Chimney
 """
 
 import logging
-from pathlib import Path
-from typing import Optional, List, Tuple
 from dataclasses import dataclass
-from enum import Enum
-from urllib.request import urlopen
-import os
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
 logger = logging.getLogger(__name__)
 
-# Model URLs and paths
-CUBICASA5K_MODEL_URL = "https://drive.google.com/uc?id=1gRB7ez1e4H7a9Y09lLqRuna0luZO5VRK"
-CUBICASA5K_MODEL_PATH = Path(__file__).parent / "models" / "cubicasa5k_model.pkl"
-CUBICASA5K_MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
+MODEL_PATH = Path(__file__).parent / "models" / "cubicasa5k_model.pkl"
 
+_ICON_OFFSET = 33   # first icon channel in the 44-ch output
+_ICON_N      = 11   # number of icon classes
 
-class IconType(Enum):
-    """CubiCasa5K icon classes in the icon segmentation output."""
-    VOID = 0
-    WINDOW = 1
-    DOOR = 2
-    TOILET = 3
-    BATHTUB = 4
-    SINK = 5
-    FURNITURE = 6
+# Icon slice indices → semantic name (only the ones we expose)
+_DETECTABLE = {1: "window", 2: "door", 5: "toilet", 6: "sink", 9: "bathtub"}
+
+_MAX_SIDE = 1024    # resize to ≤ this before inference (T4 memory constraint)
 
 
 @dataclass
-class WindowMask:
-    """Result of window detection from CubiCasa5K."""
-    mask: np.ndarray  # Binary mask (H, W) where 1 = window pixel
-    bboxes: List[Tuple[float, float, float, float]]  # [x1, y1, x2, y2] per window
-    confidence: float  # Detection confidence (typically 0.9 for model output)
+class IconMask:
+    mask: np.ndarray                              # binary (H, W) uint8 at original resolution
+    bboxes: List[Tuple[float, float, float, float]]  # [(x1,y1,x2,y2), ...]
 
 
 class CubiCasa5KDetector:
-    """
-    CubiCasa5K window detection using pretrained multi-task model.
-
-    The model outputs four channels:
-      - Channel 0: Walls (semantic segmentation)
-      - Channel 1: Windows (icon segmentation channel)
-      - Channel 2: Doors (icon segmentation channel)
-      - Channel 3-N: Other icons (furniture, fixtures)
-
-    We extract windows from Channel 1 and post-process to get bounding boxes.
-    """
-
     def __init__(self, model_path: Optional[Path] = None, device: str = "cuda"):
-        """
-        Initialize CubiCasa5K detector.
-
-        Args:
-            model_path: Path to model checkpoint. Downloads if not found.
-            device: Device for inference ("cuda" or "cpu").
-        """
-        self.model_path = model_path or CUBICASA5K_MODEL_PATH
+        self.model_path = model_path or MODEL_PATH
         self.device = device
         self.model = None
-        self.is_available = False
-
-        # Check if model is available locally
-        if self.model_path.exists():
-            self.is_available = True
-            logger.info(f"CubiCasa5K model found at {self.model_path}")
-        else:
-            logger.warning(
-                f"CubiCasa5K model not found at {self.model_path}. "
-                f"To use Tier 2 detection, download from: "
-                f"{CUBICASA5K_MODEL_URL}"
-            )
+        self.is_available = self.model_path.exists()
+        if not self.is_available:
+            logger.warning(f"CubiCasa5K model not found: {self.model_path}")
 
     def load_model(self) -> bool:
-        """
-        Load pretrained CubiCasa5K model.
-
-        Returns:
-            True if model loaded successfully, False otherwise.
-        """
         if self.model is not None:
-            return True  # Already loaded
-
+            return True
         if not self.is_available:
-            logger.debug("Model not available; cannot load")
             return False
-
         try:
             import torch
-            import pickle
-
-            logger.info(f"Loading CubiCasa5K model from {self.model_path}")
-
-            with open(self.model_path, "rb") as f:
-                checkpoint = pickle.load(f)
-
-            # The loaded checkpoint should be a PyTorch model or dict
-            # For compatibility with older PyTorch, we might need:
-            # checkpoint = torch.load(..., map_location=self.device)
-
-            # Placeholder: actual model instantiation would depend on
-            # the exact format of the checkpoint. The original code uses
-            # a custom architecture. For now, we store the checkpoint.
-
-            self.model = checkpoint
-            logger.info("CubiCasa5K model loaded successfully")
+            from models.seg_model import hg_furukawa_original
+            ckpt = torch.load(self.model_path, map_location=self.device, weights_only=False)
+            m = hg_furukawa_original(n_classes=44)
+            m.load_state_dict(ckpt["model_state"], strict=True)
+            m.eval()
+            m.to(self.device)
+            self.model = m
+            logger.info("CubiCasa5K model loaded")
             return True
-
         except Exception as e:
-            logger.warning(f"Failed to load CubiCasa5K model: {e}")
+            logger.warning(f"CubiCasa5K load failed: {e}")
             return False
 
-    def detect_windows(
-        self, image: np.ndarray, confidence_threshold: float = 0.3
-    ) -> WindowMask:
+    def detect_icons(
+        self, image: np.ndarray, threshold: float = 0.3
+    ) -> Dict[str, IconMask]:
         """
-        Detect windows in floorplan image using CubiCasa5K.
+        Run inference and return per-icon binary masks + bboxes.
 
         Args:
-            image: Input image, shape (H, W, 3), dtype uint8, RGB.
-            confidence_threshold: Confidence threshold for window pixels (0-1).
+            image: RGB uint8 (H, W, 3) at any resolution.
+            threshold: Minimum softmax probability to count as detected.
 
         Returns:
-            WindowMask with binary mask and bounding boxes.
+            Dict keyed by icon name ("window","door","toilet","sink","bathtub").
+            Missing key = no pixels above threshold for that class.
         """
-        if self.model is None:
-            if not self.load_model():
-                logger.warning("Cannot run inference without model")
-                return WindowMask(
-                    mask=np.zeros(image.shape[:2], dtype=np.uint8),
-                    bboxes=[],
-                    confidence=0.0,
-                )
+        if self.model is None and not self.load_model():
+            return {}
 
         try:
             import torch
+            import torch.nn.functional as F
 
-            # Preprocess: normalize and convert to tensor
-            # Typical preprocessing: subtract mean, divide by std, transpose to CHW
-            # CubiCasa5K expects: (H, W, 3) -> (1, 3, H, W)
+            orig_h, orig_w = image.shape[:2]
+            tensor, scale = self._preprocess(image)
 
-            image_tensor = self._preprocess(image)
-
-            # Run inference
             with torch.no_grad():
-                output = self.model(image_tensor)
+                out = self.model(tensor)  # (1, 44, H', W')
 
-            # Extract window channel (channel 1 of icon segmentation)
-            window_mask = self._extract_window_mask(
-                output, threshold=confidence_threshold
-            )
+            # Softmax over the 11 icon classes
+            icon_logits = out[0, _ICON_OFFSET: _ICON_OFFSET + _ICON_N]  # (11, H', W')
+            icon_probs = torch.softmax(icon_logits, dim=0).cpu().numpy()  # (11, H', W')
 
-            # Post-process: connected components, bounding boxes
-            bboxes = self._extract_bboxes(window_mask)
+            results: Dict[str, IconMask] = {}
+            for idx, name in _DETECTABLE.items():
+                prob_map = icon_probs[idx]
+                bin_mask = (prob_map > threshold).astype(np.uint8)
+                if bin_mask.any():
+                    # Upsample mask back to original resolution
+                    if scale < 1.0:
+                        import cv2
+                        bin_mask = cv2.resize(
+                            bin_mask, (orig_w, orig_h), interpolation=cv2.INTER_NEAREST
+                        )
+                    bboxes = self._extract_bboxes(bin_mask)
+                    results[name] = IconMask(mask=bin_mask, bboxes=bboxes)
 
-            return WindowMask(
-                mask=window_mask,
-                bboxes=bboxes,
-                confidence=0.9,  # Model confidence (high for pretrained)
-            )
+            return results
 
         except Exception as e:
             logger.warning(f"CubiCasa5K inference failed: {e}")
-            return WindowMask(
-                mask=np.zeros(image.shape[:2], dtype=np.uint8),
-                bboxes=[],
-                confidence=0.0,
-            )
+            return {}
 
-    def _preprocess(self, image: np.ndarray) -> "torch.Tensor":
-        """
-        Preprocess image for CubiCasa5K model.
+    # ── helpers ──────────────────────────────────────────────────────────────
 
-        Args:
-            image: Input image (H, W, 3), uint8, RGB.
-
-        Returns:
-            Tensor (1, 3, H, W), float32, normalized.
-        """
+    def _preprocess(self, image: np.ndarray) -> Tuple["torch.Tensor", float]:
         import torch
-
-        # Normalize to [0, 1]
-        image_float = image.astype(np.float32) / 255.0
-
-        # ImageNet normalization (typical for vision models)
-        mean = np.array([0.485, 0.456, 0.406])
-        std = np.array([0.229, 0.224, 0.225])
-        image_normalized = (image_float - mean) / std
-
-        # Convert to tensor and transpose: (H, W, 3) -> (3, H, W) -> (1, 3, H, W)
-        image_tensor = torch.from_numpy(
-            image_normalized.transpose(2, 0, 1)
-        ).unsqueeze(0)
-
-        # Move to device
-        image_tensor = image_tensor.to(self.device)
-
-        return image_tensor
-
-    def _extract_window_mask(
-        self, output: "torch.Tensor", threshold: float = 0.3
-    ) -> np.ndarray:
-        """
-        Extract window segmentation from model output.
-
-        Args:
-            output: Model output tensor (logits or probabilities).
-            threshold: Confidence threshold for window pixels.
-
-        Returns:
-            Binary mask (H, W), uint8, where 1 = window, 0 = not window.
-        """
-        import torch
-
-        try:
-            # Assuming output shape: (B, C, H, W) where C >= 2
-            # Channel 1: window probability
-            if len(output.shape) == 4:
-                window_channel = output[0, IconType.WINDOW.value]  # (H, W)
-            else:
-                # Fallback: assume single-channel output
-                window_channel = output
-
-            # Apply softmax if logits
-            if window_channel.max() > 1.0 or window_channel.min() < 0.0:
-                window_probs = torch.softmax(window_channel.unsqueeze(0), dim=1)
-            else:
-                window_probs = window_channel
-
-            # Threshold and convert to numpy
-            mask = (window_probs > threshold).cpu().numpy().astype(np.uint8)
-
-            return mask
-
-        except Exception as e:
-            logger.warning(f"Failed to extract window mask: {e}")
-            return np.zeros(output.shape[-2:], dtype=np.uint8)
-
-    def _extract_bboxes(
-        self, mask: np.ndarray
-    ) -> List[Tuple[float, float, float, float]]:
-        """
-        Extract bounding boxes from binary window mask.
-
-        Uses connected components to identify individual windows.
-
-        Args:
-            mask: Binary mask (H, W), uint8.
-
-        Returns:
-            List of bboxes [(x1, y1, x2, y2), ...].
-        """
-        try:
-            from scipy import ndimage
+        h, w = image.shape[:2]
+        scale = min(1.0, _MAX_SIDE / max(h, w))
+        if scale < 1.0:
             import cv2
+            image = cv2.resize(image, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
+        img = image.astype(np.float32) / 255.0
+        mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+        std  = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+        img = (img - mean) / std
+        tensor = torch.from_numpy(img.transpose(2, 0, 1)).unsqueeze(0).to(self.device)
+        return tensor, scale
 
-            # Label connected components
-            labeled, num_features = ndimage.label(mask)
-
+    @staticmethod
+    def _extract_bboxes(mask: np.ndarray) -> List[Tuple[float, float, float, float]]:
+        try:
+            import cv2
+            from scipy import ndimage
+            labeled, n = ndimage.label(mask)
             bboxes = []
-            for component_id in range(1, num_features + 1):
-                # Get bounding box of this component
-                component_mask = labeled == component_id
-
-                # Find contours
-                contours, _ = cv2.findContours(
-                    component_mask.astype(np.uint8),
-                    cv2.RETR_EXTERNAL,
-                    cv2.CHAIN_APPROX_SIMPLE,
-                )
-
-                for contour in contours:
-                    x, y, w, h = cv2.boundingRect(contour)
-                    # Skip very small windows (likely noise)
+            for cid in range(1, n + 1):
+                comp = (labeled == cid).astype(np.uint8)
+                contours, _ = cv2.findContours(comp, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                for cnt in contours:
+                    x, y, w, h = cv2.boundingRect(cnt)
                     if w > 10 and h > 10:
                         bboxes.append((float(x), float(y), float(x + w), float(y + h)))
-
             return bboxes
-
         except Exception as e:
-            logger.warning(f"Failed to extract bboxes from mask: {e}")
+            logger.warning(f"bbox extraction failed: {e}")
             return []
