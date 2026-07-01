@@ -52,11 +52,15 @@ class WindowDetection:
 
 @dataclass
 class RoomWindowMapping:
-    """Result of spatial intersection: which rooms have windows."""
+    """Result of spatial intersection: which rooms have windows and fixtures."""
     room_id: str
     has_windows: bool = False
     has_skylights: bool = False
     has_openings: bool = False
+    has_door: bool = False
+    has_toilet: bool = False
+    has_bathtub: bool = False
+    has_sink: bool = False
     window_count: int = 0
     intersecting_windows: List[WindowDetection] = None
 
@@ -212,19 +216,23 @@ class WindowDetector:
             return windows
 
         try:
-            # Lazy load model
             if self.cubicasa_model is None:
                 self.cubicasa_model = self._load_cubicasa5k_model()
-
             if self.cubicasa_model is None:
                 logger.debug("CubiCasa5K model not available")
                 return windows
 
-            # Placeholder: actual model inference would happen here
-            # This requires the CubiCasa5K model checkpoint and preprocessing
-            # For now, we return an empty list until the model is integrated
-            logger.debug("CubiCasa5K inference not yet implemented")
-
+            icons = self.cubicasa_model.detect_icons(image_array)
+            for icon_name, icon_mask in icons.items():
+                for bbox in icon_mask.bboxes:
+                    windows.append(WindowDetection(
+                        bbox=bbox,
+                        confidence=0.9,
+                        source_tier=WindowDetectionTier.CUBICASA5K,
+                        metadata={"type": icon_name},
+                    ))
+            if windows:
+                logger.info(f"Tier 2 (CubiCasa5K): {len(windows)} icon(s) detected")
             return windows
 
         except Exception as e:
@@ -232,20 +240,17 @@ class WindowDetector:
             return []
 
     def _load_cubicasa5k_model(self) -> Optional[Any]:
-        """
-        Load pretrained CubiCasa5K model from disk or download.
-
-        Returns:
-            Loaded model or None if unavailable.
-        """
-        # CubiCasa5K integration is not yet implemented.
-        # Log only on the first call to avoid polluting logs on every image.
-        if not self._cubicasa_logged_once:
-            logger.info(
-                "Tier 2 (CubiCasa5K): model not yet integrated — skipping. "
-                "Window detection will fall back to Tier 3 (VLM prompt)."
-            )
-            self._cubicasa_logged_once = True
+        try:
+            from cubicasa5k_detector import CubiCasa5KDetector
+        except ImportError:
+            try:
+                from preprocessing_annotations.cubicasa5k_detector import CubiCasa5KDetector
+            except ImportError:
+                logger.warning("CubiCasa5K: import failed")
+                return None
+        detector = CubiCasa5KDetector()
+        if detector.load_model():
+            return detector
         return None
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -415,34 +420,38 @@ class WindowDetector:
             has_skylights = False
             has_openings = False
 
+            has_door = False
+            has_toilet = False
+            has_bathtub = False
+            has_sink = False
+
             for window in windows:
-                # Create window polygon
                 window_poly = None
                 if window.polygon:
                     try:
                         window_poly = Polygon(window.polygon)
                     except Exception:
                         pass
-
                 if window_poly is None:
                     x1, y1, x2, y2 = window.bbox
-                    window_poly = Polygon(
-                        [(x1, y1), (x2, y1), (x2, y2), (x1, y2)]
-                    )
+                    window_poly = Polygon([(x1, y1), (x2, y1), (x2, y2), (x1, y2)])
 
-                # Check intersection
                 try:
                     if room_poly.intersects(window_poly):
                         intersecting.append(window)
-                        # Use metadata["type"] to set the correct attribute flag.
-                        # The VLM backend distinguishes "window", "skylight", and
-                        # "side_opening" in its response; that distinction is preserved
-                        # through the WindowDetection.metadata field and applied here.
                         window_type = (window.metadata or {}).get("type", "window")
                         if window_type == "skylight":
                             has_skylights = True
                         elif window_type in ("side_opening", "opening"):
                             has_openings = True
+                        elif window_type == "door":
+                            has_door = True
+                        elif window_type == "toilet":
+                            has_toilet = True
+                        elif window_type == "bathtub":
+                            has_bathtub = True
+                        elif window_type == "sink":
+                            has_sink = True
                         else:
                             has_windows = True
                 except Exception as e:
@@ -453,6 +462,10 @@ class WindowDetector:
                 has_windows=has_windows,
                 has_skylights=has_skylights,
                 has_openings=has_openings,
+                has_door=has_door,
+                has_toilet=has_toilet,
+                has_bathtub=has_bathtub,
+                has_sink=has_sink,
                 window_count=len(intersecting),
                 intersecting_windows=intersecting,
             )

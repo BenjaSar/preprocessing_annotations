@@ -224,8 +224,16 @@ EXTENDED_TYPES: Dict[str, List[str]] = {
     "bedroom": [
         "BEDROOM", "MASTER BEDROOM", "BEDROOM 1", "BEDROOM 2", "BEDROOM 3",
         "1 BEDROOM", "2 BEDROOM", "3 BEDROOM",
-        "BR", "BR1", "BR2", "BR3",
-        "MBR", "MSTR BR", "MSTR", "BDRM",
+        # compact no-space (OCR sometimes omits the space)
+        "BR", "BR1", "BR2", "BR3", "BR4", "BR5",
+        # spaced BR-N form — canonical floor-plan label (OCR output)
+        "BR 1", "BR 2", "BR 3", "BR 4", "BR 5",
+        # BD abbreviation (common in residential plans)
+        "BD", "BD1", "BD2", "BD3", "BD4",
+        "BD 1", "BD 2", "BD 3", "BD 4",
+        # master bedroom variants
+        "MBR", "MBR1", "MBR2", "MSTR BR", "MSTR", "BDRM",
+        # digit-first forms
         "1BR", "2BR", "3BR", "4BR",
         "1 BR", "2 BR", "3 BR", "4 BR",
         "MASTER BR",

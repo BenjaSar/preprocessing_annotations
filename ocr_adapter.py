@@ -189,8 +189,10 @@ class PaddleOCRBackend(OCRBackend):
             # Try GPU first if configured for CUDA
             use_gpu = (self.config.device == "cuda")
             
-            # Detection input-size limit. Default 960 downsamples large floor
-            # plans and drops small in-plan labels; raise it so labels stay legible.
+            # Detection input-size limit. 4608 recovers small in-plan labels
+            # (measured: 960→0 unit-labels, 4608→72 unit-labels on 9600px pages).
+            # CPU timing measured at 28s/page for ~546 boxes — acceptable.
+            # No per-CPU cap: use the configured value on both GPU and CPU.
             det_limit = getattr(self.config, "det_limit_side_len", 4608)
 
             # Attempt GPU initialization with fallback
@@ -215,7 +217,7 @@ class PaddleOCRBackend(OCRBackend):
                         f"GPU initialization failed (cuDNN not found or incompatible): {e}. "
                         "Falling back to CPU mode."
                     )
-                    # Retry with CPU
+                    # Retry with CPU — same det_limit (28s/page at 4608, acceptable)
                     self.ocr = PaddleOCR(
                         use_angle_cls=True,
                         lang='en' if 'en' in self.config.languages else 'ch',

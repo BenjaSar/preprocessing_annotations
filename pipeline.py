@@ -15,6 +15,8 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Dict, List, Optional, Union
 
+import numpy as np
+
 # Handle both relative and absolute imports for flexibility
 try:
     from .config import PipelineConfig
@@ -39,6 +41,7 @@ try:
         AbbreviationOCRRecovery, ResidentialAbbreviationRecovery
     )
     from .window_detector import WindowDetector, apply_window_suffixes
+    from .run_lock import single_instance
 except ImportError:
     from config import PipelineConfig
     from pdf_extractor import PDFExtractor, PageTypeClassifier
@@ -63,6 +66,7 @@ except ImportError:
         AbbreviationOCRRecovery, ResidentialAbbreviationRecovery
     )
     from window_detector import WindowDetector, apply_window_suffixes
+    from run_lock import single_instance
 
 logger = logging.getLogger(__name__)
 
@@ -538,6 +542,8 @@ class AnnotationPipeline:
         self._print_step("STEP 2: OCR text extraction + abbreviation recovery")
 
         ocr_results: Dict[str, List[RoomCandidate]] = {}
+        # FIX-4: per-image BOM/title-block exclusion zones derived from OCR excluded-token clusters.
+        exclusion_zones_by_image: Dict[str, list] = {}
         abbrev_recovery = AbbreviationOCRRecovery()  # uses pattern matching only
 
         _ocr_first_image = True  # track first image to restore logger after Paddle import
@@ -548,8 +554,20 @@ class AnnotationPipeline:
                 # - Pass 1: PaddleOCR extraction (fast baseline)
                 # - Pass 2: VLM fallback for low-confidence results (confidence < 0.7)
                 # - Merge: Returns best candidates from both passes
-                # raw_detections are reused for abbreviation recovery.
+                # raw_detections are reused for abbreviation recovery and exclusion zones.
                 rooms, raw_detections = self.ocr_extractor.extract_and_find_rooms_with_vlm_fallback(img_path)
+
+                # FIX-4: Compute exclusion zones from excluded-token clusters.
+                try:
+                    zones = self.ocr_extractor.ocr_extractor.compute_exclusion_zones(raw_detections)
+                    exclusion_zones_by_image[img_path.name] = zones
+                    if zones:
+                        logger.info(
+                            f"  {img_path.name}: {len(zones)} BOM/title-block exclusion zone(s)"
+                        )
+                except Exception as _ez:
+                    logger.debug(f"  {img_path.name}: exclusion zone computation skipped: {_ez}")
+                    exclusion_zones_by_image[img_path.name] = []
 
                 # Restore logging immediately after the first PaddleOCR call.
                 # PaddlePaddle resets the root logger to WARNING during its first import,
@@ -645,22 +663,18 @@ class AnnotationPipeline:
                     # Get VLM result (handles both Claude and Qwen backends)
                     result = self._get_vlm_result(img_path)
 
-                    # FIX-A: Drop VLM rooms with no OCR corroboration within 300px.
-                    # Rooms detected from margin text (BOM tables, notes) have no
-                    # OCR room candidate nearby — OCR already filtered those regions.
-                    # Only applied when OCR found ≥1 room (avoids suppressing all rooms
-                    # on pages where OCR finds nothing).
+                    # FIX-A: Drop VLM detections matching known non-room patterns.
+                    # Applied unconditionally (no OCR-proximity gate).
                     ocr_list = ocr_results.get(img_path.name, [])
-                    if ocr_list:
-                        result.rooms = self._filter_vlm_rooms_by_ocr_proximity(
-                            result.rooms, ocr_list, radius_px=300
-                        )
+                    result.rooms = self._filter_vlm_rooms_by_ocr_proximity(
+                        result.rooms, ocr_list, radius_px=300
+                    )
                     if self.config.use_semantic_reconciliation and ocr_list:
                         # Convert OCR RoomCandidate objects to dicts for reconciler
                         ocr_dicts = []
                         for room in ocr_list:
                             ocr_dicts.append({
-                                "text": room.name,
+                                "text": room.room_name,
                                 "bbox": room.bbox,
                                 "confidence": room.confidence
                             })
@@ -672,7 +686,8 @@ class AnnotationPipeline:
                                  room_count_out=len(result.rooms))
 
                     # Save annotation (img_path needed for window detector)
-                    self._save_annotation(result, ann_path, ocr_results.get(img_path.name, []), img_path)
+                    self._save_annotation(result, ann_path, ocr_results.get(img_path.name, []), img_path,
+                                          exclusion_zones=exclusion_zones_by_image.get(img_path.name, []))
 
                     if img_path.name in image_status:
                         image_status[img_path.name]["annotated"] = True
@@ -717,7 +732,8 @@ class AnnotationPipeline:
                     # the image is not silently lost from downstream steps.
                     ocr_rooms = ocr_results.get(img_path.name, [])
                     try:
-                        self._save_ocr_annotation(img_path, ocr_rooms, annotations_dir)
+                        self._save_ocr_annotation(img_path, ocr_rooms, annotations_dir,
+                                                   exclusion_zones=exclusion_zones_by_image.get(img_path.name, []))
                         stats["images_annotated"] += 1
                         stats["rooms_detected"] += len(ocr_rooms)
                         if img_path.name in image_status:
@@ -749,7 +765,8 @@ class AnnotationPipeline:
                 # A zero-room annotation is written with sft_ready=False and
                 # lands in needs_review.json so a human can inspect it.
                 try:
-                    self._save_ocr_annotation(img_path, rooms, annotations_dir)
+                    self._save_ocr_annotation(img_path, rooms, annotations_dir,
+                                              exclusion_zones=exclusion_zones_by_image.get(img_path.name, []))
                     stats["images_annotated"] += 1
                     stats["rooms_detected"] += len(rooms)
                     if img_path.name in image_status:
@@ -788,6 +805,27 @@ class AnnotationPipeline:
                     if rooms or ocr_rooms:
                         img_w = ann.get("image_size", {}).get("width", 0)
                         img_h = ann.get("image_size", {}).get("height", 0)
+
+                        # FIX-6: Drop out-of-bounds rooms before SAM so OOB anchors
+                        # (OCR coords from 9600px space after FIX-5 transition) never
+                        # reach SAM and produce garbage expansions.
+                        def _in_bounds(room_list, w, h):
+                            kept, dropped = [], 0
+                            for r in room_list:
+                                b = r.get("bbox", [])
+                                if len(b) == 4:
+                                    bx, by, bw, bh = b
+                                    if bx + bw > w * 1.05 or by + bh > h * 1.05 or bx < 0 or by < 0:
+                                        dropped += 1
+                                        continue
+                                kept.append(r)
+                            if dropped:
+                                logger.warning(f"FIX-6: pre-SAM OOB drop: {dropped} room(s) outside image bounds")
+                            return kept
+
+                        if img_w and img_h:
+                            rooms = _in_bounds(rooms, img_w, img_h)
+                            ocr_rooms = _in_bounds(ocr_rooms, img_w, img_h)
 
                         if rooms:
                             expanded_rooms = self.sam_segmenter.refine_annotations(
@@ -1085,6 +1123,7 @@ class AnnotationPipeline:
         coco_exporter.export_splits(
             processed_dir, images_dir, output_dir / "coco",
             splits=(0.70, 0.15, 0.15), seed=42,
+            min_annotations_per_image=self.config.min_rooms_for_sft,
         )
 
         # 7c: Coverage report (class imbalance visibility before training)
@@ -1226,57 +1265,66 @@ class AnnotationPipeline:
             logger.info(f"F-C dedup: removed {dropped} duplicate SAM box(es)")
         return kept
 
-    def _filter_vlm_rooms_by_ocr_proximity(self, vlm_rooms, ocr_rooms, radius_px: int = 300):
-        """FIX-A: Drop VLM rooms whose centroid has no OCR room candidate within radius_px.
+    # Non-room fixture/tag patterns observed in production data.
+    # Drop unconditionally regardless of OCR proximity.
+    # Patterns are anchored and case-insensitive; match on stripped uppercase name.
+    _NON_ROOM_PATTERNS = [
+        r"^[A-Z]{1,3}-\d+$",    # LT-06, T-06, F-3, etc. (circuit/fixture tags)
+        r"^F\.D\.$",             # F.D. (floor drain)
+        r"\bPLAN$",              # CELLAR PLAN, FLOOR PLAN, etc. (sheet titles)
+        r"^B \(EM\)$",           # B (EM) (emergency branch label)
+    ]
 
-        VLM rooms detected from margin text (BOM tables, notes blocks) have no
-        OCR corroboration nearby because OCR already filters those regions via
-        documentation/equipment exclusion patterns.  VLM rooms inside the actual
-        floor plan body always have OCR labels within a short distance.
+    @classmethod
+    def _is_non_room_by_name(cls, name: str) -> bool:
+        import re
+        n = (name or "").strip().upper()
+        if not n:
+            return False
+        return any(re.search(p, n) for p in cls._NON_ROOM_PATTERNS)
+
+    def _filter_vlm_rooms_by_ocr_proximity(self, vlm_rooms, ocr_rooms, radius_px: int = 300):
+        """FIX-A: Drop VLM detections that match known non-room fixture/tag patterns.
+
+        Replaces the OCR-proximity gate which dropped real rooms on pages where
+        PaddleOCR underperforms (cellar/MEP sheets with few legible labels).
+
+        Known non-room tags (circuit labels, drain markers, sheet titles) are
+        rejected by name pattern.  Everything else is kept regardless of whether
+        OCR found a nearby anchor.
 
         Args:
             vlm_rooms:  List of RoomAnnotation objects from the VLM backend.
-            ocr_rooms:  List of RoomCandidate objects from PaddleOCR.
-            radius_px:  Max centroid-to-centroid distance to count as corroborated.
+            ocr_rooms:  Unused (kept for call-site compatibility).
+            radius_px:  Unused (kept for call-site compatibility).
 
         Returns:
             Filtered list of RoomAnnotation objects.
         """
-        # Pre-compute OCR centroids (OCR bbox is xywh)
-        ocr_centroids = []
-        for ocr in ocr_rooms:
-            b = ocr.bbox
-            if len(b) == 4:
-                ox, oy, ow, oh = b
-                ocr_centroids.append((ox + ow // 2, oy + oh // 2))
-
         kept = []
         dropped = 0
         for room in vlm_rooms:
-            bbox = room.bbox
-            if len(bbox) != 4:
-                kept.append(room)
-                continue
-            # VLM bbox is xywh
-            rx, ry, rw, rh = bbox
-            cx, cy = rx + rw // 2, ry + rh // 2
-
-            corroborated = any(
-                abs(cx - ox) <= radius_px and abs(cy - oy) <= radius_px
-                for ox, oy in ocr_centroids
-            )
-            if corroborated:
-                kept.append(room)
-            else:
-                logger.debug(
-                    f"FIX-A: dropped VLM room '{room.room_name}' at ({cx},{cy}) "
-                    f"— no OCR room within {radius_px}px"
-                )
+            nm = room.room_name or ""
+            if self._is_non_room_by_name(nm):
+                logger.debug(f"FIX-A name: dropped '{nm}'")
                 dropped += 1
+                continue
+            # Strip-geometry filter: aspect > 5:1 → label strip, not a room
+            bbox = room.bbox
+            if len(bbox) == 4:
+                bw, bh = float(bbox[2]), float(bbox[3])
+                if bw > 0 and bh > 0 and max(bw / bh, bh / bw) > 5.0:
+                    logger.debug(
+                        f"FIX-A strip: dropped '{nm}' "
+                        f"aspect={max(bw/bh,bh/bw):.1f} bbox={list(bbox)}"
+                    )
+                    dropped += 1
+                    continue
+            kept.append(room)
 
         if dropped:
             logger.info(
-                f"FIX-A OCR proximity filter: {dropped} margin/BOM room(s) dropped, "
+                f"FIX-A filter: {dropped} dropped (name-pattern or strip geometry), "
                 f"{len(kept)} kept"
             )
         return kept
@@ -1455,6 +1503,7 @@ class AnnotationPipeline:
         output_path: Path,
         ocr_rooms: List[RoomCandidate],
         img_path: Optional[Path] = None,
+        exclusion_zones: Optional[List] = None,
     ) -> None:
         """
         Save VLM annotation result, merging with OCR data.
@@ -1568,17 +1617,15 @@ class AnnotationPipeline:
                             f"got {_sb}"
                         )
 
+        # FIX-4: store exclusion zones so prepare_sft_annotation can drop mislocalized rooms
+        if exclusion_zones:
+            data["exclusion_zones"] = exclusion_zones
+
         # Add preliminary sft_ready flag (will be recomputed in post-processing step)
-        # Setting to False here ensures a safe default if post-processing is skipped
         data["sft_ready"] = False
 
-        # Window detection is opt-in (config.use_windows, default False).
-        # Tier 2 (CubiCasa5K) is not yet implemented; Tier 3 reuses the same
-        # VLM backend and adds a 300 s timeout per image with no quality gain.
-        # Only Tier 1 (PDF layer extraction) is safe to run automatically.
         if self.config.use_windows:
             try:
-                # Tier 1 only needs the PDF path; skip image-array load.
                 rooms_for_detection = [
                     {
                         "id": idx,
@@ -1591,30 +1638,30 @@ class AnnotationPipeline:
                     }
                     for idx, r in enumerate(data["rooms"])
                 ]
-
-                # Pass vlm_backend=None — Tier 3 (VLM window prompt) is disabled
-                # until Tier 2 (CubiCasa5K) is active.  Only Tier 1 (PDF layers)
-                # runs.  This eliminates the 300 s timeout from the hot path.
+                image_array = self._load_image_for_detection(img_path)
                 window_mappings = self._detect_windows_with_timeout(
-                    image_array=None,
+                    image_array=image_array,
                     rooms_for_detection=rooms_for_detection,
                     pdf_path=self._source_pdf_for(img_path),
                     img_path=img_path,
+                    vlm_backend=self.vlm_annotator if self.config.use_vlm else None,
                 )
 
                 mapping_by_id = {m.room_id: m for m in window_mappings}
-
-                # Apply window attributes to already-built roomsRecognized entries.
                 updated = []
                 for idx, sft_room in enumerate(data["roomsRecognized"]):
                     mapping = mapping_by_id.get(idx)
-                    if mapping and (mapping.has_windows or mapping.has_skylights or mapping.has_openings):
+                    if mapping:
                         coords = sft_room.get("coordinates", {})
                         attrs = coords.get("attributes", {}) if coords else {}
                         attrs.update({
                             "has_windows": mapping.has_windows,
                             "has_skylights": mapping.has_skylights,
                             "has_openings": mapping.has_openings,
+                            "has_door": mapping.has_door,
+                            "has_toilet": mapping.has_toilet,
+                            "has_bathtub": mapping.has_bathtub,
+                            "has_sink": mapping.has_sink,
                             "window_count": mapping.window_count,
                         })
                         if coords:
@@ -1629,7 +1676,8 @@ class AnnotationPipeline:
             json.dump(data, f, indent=2)
 
     def _save_ocr_annotation(
-        self, img_path: Path, rooms: List[RoomCandidate], annotations_dir: Path
+        self, img_path: Path, rooms: List[RoomCandidate], annotations_dir: Path,
+        exclusion_zones: Optional[List] = None,
     ) -> None:
         """
         Save OCR-only annotation.
@@ -1701,14 +1749,14 @@ class AnnotationPipeline:
         
         # Add roomsRecognized to data
         data["roomsRecognized"] = sft_rooms
-        
+
+        # FIX-4: store exclusion zones
+        if exclusion_zones:
+            data["exclusion_zones"] = exclusion_zones
+
         # Add preliminary sft_ready flag (will be recomputed in post-processing step)
-        # Setting to False here ensures a safe default if post-processing is skipped
         data["sft_ready"] = False
 
-        # Window detection is opt-in (config.use_windows, default False).
-        # Only Tier 1 (PDF layer extraction) is enabled; Tier 3 (VLM) is
-        # skipped by passing vlm_backend=None.
         if self.config.use_windows:
             try:
                 rooms_for_detection = [
@@ -1723,26 +1771,30 @@ class AnnotationPipeline:
                     }
                     for idx, r in enumerate(data["rooms"])
                 ]
-
+                image_array = self._load_image_for_detection(img_path)
                 window_mappings = self._detect_windows_with_timeout(
-                    image_array=None,
+                    image_array=image_array,
                     rooms_for_detection=rooms_for_detection,
                     pdf_path=self._source_pdf_for(img_path),
                     img_path=img_path,
+                    vlm_backend=self.vlm_annotator if self.config.use_vlm else None,
                 )
 
                 mapping_by_id = {m.room_id: m for m in window_mappings}
-
                 updated = []
                 for idx, sft_room in enumerate(data["roomsRecognized"]):
                     mapping = mapping_by_id.get(idx)
-                    if mapping and (mapping.has_windows or mapping.has_skylights or mapping.has_openings):
+                    if mapping:
                         coords = sft_room.get("coordinates", {})
                         attrs = coords.get("attributes", {}) if coords else {}
                         attrs.update({
                             "has_windows": mapping.has_windows,
                             "has_skylights": mapping.has_skylights,
                             "has_openings": mapping.has_openings,
+                            "has_door": mapping.has_door,
+                            "has_toilet": mapping.has_toilet,
+                            "has_bathtub": mapping.has_bathtub,
+                            "has_sink": mapping.has_sink,
                             "window_count": mapping.window_count,
                         })
                         if coords:
@@ -1757,8 +1809,24 @@ class AnnotationPipeline:
         with open(output_path, "w") as f:
             json.dump(data, f, indent=2)
 
+    @staticmethod
+    def _load_image_for_detection(img_path: Path, max_side: int = 1024) -> Optional[np.ndarray]:
+        """Load image resized to ≤ max_side for CubiCasa5K inference."""
+        try:
+            from PIL import Image as _PIL
+            with _PIL.open(img_path).convert("RGB") as img:
+                w, h = img.size
+                scale = min(1.0, max_side / max(w, h))
+                if scale < 1.0:
+                    img = img.resize((int(w * scale), int(h * scale)), _PIL.LANCZOS)
+                return np.array(img)
+        except Exception as e:
+            logger.warning(f"Could not load image for detection {img_path}: {e}")
+            return None
+
     def _detect_windows_with_timeout(self, image_array, rooms_for_detection,
-                                      pdf_path, img_path, timeout_sec: int = 300):
+                                      pdf_path, img_path, vlm_backend=None,
+                                      timeout_sec: int = 300):
         """Run detect_windows() with a hard wall-clock timeout.
 
         Returns list of window mappings, or [] on timeout/error.
@@ -1770,7 +1838,7 @@ class AnnotationPipeline:
                 image_array=image_array,
                 rooms=rooms_for_detection,
                 pdf_path=pdf_path,
-                vlm_backend=None,  # Tier 3 disabled until Tier 2 (CubiCasa5K) is active
+                vlm_backend=vlm_backend,
                 img_path=img_path,
             )
             try:
@@ -2106,6 +2174,12 @@ Examples:
         help="Disable tiled VLM inference. Send full image to VLM in one pass. "
              "Tiling is ON by default for local backends when max(w,h) > 3000px.",
     )
+    parser.add_argument(
+        "--no-wait",
+        action="store_true",
+        help="If another pipeline run is active, exit immediately (code 3) instead of "
+             "waiting. Default: block and wait (serialize runs to protect host RAM).",
+    )
 
     args = parser.parse_args()
 
@@ -2140,22 +2214,23 @@ Examples:
     if args.dpi:
         config.pdf.dpi = args.dpi
 
-    # Run pipeline
-    pipeline = AnnotationPipeline(config)
+    # Serialize runs — VLM + SAM load multi-GB models; two concurrent runs exhaust RAM.
+    with single_instance(wait=not args.no_wait):
+        pipeline = AnnotationPipeline(config)
 
-    try:
-        stats = pipeline.run(
-            input_dir=args.input,
-            output_dir=args.output,
-            skip_existing=args.skip_existing,
-        )
-        sys.exit(0)
-    except PipelineError as e:
-        logger.error(f"Pipeline failed: {e}")
-        sys.exit(1)
-    except KeyboardInterrupt:
-        logger.info("Pipeline interrupted by user")
-        sys.exit(130)
+        try:
+            stats = pipeline.run(
+                input_dir=args.input,
+                output_dir=args.output,
+                skip_existing=args.skip_existing,
+            )
+            sys.exit(0)
+        except PipelineError as e:
+            logger.error(f"Pipeline failed: {e}")
+            sys.exit(1)
+        except KeyboardInterrupt:
+            logger.info("Pipeline interrupted by user")
+            sys.exit(130)
 
 
 if __name__ == "__main__":

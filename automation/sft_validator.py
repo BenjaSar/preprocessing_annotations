@@ -781,8 +781,10 @@ def _merge_vlm_and_ocr(vlm_rooms: List[Dict], ocr_rooms: List[Dict]) -> List[Dic
 
     # Add all VLM rooms first (they have spatial boundaries)
     for vlm_room in vlm_rooms:
-        merged.append(vlm_room)
-        logger.debug(f"Added VLM room: {vlm_room.get('name', vlm_room.get('room_name', 'UNNAMED'))}")
+        r = dict(vlm_room)
+        r.setdefault("source", "vlm_only")
+        merged.append(r)
+        logger.debug(f"Added VLM room: {r.get('name', r.get('room_name', 'UNNAMED'))}")
 
     # Process OCR rooms
     for ocr_room in ocr_rooms:
@@ -799,23 +801,24 @@ def _merge_vlm_and_ocr(vlm_rooms: List[Dict], ocr_rooms: List[Dict]) -> List[Dic
 
         if matched_vlm is not None:
             # CRITICAL FIX #3: Preserve compound names from OCR
-            # If OCR has a more specific name, use it instead of generic VLM label
             vlm_name = merged[matched_vlm].get("name") or merged[matched_vlm].get("room_name", "")
 
-            # Prefer OCR name if it's more specific (compound) or longer
             if ocr_name and len(ocr_name) > len(vlm_name):
                 logger.debug(
                     f"Merged: VLM '{vlm_name}' + OCR '{ocr_name}' → using OCR (compound)"
                 )
                 merged[matched_vlm]["name"] = ocr_name
                 merged[matched_vlm]["room_name"] = ocr_name
-                merged[matched_vlm]["ocr_label"] = ocr_name  # Track source
+                merged[matched_vlm]["ocr_label"] = ocr_name
+                merged[matched_vlm]["source"] = "vlm_ocr_merged"
             else:
                 logger.debug(f"Merged: VLM '{vlm_name}' (OCR '{ocr_name}' skipped, not compound)")
         else:
             # OCR room doesn't overlap with VLM → add as new room
             logger.debug(f"Added OCR room (no VLM match): {ocr_name}")
-            merged.append(ocr_room)
+            r = dict(ocr_room)
+            r.setdefault("source", "ocr_only")
+            merged.append(r)
 
     logger.info(f"Merged {len(vlm_rooms)} VLM + {len(ocr_rooms)} OCR → {len(merged)} total")
     return merged
@@ -853,6 +856,29 @@ def prepare_sft_annotation(annotation: Dict, min_rooms_for_sft: int = 1) -> Dict
     vlm_rooms = annotation.get("rooms", [])
     ocr_rooms = annotation.get("ocr_rooms", [])
     rooms = _merge_vlm_and_ocr(vlm_rooms, ocr_rooms)
+
+    # Step 0-pre: FIX-4 — drop rooms whose centroid falls inside a BOM/title-block exclusion zone.
+    # Exclusion zones are computed from OCR excluded-token clusters (BOM tables, panel schedules,
+    # title blocks). VLM/OCR sometimes localise a label into these margin regions and SAM then
+    # expands it to a giant floor-plate blob. Centroid-in-zone is the most conservative check:
+    # a mislocalized detection has its label IN the margin; a real room only touches the margin.
+    exclusion_zones = annotation.get("exclusion_zones", [])
+    if exclusion_zones and rooms:
+        pre_excl = len(rooms)
+        def _in_any_zone(bbox, zones):
+            if len(bbox) < 4:
+                return False
+            bx, by, bw, bh = bbox[0], bbox[1], bbox[2], bbox[3]
+            cx, cy = bx + bw // 2, by + bh // 2
+            for x1, y1, x2, y2 in zones:
+                if x1 <= cx <= x2 and y1 <= cy <= y2:
+                    return True
+            return False
+        rooms = [r for r in rooms if not _in_any_zone(r.get("bbox", []), exclusion_zones)]
+        n_excl = pre_excl - len(rooms)
+        if n_excl:
+            drop_attribution["bom_zone"] = n_excl
+            logger.info(f"FIX-4: dropped {n_excl} room(s) with centroid in BOM/title-block zone")
 
     # Step 0: Normalize VLM output fields (room_name → name, category → type)
     for room in rooms:
@@ -923,30 +949,20 @@ def prepare_sft_annotation(annotation: Dict, min_rooms_for_sft: int = 1) -> Dict
     # Step 0c-iv: Geometric filter — single location for ALL bbox-shape rejection.
     #
     # This is the ONLY place in the pipeline that inspects bbox geometry.
-    # Three conditions are evaluated together so that every spatial rejection
-    # has a single, auditable cause:
+    # Four conditions, each with a single auditable cause:
     #
-    #   (a) Extreme aspect ratio + small minimum dimension
-    #       Catches text-label bboxes the VLM emits from OCR fragments
-    #       (e.g., "RECEPTION" detected as 320×61 px).
-    #       Real rooms do not have aspect_ratio > 4:1 with min_dim < 100 px.
-    #
-    #   (b) Bbox smaller than 2.5% of the image dimension in either axis
-    #       No real room on a floor plan occupies less than 2.5% of the
-    #       plan's width or height.
-    #
-    #   (c) Absolute pixel area below MIN_ROOM_AREA_PX
-    #       Catches any remaining text-label or degenerate bbox that passed
-    #       (a) and (b).  Previously this check lived in Step 2c alongside
-    #       semantic and confidence filters — wrong stage, wrong concern.
-    #       Consolidating here means area is never evaluated downstream.
-    #
-    # NOTE: do NOT move area checks downstream.  Once rooms reach semantic /
-    # confidence / taxonomy steps, geometry is no longer the concern.
+    #   (a) Extreme aspect ratio + small minimum dimension — text labels
+    #   (b) Bbox smaller than 2.5% of image dimension — sub-room fragments
+    #   (c) Absolute area below MIN_ROOM_AREA_PX — degenerate tiny boxes
+    #   (d) Area exceeds MAX_ROOM_FRAC of image — mislocalized giant blobs
+    #       (e.g. SAM grabs a 43% floor plate from a single label centroid).
+    #       A single labelled room cannot physically occupy >30% of a floor.
     MIN_ROOM_AREA_PX = 10_000  # ~0.5"×0.5" at 200 DPI; excludes all text labels
+    MAX_ROOM_FRAC    = 0.30    # >30% of image = mislocalized blob, not one room
 
     img_w_pre = annotation.get("image_size", {}).get("width", 0)
     img_h_pre = annotation.get("image_size", {}).get("height", 0)
+    img_area_pre = img_w_pre * img_h_pre if img_w_pre and img_h_pre else 0
     pre_geom = len(rooms)
     geom_filtered = []
     for room in rooms:
@@ -983,6 +999,15 @@ def prepare_sft_annotation(annotation: Dict, min_rooms_for_sft: int = 1) -> Dict
                 logger.warning(
                     f"Fix1: dropped sub-minimum-area bbox '{rn}' "
                     f"(area={area:.0f} < {MIN_ROOM_AREA_PX} px²)"
+                )
+                continue
+
+            # (d) Area exceeds 30% of image — mislocalized giant blob
+            if img_area_pre > 0 and area > img_area_pre * MAX_ROOM_FRAC:
+                logger.warning(
+                    f"Fix1: dropped oversized bbox '{rn}' "
+                    f"(area={area:.0f} = {100*area/img_area_pre:.0f}% of image "
+                    f"> {MAX_ROOM_FRAC:.0%} max)"
                 )
                 continue
 
