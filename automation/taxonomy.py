@@ -28,6 +28,7 @@ Usage
 
 from typing import Dict, List, Set, Optional, NamedTuple
 import logging
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -127,6 +128,7 @@ MANDATORY_CLASSES: Dict[str, List[str]] = {
         "LOBBY", "RECEPTION", "FOYER", "VESTIBULE", "ENTRANCE",
         "ENTRY", "ENTRY AREA", "ENTRANCE VESTIBULE",
         "WAITING ROOM", "WAITING AREA",
+        "RECP", "RECEP",
     ],
     "CORRIDOR": [
         "CORRIDOR", "HALLWAY", "PASSAGE", "WALKWAY", "HALL",
@@ -564,10 +566,18 @@ def normalize_to_mandatory(raw: str) -> str:
         logger.debug(f"Short token '{raw}' no exact match → STORAGE ROOM")
         return "STORAGE ROOM"
 
-    # 4. Substring containment in mandatory classes
+    # 4. Substring containment in mandatory classes.
+    # Short variants (<=4 chars: DIN, BR, LR, WC, LAB, GYM...) must match on a
+    # word boundary — plain `in` lets them match inside unrelated words
+    # (e.g. 'DIN' inside 'buiLDINg', turning 'BUILDING STORAGE' into
+    # RESIDENTIAL UNIT). Longer variants keep substring matching.
     for mandatory, variants in MANDATORY_CLASSES.items():
         for variant in variants:
-            if variant in raw_upper or raw_upper in variant:
+            if len(variant) <= 4:
+                if re.search(r'\b' + re.escape(variant) + r'\b', raw_upper):
+                    logger.debug(f"Substring match (mandatory): '{raw}' → '{mandatory}'")
+                    return mandatory
+            elif variant in raw_upper or raw_upper in variant:
                 logger.debug(f"Substring match (mandatory): '{raw}' → '{mandatory}'")
                 return mandatory
 

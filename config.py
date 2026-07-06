@@ -319,6 +319,26 @@ class SAMConfig:
     # original label bbox instead of the SAM result.
     max_expand_frac: float = 0.25
 
+    # T1: connected-component instance split.
+    # When True, splits a SAM mask into per-instance bboxes via
+    # cv2.connectedComponentsWithStats. Components < cc_min_area px² are dropped.
+    use_cc_split: bool = False
+    cc_min_area: int = 40000
+    cc_erosion_px: int = 3
+
+    # T2: density-peak grid seeding (EXPERIMENT — [Speculative] LiDAR→raster).
+    # Generates supplementary SAM prompts from Sobel gradient peaks,
+    # additive to existing label-centroid prompts.
+    use_density_prompts: bool = False
+    density_tau_factor: float = 0.9
+    density_min_spacing: int = 10
+    density_max_prompts: int = 25
+
+    # T3: multi-stage mask pool filter (requires use_density_prompts=True).
+    # Coarse (multi-component + IoU≥0.8 dedup) + greedy covering set (IoU≤0.01).
+    # No-op unless use_density_prompts=True provides a pool.
+    use_multistage_filter: bool = False
+
     def __post_init__(self):
         if self.device is None:
             self.device = _detect_device()

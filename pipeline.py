@@ -827,11 +827,14 @@ class AnnotationPipeline:
                             rooms = _in_bounds(rooms, img_w, img_h)
                             ocr_rooms = _in_bounds(ocr_rooms, img_w, img_h)
 
+                        img_excl_zones = exclusion_zones_by_image.get(img_path.name, [])
+
                         if rooms:
                             expanded_rooms = self.sam_segmenter.refine_annotations(
                                 img_path, rooms,
                                 img_width=img_w, img_height=img_h,
                                 max_expand_frac=self.config.sam.max_expand_frac,
+                                exclusion_zones=img_excl_zones,
                             )
                             # F-C: dedup near-identical masks from adjacent labels
                             ann["rooms"] = self._dedup_rooms_by_iou(expanded_rooms)
@@ -841,6 +844,7 @@ class AnnotationPipeline:
                                 img_path, ocr_rooms,
                                 img_width=img_w, img_height=img_h,
                                 max_expand_frac=self.config.sam.max_expand_frac,
+                                exclusion_zones=img_excl_zones,
                             )
                             ann["ocr_rooms"] = self._dedup_rooms_by_iou(expanded_ocr)
 
@@ -983,6 +987,44 @@ class AnnotationPipeline:
                 is_sft_ready = annotation.get("sft_ready", False)
                 localization_failed = annotation.get("localization_failed", False)
 
+                # DV-2: rebuild roomsRecognized from rooms[] survivors BEFORE the
+                # write-path branch below. prepare_sft_annotation shrinks rooms[]
+                # but never updates roomsRecognized, leaving stale (oversized/
+                # mislocated) entries. This must run unconditionally — not just in
+                # the sft_ready branch — because localization_failed pages
+                # (room_count==0) write processed_annotations too (FIX-B) and were
+                # previously left with the raw, unfiltered roomsRecognized (e.g.
+                # page005: 36 stale giants, page006: 16), which the overview
+                # visualization draws directly. Empty survivors -> empty rr.
+                surviving_rooms = annotation.get("rooms", [])
+                new_rr = []
+                for idx, room in enumerate(surviving_rooms, start=1):
+                    name = room.get("room_name") or room.get("name", "")
+                    number = room.get("room_number", "")
+                    cat = room.get("type") or room.get("category") or name
+                    raw_bbox = room.get("bbox", [0, 0, 0, 0])
+                    if len(raw_bbox) == 4:
+                        bx, by, bw, bh = [int(v) for v in raw_bbox]
+                        bbox_xyxy = [bx, by, bx + bw, by + bh]
+                    else:
+                        bbox_xyxy = [int(v) for v in raw_bbox]
+                    sft_room = self.sft_builder.build_room(
+                        room_id=idx,
+                        mandatory_type=cat,
+                        original_name=name,
+                        room_number=number,
+                        bbox=bbox_xyxy,
+                        detection_score=room.get("detection_score", 0.9),
+                        classification_match_type=room.get("classification_match_type", "ocr"),
+                        ocr_confidence=room.get("ocr_confidence", room.get("confidence", 0.9)),
+                        source=room.get("source", "processed"),
+                        extended_type=room.get("extended_type", ""),
+                        detection_method=room.get("detection_method", "ocr"),
+                        detection_model=room.get("detection_model", "pipeline"),
+                    )
+                    new_rr.append(self.sft_builder.to_dict(sft_room))
+                annotation["roomsRecognized"] = new_rr
+
                 if not is_sft_ready and room_count == 0 and localization_failed:
                     # FIX-B: rooms WERE detected but all mislocalized (boxes over
                     # blank space). The page has real rooms needing manual
@@ -1023,41 +1065,8 @@ class AnnotationPipeline:
                                 f"    {ann_path.name}: Failed to move to skipped_pages/: {move_err}"
                             )
                 else:
-                    # Rebuild roomsRecognized from the filtered rooms[] survivors.
-                    # prepare_sft_annotation shrinks rooms[] but never updates
-                    # roomsRecognized, leaving stale entries for dropped boxes.
-                    # Rebuild ensures both keys carry identical room sets.
-                    surviving_rooms = annotation.get("rooms", [])
-                    if surviving_rooms:
-                        new_rr = []
-                        for idx, room in enumerate(surviving_rooms, start=1):
-                            name = room.get("room_name") or room.get("name", "")
-                            number = room.get("room_number", "")
-                            cat = room.get("type") or room.get("category") or name
-                            raw_bbox = room.get("bbox", [0, 0, 0, 0])
-                            if len(raw_bbox) == 4:
-                                bx, by, bw, bh = [int(v) for v in raw_bbox]
-                                bbox_xyxy = [bx, by, bx + bw, by + bh]
-                            else:
-                                bbox_xyxy = [int(v) for v in raw_bbox]
-                            sft_room = self.sft_builder.build_room(
-                                room_id=idx,
-                                mandatory_type=cat,
-                                original_name=name,
-                                room_number=number,
-                                bbox=bbox_xyxy,
-                                detection_score=room.get("detection_score", 0.9),
-                                classification_match_type=room.get("classification_match_type", "ocr"),
-                                ocr_confidence=room.get("ocr_confidence", room.get("confidence", 0.9)),
-                                source=room.get("source", "processed"),
-                                extended_type=room.get("extended_type", ""),
-                                detection_method=room.get("detection_method", "ocr"),
-                                detection_model=room.get("detection_model", "pipeline"),
-                            )
-                            new_rr.append(self.sft_builder.to_dict(sft_room))
-                        annotation["roomsRecognized"] = new_rr
-
-                    # Normal case: write processed annotation
+                    # roomsRecognized already rebuilt above (DV-2), unconditionally,
+                    # before this branch. Normal case: write processed annotation.
                     processed_path = processed_dir / ann_path.name
                     with open(processed_path, "w") as f:
                         json.dump(annotation, f, indent=2)
