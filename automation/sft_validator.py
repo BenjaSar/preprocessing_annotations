@@ -807,12 +807,45 @@ def _merge_vlm_and_ocr(vlm_rooms: List[Dict], ocr_rooms: List[Dict]) -> List[Dic
                 logger.debug(
                     f"Merged: VLM '{vlm_name}' + OCR '{ocr_name}' → using OCR (compound)"
                 )
+                # FP-1: use OCR bbox as geometry, not VLM's. VLM boxes on this
+                # pipeline are frequently oversized/mislocated (measured: single
+                # VLM box matching 5-21 distinct OCR labels). OCR bbox is the
+                # precise label location; SAM (Step 3.5) expands it to room scale.
+                merged[matched_vlm]["vlm_bbox"] = merged[matched_vlm].get("bbox")
+                merged[matched_vlm]["bbox"] = ocr_bbox
                 merged[matched_vlm]["name"] = ocr_name
                 merged[matched_vlm]["room_name"] = ocr_name
                 merged[matched_vlm]["ocr_label"] = ocr_name
                 merged[matched_vlm]["source"] = "vlm_ocr_merged"
+                # Geometry provenance must follow the geometry: bbox now comes
+                # from ocr_room, so original_bbox/sam_expanded/sam_skip_reason
+                # must too. Without this, these fields keep the VLM room's own
+                # (unrelated, also-stale) pre-SAM values — wrong provenance for
+                # any downstream check on the OCR-sourced box's SAM history.
+                merged[matched_vlm]["original_bbox"] = ocr_room.get("original_bbox")
+                merged[matched_vlm]["sam_expanded"] = ocr_room.get("sam_expanded")
+                merged[matched_vlm]["sam_skip_reason"] = ocr_room.get("sam_skip_reason")
+                merged[matched_vlm]["sam_confidence"] = ocr_room.get("sam_confidence")
             else:
-                logger.debug(f"Merged: VLM '{vlm_name}' (OCR '{ocr_name}' skipped, not compound)")
+                # FM-1 (D-M2): a matched-but-not-compound OCR label was previously
+                # DROPPED here. On dense floors one oversized VLM box overlaps many
+                # distinct OCR labels (measured: 13 labels into 1 box on page000);
+                # keeping only the winner silently lost real rooms (STAIR, ELEV,
+                # MECHANICAL, distinct units). Instead, add the OCR label as its own
+                # ocr_only room (own precise bbox), UNLESS it is empty or a substring
+                # of the matched VLM name (true fragment/duplicate of the same label,
+                # e.g. 'BR' inside 'TYPE-D2 3BR', ''). Downstream overlap-resolution
+                # and IoU dedup collapse any genuine duplicate geometry.
+                if ocr_name and ocr_name not in vlm_name:
+                    logger.debug(
+                        f"FM-1: VLM '{vlm_name}' overlaps OCR '{ocr_name}' → "
+                        f"kept as separate ocr_only room (distinct label)"
+                    )
+                    r = dict(ocr_room)
+                    r["source"] = "ocr_only"
+                    merged.append(r)
+                else:
+                    logger.debug(f"Merged: VLM '{vlm_name}' (OCR '{ocr_name}' skipped, fragment/empty)")
         else:
             # OCR room doesn't overlap with VLM → add as new room
             logger.debug(f"Added OCR room (no VLM match): {ocr_name}")
@@ -960,6 +993,20 @@ def prepare_sft_annotation(annotation: Dict, min_rooms_for_sft: int = 1) -> Dict
     MIN_ROOM_AREA_PX = 10_000  # ~0.5"×0.5" at 200 DPI; excludes all text labels
     MAX_ROOM_FRAC    = 0.30    # >30% of image = mislocalized blob, not one room
 
+    # DV-3 / Option A: OCR-anchored rooms are exempt from the text-label-shape
+    # checks (a)/(b) and use a much lower absolute-area floor for (c).
+    # Rationale (measured on page002): SAM either over-expands a label centroid
+    # into a giant floor-plate blob or barely grows it past label size — only
+    # ~11% of located OCR labels land in the intended room-scale window. The
+    # (a)/(b)/(c) checks below assume SAM reliably expands every box to room
+    # scale; when it doesn't, they discard the correctly-located label instead
+    # of the (already-guarded-elsewhere) giant. Located label boxes are kept
+    # as-is rather than thrown away for being label-shaped — that IS their
+    # source geometry now. (d) MAX_ROOM_FRAC still applies to every source, so
+    # a giant that slips past SAM is still rejected here regardless of origin.
+    _OCR_ANCHORED_SOURCES = {"ocr_only", "vlm_ocr_merged"}
+    OCR_MIN_AREA_PX = 150  # excludes near-zero-area / degenerate boxes only
+
     img_w_pre = annotation.get("image_size", {}).get("width", 0)
     img_h_pre = annotation.get("image_size", {}).get("height", 0)
     img_area_pre = img_w_pre * img_h_pre if img_w_pre and img_h_pre else 0
@@ -968,6 +1015,8 @@ def prepare_sft_annotation(annotation: Dict, min_rooms_for_sft: int = 1) -> Dict
     for room in rooms:
         bbox = room.get("bbox", [])
         rn = room.get("room_name") or room.get("name", "?")
+        is_ocr_anchored = room.get("source") in _OCR_ANCHORED_SOURCES
+
         if len(bbox) == 4:
             bx, by, bw, bh = bbox
             area = bw * bh
@@ -976,31 +1025,64 @@ def prepare_sft_annotation(annotation: Dict, min_rooms_for_sft: int = 1) -> Dict
             max_dim = max(bw, bh)
             aspect = max_dim / min_dim if min_dim > 0 else 999
 
-            # (a) Text-label bbox: extreme aspect + small minimum dimension
-            if aspect > 4.0 and min_dim < 100:
-                logger.warning(
-                    f"Fix1: dropped text-label bbox '{rn}' "
-                    f"(aspect={aspect:.1f}, min_dim={min_dim:.0f}px)"
-                )
-                continue
-
-            # (b) Bbox narrower/shorter than 2.5% of image dimension
-            if img_w_pre > 0 and img_h_pre > 0:
-                if bw < img_w_pre * 0.025 or bh < img_h_pre * 0.025:
+            if is_ocr_anchored:
+                # (c') OCR-anchored: only reject near-degenerate boxes.
+                if area < OCR_MIN_AREA_PX:
                     logger.warning(
-                        f"Fix1: dropped sub-2.5%% bbox '{rn}' "
-                        f"(w={bw:.0f}<{img_w_pre*0.025:.0f}, "
-                        f"h={bh:.0f}<{img_h_pre*0.025:.0f})"
+                        f"Fix1: dropped degenerate OCR bbox '{rn}' "
+                        f"(area={area:.0f} < {OCR_MIN_AREA_PX} px²)"
                     )
                     continue
 
-            # (c) Absolute area below minimum room size
-            if area < MIN_ROOM_AREA_PX:
-                logger.warning(
-                    f"Fix1: dropped sub-minimum-area bbox '{rn}' "
-                    f"(area={area:.0f} < {MIN_ROOM_AREA_PX} px²)"
-                )
-                continue
+                # T-C1 (revised): SAM sometimes over-expands an OCR-anchored
+                # label past a single-unit's plausible size (measured: OCR
+                # label 0.02% of image -> SAM box 8.8%). The located label
+                # itself (original_bbox, pre-SAM) is correct; the expansion is
+                # not. Revert to the located label rather than drop the room
+                # or keep the drifted giant. Reuses the existing single-unit
+                # ceiling (MAX_VLM_UNIT_FRAC, defined below) — no new threshold.
+                if (room.get("sam_expanded") and room.get("original_bbox")
+                        and img_area_pre > 0
+                        and area > img_area_pre * 0.08):
+                    ob = room["original_bbox"]
+                    if len(ob) == 4 and ob[2] * ob[3] >= OCR_MIN_AREA_PX:
+                        logger.warning(
+                            f"T-C1: reverted over-expanded OCR bbox '{rn}' "
+                            f"(sam_area={area:.0f} = {100*area/img_area_pre:.1f}% "
+                            f"> 8%) to located label {ob}"
+                        )
+                        room["bbox"] = ob
+                        bbox = ob
+                        bx, by, bw, bh = ob
+                        area = bw * bh
+                        room["sam_expanded"] = False
+                        room["sam_skip_reason"] = "reverted_overexpansion"
+            else:
+                # (a) Text-label bbox: extreme aspect + small minimum dimension
+                if aspect > 4.0 and min_dim < 100:
+                    logger.warning(
+                        f"Fix1: dropped text-label bbox '{rn}' "
+                        f"(aspect={aspect:.1f}, min_dim={min_dim:.0f}px)"
+                    )
+                    continue
+
+                # (b) Bbox narrower/shorter than 2.5% of image dimension
+                if img_w_pre > 0 and img_h_pre > 0:
+                    if bw < img_w_pre * 0.025 or bh < img_h_pre * 0.025:
+                        logger.warning(
+                            f"Fix1: dropped sub-2.5%% bbox '{rn}' "
+                            f"(w={bw:.0f}<{img_w_pre*0.025:.0f}, "
+                            f"h={bh:.0f}<{img_h_pre*0.025:.0f})"
+                        )
+                        continue
+
+                # (c) Absolute area below minimum room size
+                if area < MIN_ROOM_AREA_PX:
+                    logger.warning(
+                        f"Fix1: dropped sub-minimum-area bbox '{rn}' "
+                        f"(area={area:.0f} < {MIN_ROOM_AREA_PX} px²)"
+                    )
+                    continue
 
             # (d) Area exceeds 30% of image — mislocalized giant blob
             if img_area_pre > 0 and area > img_area_pre * MAX_ROOM_FRAC:
@@ -1008,6 +1090,21 @@ def prepare_sft_annotation(annotation: Dict, min_rooms_for_sft: int = 1) -> Dict
                     f"Fix1: dropped oversized bbox '{rn}' "
                     f"(area={area:.0f} = {100*area/img_area_pre:.0f}% of image "
                     f"> {MAX_ROOM_FRAC:.0%} max)"
+                )
+                continue
+
+            # (e) P-1: VLM-only rooms exceeding single-unit ceiling.
+            # A single placed room cannot span >8% of a floor plan. vlm_only rooms
+            # above this are mislocalized over multi-room regions or notes.
+            # OCR-sourced and merged rooms are exempt — OCR labels are precise.
+            MAX_VLM_UNIT_FRAC = 0.08
+            if (img_area_pre > 0
+                    and room.get("source") == "vlm_only"
+                    and area > img_area_pre * MAX_VLM_UNIT_FRAC):
+                logger.warning(
+                    f"P-1: dropped vlm_only giant bbox '{rn}' "
+                    f"(area={area:.0f} = {100*area/img_area_pre:.1f}% > "
+                    f"{MAX_VLM_UNIT_FRAC:.0%} single-unit ceiling)"
                 )
                 continue
 
@@ -1131,11 +1228,22 @@ def prepare_sft_annotation(annotation: Dict, min_rooms_for_sft: int = 1) -> Dict
     # content_density is attached by SAM refine_annotations. When absent (SAM off),
     # the density check is skipped and area alone applies (backward compatible).
     ROOM_MIN_AREA = 40_000          # ~200x200px at 200 DPI; separates rooms from labels
+    # Rejects boxes over genuinely blank space (density ~0). NOT raised higher:
+    # valid spaces with giant mislocalized boxes (e.g. 2BR units, cd 0.036-0.045)
+    # would be discarded — that is a LOCALIZATION problem, fixed upstream by the
+    # SAM collapse-guardrail change, not by dropping the valid room here.
     MIN_CONTENT_DENSITY = 0.03      # below this the box is over blank space, not a room
     for room in sft_ready:
         bbox = room.get("bbox", [])
         area = bbox[2] * bbox[3] if len(bbox) == 4 else 0
-        area_ok = area >= ROOM_MIN_AREA
+        # DV-3 / Option A: OCR-anchored rooms bypass the room-scale area floor
+        # (already passed the OCR_MIN_AREA_PX check upstream in the geometric
+        # filter) but still must pass the content-density check — a blank-space
+        # hallucination anchored to real OCR text is still not a real room.
+        if room.get("source") in _OCR_ANCHORED_SOURCES:
+            area_ok = True
+        else:
+            area_ok = area >= ROOM_MIN_AREA
         density = room.get("content_density")
         density_ok = density is None or density >= MIN_CONTENT_DENSITY
         room["is_room_scale"] = area_ok and density_ok

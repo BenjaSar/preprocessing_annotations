@@ -277,6 +277,204 @@ class RoomSegmenter:
 
         return results
 
+    def _split_mask_instances(
+        self,
+        mask: np.ndarray,
+        min_area: int = 40000,
+        erosion_px: int = 3,
+    ) -> List[List[int]]:
+        """T1: Split a SAM binary mask into per-instance bboxes via connected components.
+
+        Erodes the mask to disconnect adjacent rooms that share a thin wall, then
+        labels connected components. Returns one [x, y, w, h] per component that
+        meets the min_area threshold.
+
+        Args:
+            mask: Boolean or uint8 binary mask (H, W).
+            min_area: Minimum component area in px² to emit a bbox (default 40000).
+            erosion_px: Square erosion kernel side length (default 3).
+
+        Returns:
+            List of [x, y, w, h] bboxes, one per qualifying component.
+            Empty list if no component meets min_area.
+        """
+        mask_u8 = mask.astype(np.uint8)
+        if erosion_px > 0:
+            kernel = np.ones((erosion_px, erosion_px), np.uint8)
+            mask_u8 = cv2.erode(mask_u8, kernel)
+
+        n_labels, labels, stats, _ = cv2.connectedComponentsWithStats(mask_u8, connectivity=8)
+        bboxes = []
+        for label in range(1, n_labels):  # skip background (label 0)
+            area = int(stats[label, cv2.CC_STAT_AREA])
+            if area < min_area:
+                continue
+            x = int(stats[label, cv2.CC_STAT_LEFT])
+            y = int(stats[label, cv2.CC_STAT_TOP])
+            w = int(stats[label, cv2.CC_STAT_WIDTH])
+            h = int(stats[label, cv2.CC_STAT_HEIGHT])
+            bboxes.append([x, y, w, h])
+        return bboxes
+
+    @staticmethod
+    def _iou_masks(a: np.ndarray, b: np.ndarray) -> float:
+        """T3: Compute IoU of two boolean or uint8 masks of equal shape."""
+        inter = float(np.logical_and(a, b).sum())
+        if inter == 0.0:
+            return 0.0
+        union = float(np.logical_or(a, b).sum())
+        return inter / union if union > 0 else 0.0
+
+    @staticmethod
+    def _is_multi_component(mask: np.ndarray) -> bool:
+        """T3: Return True if mask contains more than one connected component."""
+        n_labels, _ = cv2.connectedComponents(mask.astype(np.uint8), connectivity=8)
+        return n_labels > 2  # label 0 = background; >1 real component → multi
+
+    def _multistage_filter(
+        self,
+        pool: List[Tuple[np.ndarray, dict]],
+    ) -> List[dict]:
+        """T3: Apply two-pass filter to a pool of (mask, room_dict) tuples.
+
+        Coarse pass:
+          1. Drop entries whose mask contains more than one connected component.
+          2. Among remaining, drop IoU >= 0.8 duplicates (keep higher sam_confidence).
+        Fine pass (greedy covering set):
+          3. Sort survivors by mask area descending.
+          4. Greedily accept masks with mutual IoU <= 0.01 with all already-accepted.
+
+        This method is a no-op (returns room dicts unchanged) when called with an
+        empty pool or a pool of one entry.
+
+        Args:
+            pool: List of (binary_mask, room_dict) pairs. Masks must be same shape.
+
+        Returns:
+            List of room_dicts for the covering set. _mask keys stripped from dicts.
+        """
+        if len(pool) <= 1:
+            result = [d.copy() for _, d in pool]
+            for d in result:
+                d.pop("_mask", None)
+            return result
+
+        # --- Coarse pass 1: drop multi-component masks ---
+        survivors = [
+            (m, d) for m, d in pool
+            if not self._is_multi_component(m)
+        ]
+        if not survivors:
+            survivors = list(pool)
+
+        # --- Coarse pass 2: IoU >= 0.8 dedup ---
+        # Prefer a typed detection (non-empty room_type) over a typeless density
+        # prompt (BUG-2); only when both are typed-or-both-typeless fall back to
+        # higher sam_confidence. This prevents a density_prompt from evicting a
+        # classified room merely because SAM scored its mask higher.
+        def _is_typed(d: dict) -> bool:
+            return bool(d.get("room_type"))
+
+        deduped: List[Tuple[np.ndarray, dict]] = []
+        for mask_i, dict_i in survivors:
+            dominated = False
+            for j, (mask_j, dict_j) in enumerate(deduped):
+                if self._iou_masks(mask_i, mask_j) >= 0.8:
+                    typed_i, typed_j = _is_typed(dict_i), _is_typed(dict_j)
+                    if typed_i != typed_j:
+                        # Exactly one is typed → keep the typed one.
+                        if typed_i:
+                            deduped[j] = (mask_i, dict_i)
+                    else:
+                        # Both typed or both typeless → higher confidence wins.
+                        conf_i = dict_i.get("sam_confidence", dict_i.get("confidence", 0.0))
+                        conf_j = dict_j.get("sam_confidence", dict_j.get("confidence", 0.0))
+                        if conf_i > conf_j:
+                            deduped[j] = (mask_i, dict_i)
+                    dominated = True
+                    break
+            if not dominated:
+                deduped.append((mask_i, dict_i))
+
+        # --- Fine pass: greedy covering set (IoU <= 0.01) ---
+        deduped.sort(key=lambda t: -int(t[0].sum()))  # largest area first
+        covering: List[Tuple[np.ndarray, dict]] = []
+        for mask_c, dict_c in deduped:
+            if all(self._iou_masks(mask_c, sel_m) <= 0.01 for sel_m, _ in covering):
+                covering.append((mask_c, dict_c))
+
+        result = [d.copy() for _, d in covering]
+        for d in result:
+            d.pop("_mask", None)
+        return result
+
+    def _density_peak_prompts(
+        self,
+        gray: np.ndarray,
+        exclusion_zones: Optional[List[Tuple[int, int, int, int]]] = None,
+    ) -> List[Tuple[int, int]]:
+        """T2: Extract SAM prompt points from Sobel gradient density peaks.
+
+        Computes Sobel magnitude, thresholds at tau_factor * mean, labels
+        connected peaks, takes their centroids, applies minimum spacing and
+        BOM-zone exclusion, then caps at density_max_prompts.
+
+        Args:
+            gray: Grayscale image as uint8 numpy array (H, W).
+            exclusion_zones: List of (x1, y1, x2, y2) rects to suppress.
+                Prompt points inside any zone are dropped.
+
+        Returns:
+            List of (x, y) prompt point tuples, capped at density_max_prompts.
+        """
+        gx = cv2.Sobel(gray.astype(np.float32), cv2.CV_64F, 1, 0, ksize=3)
+        gy = cv2.Sobel(gray.astype(np.float32), cv2.CV_64F, 0, 1, ksize=3)
+        mag = np.sqrt(gx ** 2 + gy ** 2)
+
+        tau = self.config.density_tau_factor * mag.mean()
+        peaks_mask = (mag > tau).astype(np.uint8)
+
+        n_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(
+            peaks_mask, connectivity=8
+        )
+
+        # Collect (magnitude_sum, cx, cy) per component (skip background)
+        candidates = []
+        for lbl in range(1, n_labels):
+            cx = int(centroids[lbl][0])
+            cy = int(centroids[lbl][1])
+            mag_sum = float(mag[labels == lbl].sum())
+            candidates.append((mag_sum, cx, cy))
+
+        # Sort by magnitude descending so strongest peaks are selected first
+        candidates.sort(key=lambda t: -t[0])
+
+        # Greedy minimum-spacing filter
+        min_sp = self.config.density_min_spacing
+        kept: List[Tuple[int, int]] = []
+        for _, cx, cy in candidates:
+            too_close = any(
+                abs(cx - kx) < min_sp and abs(cy - ky) < min_sp
+                for kx, ky in kept
+            )
+            if too_close:
+                continue
+
+            # BOM-zone exclusion: drop points inside any exclusion rect (x1,y1,x2,y2)
+            if exclusion_zones:
+                in_zone = any(
+                    x1 <= cx <= x2 and y1 <= cy <= y2
+                    for x1, y1, x2, y2 in exclusion_zones
+                )
+                if in_zone:
+                    continue
+
+            kept.append((cx, cy))
+            if len(kept) >= self.config.density_max_prompts:
+                break
+
+        return kept
+
     def _mask_to_bbox(
         self, mask: np.ndarray
     ) -> Tuple[List[int], Optional[np.ndarray]]:
@@ -313,6 +511,7 @@ class RoomSegmenter:
         img_width: int = 0,
         img_height: int = 0,
         max_expand_frac: float = 0.25,
+        exclusion_zones: Optional[List[Tuple[int, int, int, int]]] = None,
     ) -> List[dict]:
         """
         Expand label-sized bboxes to room-boundary bboxes using SAM.
@@ -374,9 +573,20 @@ class RoomSegmenter:
                 center_x, center_y, original_area = 50, 50, 1
 
             try:
+                # T1: request mask for cc_split. T3: need mask for pool, but only
+                # when density seeding is also active (T3 is a no-op otherwise).
+                t3_active = self.config.use_multistage_filter and self.config.use_density_prompts
+                need_mask = self.config.use_cc_split or t3_active
+                # P-2B: for label-scale originals the box prompt confines SAM to
+                # the label area, preventing expansion to room walls. Use point-only
+                # prompt so SAM can grow to the enclosing room boundary. For large
+                # originals (already room-scale or over-sized VLM boxes) keep the
+                # box prompt as a coarse constraint against runaway segmentation.
+                LABEL_SCALE_BOX_MAX = 50_000  # px²; ~224×224, generous label ceiling
+                use_box = len(bbox) == 4 and original_area > LABEL_SCALE_BOX_MAX
                 result = self.segment_from_point(
-                    image_path, (center_x, center_y), include_mask=False,
-                    label_bbox=bbox if len(bbox) == 4 else None,
+                    image_path, (center_x, center_y), include_mask=need_mask,
+                    label_bbox=bbox if use_box else None,
                 )
 
                 rx, ry, rw, rh = result.bbox
@@ -395,11 +605,16 @@ class RoomSegmenter:
                     kept_original += 1
                     continue
 
-                # Guardrail 2: collapse
-                if sam_area < original_area:
+                # Guardrail 2: collapse — only when the original was LABEL-SCALE.
+                # A label box is small; SAM shrinking below it means SAM failed, so
+                # keep the label. But when the original is already a giant mislocalized
+                # box (VLM drew a schedule/notes region), SAM's SMALLER result is the
+                # desired refinement — accepting it fixes the huge-box error.
+                LABEL_SCALE_MAX = 150_000  # px²; ~387×387, generous text-label ceiling
+                if sam_area < original_area and original_area <= LABEL_SCALE_MAX:
                     logger.debug(
                         f"SAM collapse guardrail: sam_area={sam_area} < "
-                        f"original={original_area}. Keeping original."
+                        f"original={original_area} (label-scale). Keeping original."
                     )
                     refined_ann = ann.copy()
                     refined_ann["sam_expanded"] = False
@@ -408,11 +623,39 @@ class RoomSegmenter:
                     kept_original += 1
                     continue
 
+                # T1: connected-component split when flag is set and mask available.
+                if self.config.use_cc_split and result.mask is not None:
+                    cc_bboxes = self._split_mask_instances(
+                        result.mask,
+                        min_area=self.config.cc_min_area,
+                        erosion_px=self.config.cc_erosion_px,
+                    )
+                    if len(cc_bboxes) >= 2:
+                        logger.debug(
+                            f"T1 CC split: {len(cc_bboxes)} components from mask "
+                            f"(original bbox area={sam_area:.0f})"
+                        )
+                        for cc_bbox in cc_bboxes:
+                            split_ann = ann.copy()
+                            split_ann["bbox"] = cc_bbox
+                            split_ann["original_bbox"] = bbox
+                            split_ann["sam_confidence"] = result.confidence
+                            split_ann["sam_expanded"] = True
+                            split_ann["cc_split"] = True
+                            refined.append(split_ann)
+                        expanded += len(cc_bboxes)
+                        del result.mask  # release memory
+                        continue
+                    # Single component or empty — fall through to normal path below.
+
                 refined_ann = ann.copy()
                 refined_ann["bbox"] = result.bbox
                 refined_ann["original_bbox"] = bbox
                 refined_ann["sam_confidence"] = result.confidence
                 refined_ann["sam_expanded"] = True
+                # T3: keep mask in dict for pool collection; stripped after filter.
+                if t3_active and result.mask is not None:
+                    refined_ann["_mask"] = result.mask
                 refined.append(refined_ann)
                 expanded += 1
 
@@ -423,6 +666,68 @@ class RoomSegmenter:
                 refined_ann["sam_skip_reason"] = "error"
                 refined.append(refined_ann)
                 kept_original += 1
+
+        # T2: density-peak supplementary prompts (EXPERIMENT — default off).
+        # Runs after label-centroid loop; adds rooms at structurally dense image
+        # locations not already covered by an existing annotation centroid.
+        if self.config.use_density_prompts and _gray is not None:
+            peak_points = self._density_peak_prompts(_gray, exclusion_zones)
+
+            # Build set of existing centroids to avoid re-seeding known rooms
+            existing_centroids = []
+            for ann in refined:
+                b = ann.get("bbox", [])
+                if len(b) == 4:
+                    bx, by, bw, bh = b
+                    existing_centroids.append((bx + bw // 2, by + bh // 2))
+
+            for px, py in peak_points:
+                # Skip if too close to any existing annotation centroid (20px)
+                if any(abs(px - ex) < 20 and abs(py - ey) < 20 for ex, ey in existing_centroids):
+                    continue
+                try:
+                    res = self.segment_from_point(
+                        image_path, (px, py), include_mask=self.config.use_multistage_filter,
+                    )
+                    rx, ry, rw, rh = res.bbox
+                    dp_area = rw * rh
+                    if dp_area > max_sam_area or dp_area == 0:
+                        continue
+                    dp_ann: dict = {
+                        "bbox": res.bbox,
+                        "room_type": "",
+                        "room_name": "",
+                        "confidence": res.confidence,
+                        "sam_expanded": True,
+                        "sam_confidence": res.confidence,
+                        "source": "density_prompt",
+                    }
+                    if res.mask is not None:
+                        dp_ann["_mask"] = res.mask  # used by T3 pool; stripped later
+                    refined.append(dp_ann)
+                    existing_centroids.append((px, py))
+                    expanded += 1
+                except Exception as e:
+                    logger.debug(f"T2 density-peak SAM failed at ({px},{py}): {e}")
+
+        # T3: multi-stage mask pool filter. No-op unless BOTH multistage AND density
+        # seeding are active (density is what creates the enlarged pool worth filtering;
+        # label-only rooms are already deduped by pipeline._dedup_rooms_by_iou).
+        if self.config.use_multistage_filter and self.config.use_density_prompts:
+            pool_entries = [(d["_mask"], d) for d in refined if "_mask" in d]
+            no_mask_entries = [d for d in refined if "_mask" not in d]
+            if pool_entries:
+                filtered = self._multistage_filter(pool_entries)
+                refined = no_mask_entries + filtered
+                logger.info(
+                    f"T3 multistage filter: {len(pool_entries)} pool → "
+                    f"{len(filtered)} after filter"
+                )
+
+        # Safety: strip any residual _mask (numpy array) before annotations are
+        # JSON-serialized downstream. Guards against BUG-3 (ndarray not serializable).
+        for d in refined:
+            d.pop("_mask", None)
 
         # FIX-1: attach content-density (non-white fraction) on each room's final
         # bbox. Consumed by the SFT room-scale gate to drop blank-space boxes.
