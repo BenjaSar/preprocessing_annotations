@@ -347,14 +347,22 @@ class SemanticRoomValidator:
                 logger.debug(f"Filtered (non-room pattern): {name}")
                 continue
 
+            # T-2: OCR-anchored rooms (ocr_only / vlm_ocr_merged) are exempt
+            # from the size/aspect checks below. These checks target header/
+            # footer text and documentation blocks — real located room labels
+            # (e.g. ELEVATOR bbox height=14px) are legitimately small/wide and
+            # would otherwise be dropped here before Option A's area-gate
+            # exemption ever applies downstream.
+            is_ocr_anchored = room.get("source") in ("ocr_only", "vlm_ocr_merged")
+
             # Skip if too small (header/footer text)
             bbox = room.get("bbox", [])
-            if len(bbox) >= 4 and bbox[3] < 20:
+            if not is_ocr_anchored and len(bbox) >= 4 and bbox[3] < 20:
                 logger.debug(f"Filtered (too small): {name}")
                 continue
 
             # Skip if too wide/short (documentation blocks)
-            if len(bbox) >= 4 and bbox[2] > bbox[3] * 8:
+            if not is_ocr_anchored and len(bbox) >= 4 and bbox[2] > bbox[3] * 8:
                 logger.debug(f"Filtered (too wide): {name}")
                 continue
 
@@ -803,7 +811,24 @@ def _merge_vlm_and_ocr(vlm_rooms: List[Dict], ocr_rooms: List[Dict]) -> List[Dic
             # CRITICAL FIX #3: Preserve compound names from OCR
             vlm_name = merged[matched_vlm].get("name") or merged[matched_vlm].get("room_name", "")
 
-            if ocr_name and len(ocr_name) > len(vlm_name):
+            already_claimed = merged[matched_vlm].get("source") == "vlm_ocr_merged"
+
+            if ocr_name and already_claimed:
+                # T-1: this VLM box already absorbed an earlier compound OCR
+                # label (rename-chain). Overwriting again would silently erase
+                # the first winner (measured: TELECOM ROOM claimed a box, then
+                # BUILDING STORAGE matched the same box and overwrote it —
+                # TELECOM ROOM vanished from the final annotation entirely).
+                # Give the second (and any further) claimant its own ocr_only
+                # room instead of overwriting the first.
+                logger.debug(
+                    f"T-1: VLM box already claimed by '{vlm_name}' → OCR "
+                    f"'{ocr_name}' kept as separate ocr_only room (no overwrite)"
+                )
+                r = dict(ocr_room)
+                r["source"] = "ocr_only"
+                merged.append(r)
+            elif ocr_name and len(ocr_name) > len(vlm_name):
                 logger.debug(
                     f"Merged: VLM '{vlm_name}' + OCR '{ocr_name}' → using OCR (compound)"
                 )

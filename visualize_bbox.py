@@ -110,11 +110,23 @@ def draw_annotations(image_path: Path, annotation: dict, output_path: Path,
         color = _get_color(room_type)
         fill_alpha = int(255 * opacity)
 
-        # Semi-transparent fill on fill layer
+        # T-5: label-scale rooms (e.g. TELECOM ROOM 112x20px) are present in the
+        # data but render as an invisible sliver at sheet scale, so they get
+        # mis-read as "omitted". Draw the outline around a minimum-visible box
+        # centered on the true bbox so every kept room is findable. Fill stays
+        # on the true bbox — only the visibility marker is enlarged.
+        MIN_VIS = max(24, int(base.width * 0.006))  # ~27px at 4500px width
+        vx1, vy1, vx2, vy2 = x1, y1, x2, y2
+        if (x2 - x1) < MIN_VIS or (y2 - y1) < MIN_VIS:
+            cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+            half = MIN_VIS // 2
+            vx1, vy1, vx2, vy2 = cx - half, cy - half, cx + half, cy + half
+
+        # Semi-transparent fill on fill layer (true bbox)
         draw_fill.rectangle([x1, y1, x2, y2], fill=(*color, fill_alpha))
 
-        # Solid outline on stroke layer
-        draw_stroke.rectangle([x1, y1, x2, y2], outline=(*color, 255), width=stroke_width)
+        # Solid outline on stroke layer (min-visible box)
+        draw_stroke.rectangle([vx1, vy1, vx2, vy2], outline=(*color, 255), width=stroke_width)
 
         # Label text
         label = f"{room_type}"
