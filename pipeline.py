@@ -894,6 +894,7 @@ class AnnotationPipeline:
                 annotation = prepare_sft_annotation(
                     annotation,
                     min_rooms_for_sft=self.config.min_rooms_for_sft,
+                    image_dir=images_dir,
                 )
                 filtered_room_count = len(annotation.get("rooms", []))
                 _sft_outcome = "sft_ready" if annotation.get("sft_ready") else "filtered"
