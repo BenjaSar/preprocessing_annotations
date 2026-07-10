@@ -44,6 +44,9 @@ ABBREVIATION_MAP: dict[str, str] = {
     "3 BR":  "3 BEDROOM",
     "4BR":   "4 BEDROOM",
     "4 BR":  "4 BEDROOM",
+    # ── Janitor / custodial ──────────────────────────────────────────────────
+    "JC":    "JANITOR",
+    "JAN":   "JANITOR",
     # ── Bathrooms ────────────────────────────────────────────────────────────
     "BA":    "BATHROOM",
     "BATH":  "BATHROOM",

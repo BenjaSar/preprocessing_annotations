@@ -211,6 +211,12 @@ class SemanticRoomValidator:
         "BOILER",
         "PUMP",
         "JANITOR",
+        # Institutional/school rooms — previously dropped by keyword gate
+        # (verified: CUSTODIAL x4 reached gate and were filtered). Each maps
+        # to a canonical type via taxonomy (TOILET→TOILET, GYM→GYMNASIUM,
+        # CUSTODIAL/LOCKER→OTHER, SPECIAL EDUCATION→CLASSROOM, COACH→OFFICE).
+        "TOILET", "CUSTODIAL", "LOCKER", "LOCKERS", "GYM", "GYMNASIUM",
+        "SPECIAL EDUCATION", "SPECIAL ED", "COACH",
         "ART", "MUSIC", "STUDY", "READING",
         "CCTV",
         "PLUMBING",
@@ -765,6 +771,73 @@ def _resolve_bbox_overlaps(rooms: List[Dict]) -> List[Dict]:
     return processed
 
 
+def _dedup_nested_same_type(rooms: List[Dict], contain_frac: float = 0.7) -> List[Dict]:
+    """Drop the LARGER of two same-canonical-type boxes when one nearly contains
+    the other — a duplicate detection of the same space at two scales.
+
+    Motivation (Phase 2, verified): tiled VLM inference emits the same room at
+    drifting sizes. When the pair's IoU is just under 0.5 (e.g. a wide LOBBY
+    strip [162,57,2012,625] nesting [162,57,2012,323], IoU 0.47) _resolve_bbox_
+    overlaps' 0.5 merge misses it, and its circulation-type exemption skips it
+    entirely — so an oversized duplicate survives past the 8% ceiling. Unlike
+    adjacency overlap (expected for corridors), CONTAINMENT of a same-type box
+    is a true duplicate, so this runs for ALL types incl. circulation. Keeps the
+    tighter (smaller) box, which hugs the actual label/room better.
+
+    contain_frac: min fraction of the SMALLER box's area that must lie inside
+    the larger to count as "contained" (0.7 = mostly nested, not mere touching).
+    """
+    def _type(r):
+        # Key on the CANONICAL type derived from the immutable room_name, not the
+        # raw "category" field — tiled VLM duplicates of the same label often
+        # carry different garbage categories (e.g. two "VESTIBULE" boxes tagged
+        # "STORAGE" and "GYM OFFICE"), which would otherwise defeat same-type
+        # matching. normalize_to_mandatory maps both to LOBBY.
+        name = r.get("room_name") or r.get("name") or r.get("type") or r.get("category") or ""
+        try:
+            return normalize_to_mandatory(name)
+        except Exception:
+            return name.lower()
+
+    drop = set()
+    for i in range(len(rooms)):
+        if i in drop:
+            continue
+        bi = rooms[i].get("bbox", [])
+        if len(bi) != 4:
+            continue
+        for j in range(len(rooms)):
+            if j == i or j in drop:
+                continue
+            bj = rooms[j].get("bbox", [])
+            if len(bj) != 4 or _type(rooms[i]) != _type(rooms[j]):
+                continue
+            ai = (bi[2] - bi[0]) * (bi[3] - bi[1])
+            aj = (bj[2] - bj[0]) * (bj[3] - bj[1])
+            if ai <= 0 or aj <= 0:
+                continue
+            # intersection (boxes are xywh here: [x, y, w, h])
+            ix1, iy1 = max(bi[0], bj[0]), max(bi[1], bj[1])
+            ix2 = min(bi[0] + bi[2], bj[0] + bj[2])
+            iy2 = min(bi[1] + bi[3], bj[1] + bj[3])
+            if ix2 <= ix1 or iy2 <= iy1:
+                continue
+            inter = (ix2 - ix1) * (iy2 - iy1)
+            smaller = min(ai, aj)
+            if inter / smaller >= contain_frac:
+                # Drop the larger of the pair (keep tighter box).
+                larger_idx = i if ai >= aj else j
+                drop.add(larger_idx)
+                rn = rooms[larger_idx].get("room_name") or rooms[larger_idx].get("name", "?")
+                logger.warning(
+                    f"Fix2b: dropped nested same-type duplicate (larger) '{rn}' "
+                    f"(kept tighter box of type '{_type(rooms[larger_idx])}')"
+                )
+                if larger_idx == i:
+                    break
+    return [r for k, r in enumerate(rooms) if k not in drop]
+
+
 
 
 
@@ -882,7 +955,82 @@ def _merge_vlm_and_ocr(vlm_rooms: List[Dict], ocr_rooms: List[Dict]) -> List[Dic
     return merged
 
 
-def prepare_sft_annotation(annotation: Dict, min_rooms_for_sft: int = 1) -> Dict:
+# ── FIX-5: non-drawing-region drop (ink-fraction under box) ──────────────────
+# Verified defect (18-file visual audit, sprint1_verify35): the VLM/OCR places a
+# room label in a region that carries no floor-plan linework — blank margin,
+# BOM/notes/schedule table, or title block. Two size-distinct symptoms share one
+# root: oversized vlm_only floor-plate blobs AND small schedule-table label grids
+# both sit off the drawing. Existing exclusion zones (FIX-4) miss them because no
+# excluded-token cluster forms in the blank gaps between tables, so a text-driven
+# zone never covers the box.
+#
+# Signal: fraction of ink (dark) pixels under the box footprint. A box over the
+# drawing covers walls/fixtures (high ink); a box in a blank margin covers
+# near-white paper (near-zero ink). Size-, source-, and grid-agnostic — measured
+# to separate the two defect classes where those weaker signals do not.
+#
+# Constants are data-derived, not chosen — measured over 473 boxes across 58
+# sheets against the 18-file visual ground truth:
+#   INK_BINARISE_MAX  grayscale value below which a pixel counts as ink. A fixed
+#     near-white cut. Per-page Otsu was tested and rejected: it collapses the
+#     wrong/right gap (on-drawing boxes fall to ~0 ink on some sheets).
+#   INK_MIN_FRAC  at that binarise level the wrong-box ink maxed at 0.077 and the
+#     right-box ink bottomed at 0.102; the cut sits in that empty gap.
+# Known residual (1 of 112): a margin giant overlapping an inset detail-plan
+# reaches 0.111 ink and survives — a false negative, not a false drop.
+INK_BINARISE_MAX = 200
+INK_MIN_FRAC = 0.09
+
+
+def _bbox_ink_fraction(gray: Image.Image, bbox: List, binarise_max: int) -> Optional[float]:
+    """Fraction of ink (dark) pixels inside an XYWH bbox.
+
+    Returns None when the bbox is malformed or has no area, so the caller can
+    distinguish "could not measure" from "measured zero ink".
+    """
+    if not bbox or len(bbox) < 4:
+        return None
+    x, y, w, h = (int(round(v)) for v in bbox[:4])
+    if w <= 0 or h <= 0:
+        return None
+    crop = gray.crop((x, y, x + w, y + h))
+    total = crop.width * crop.height
+    if total == 0:
+        return None
+    ink_mask = crop.point(lambda p: 255 if p < binarise_max else 0)
+    ink_pixels = ink_mask.histogram()[255]
+    return ink_pixels / total
+
+
+def _filter_low_ink_rooms(
+    rooms: List[Dict], gray: Image.Image, min_frac: float, binarise_max: int
+) -> Tuple[List[Dict], int]:
+    """Drop rooms whose box lies over a non-drawing region (ink below min_frac).
+
+    Boxes that cannot be measured (malformed bbox, out of image) are kept — this
+    filter only removes positively-confirmed low-ink placements.
+    """
+    kept: List[Dict] = []
+    dropped = 0
+    for room in rooms:
+        frac = _bbox_ink_fraction(gray, room.get("bbox", []), binarise_max)
+        if frac is not None and frac < min_frac:
+            rn = room.get("room_name") or room.get("name", "?")
+            logger.warning(
+                f"FIX-5: dropped non-drawing bbox '{rn}' "
+                f"(ink={frac:.3f} < {min_frac} min)"
+            )
+            dropped += 1
+            continue
+        kept.append(room)
+    return kept, dropped
+
+
+def prepare_sft_annotation(
+    annotation: Dict,
+    min_rooms_for_sft: int = 1,
+    image_dir: Optional[Path] = None,
+) -> Dict:
     """
     Convert annotation to SFT-ready format.
 
@@ -890,6 +1038,9 @@ def prepare_sft_annotation(annotation: Dict, min_rooms_for_sft: int = 1) -> Dict
         annotation: Raw annotation dictionary.
         min_rooms_for_sft: Minimum rooms required for sft_ready=True (default 1).
             Images with ≥3 rooms also receive sft_recommended=True.
+        image_dir: Directory holding the source page image (named by
+            annotation["image_file"]). When provided, FIX-5 drops rooms placed
+            over non-drawing regions. When None, FIX-5 is skipped.
 
     CRITICAL FIXES:
     - Merges VLM-detected rooms with OCR-detected compound names
@@ -927,16 +1078,58 @@ def prepare_sft_annotation(annotation: Dict, min_rooms_for_sft: int = 1) -> Dict
             if len(bbox) < 4:
                 return False
             bx, by, bw, bh = bbox[0], bbox[1], bbox[2], bbox[3]
+            if bw <= 0 or bh <= 0:
+                return False
             cx, cy = bx + bw // 2, by + bh // 2
+            room_area = bw * bh
             for x1, y1, x2, y2 in zones:
                 if x1 <= cx <= x2 and y1 <= cy <= y2:
                     return True
+                # T-OVERLAP: centroid-only misses large mislocalized boxes that
+                # overlap a zone (e.g. BOM table) without being centered on it.
+                # Two directions matter, checked independently — a huge box can
+                # swallow a small marker zone (verified: CORRIDOR bbox 1037x587
+                # fully contains a 290x127 AVI-ON BOM zone, but that's only 6%
+                # of the room's own area — overlap/room_area alone misses it),
+                # and a marker zone can be large relative to a smaller room.
+                ix1, iy1 = max(bx, x1), max(by, y1)
+                ix2, iy2 = min(bx + bw, x2), min(by + bh, y2)
+                if ix2 > ix1 and iy2 > iy1:
+                    inter = (ix2 - ix1) * (iy2 - iy1)
+                    zone_area = (x2 - x1) * (y2 - y1)
+                    if inter / room_area > 0.3 or (zone_area > 0 and inter / zone_area > 0.4):
+                        return True
             return False
         rooms = [r for r in rooms if not _in_any_zone(r.get("bbox", []), exclusion_zones)]
         n_excl = pre_excl - len(rooms)
         if n_excl:
             drop_attribution["bom_zone"] = n_excl
             logger.info(f"FIX-4: dropped {n_excl} room(s) with centroid in BOM/title-block zone")
+
+    # Step 0-pre: FIX-5 — drop rooms placed over non-drawing regions (blank
+    # margin, BOM/notes table, title block) where no linework lies under the
+    # box. Complements FIX-4: catches placements in the blank gaps that no
+    # excluded-token cluster covers. Requires the source image; skipped without.
+    if image_dir is not None and rooms:
+        img_name = annotation.get("image_file")
+        img_path = Path(image_dir) / img_name if img_name else None
+        if img_path and img_path.exists():
+            try:
+                with Image.open(img_path) as im:
+                    gray = im.convert("L")
+                pre_ink = len(rooms)
+                rooms, n_ink = _filter_low_ink_rooms(
+                    rooms, gray, INK_MIN_FRAC, INK_BINARISE_MAX
+                )
+                if n_ink:
+                    drop_attribution["low_ink"] = n_ink
+                    logger.info(
+                        f"FIX-5: dropped {n_ink} room(s) placed over non-drawing region"
+                    )
+            except Exception as exc:  # noqa: BLE001 — never fail the page on FIX-5
+                logger.warning(f"FIX-5 skipped ({img_path.name}): {exc}")
+        else:
+            logger.debug("FIX-5 skipped: image not found for %s", img_name)
 
     # Step 0: Normalize VLM output fields (room_name → name, category → type)
     for room in rooms:
@@ -1133,6 +1326,33 @@ def prepare_sft_annotation(annotation: Dict, min_rooms_for_sft: int = 1) -> Dict
                 )
                 continue
 
+            # (f) T-ASPECT: type-aware aspect cap for degenerate thin strips.
+            # Verified failure mode (Kennedy/Lake Shore school sheets): the VLM
+            # emits thin-tall/thin-wide boxes (e.g. STORAGE aspect 12 spanning
+            # 74% of image height) that evade the area caps (d)/(e) — a thin box
+            # keeps total area moderate despite spanning most of a dimension —
+            # and evade the (a) text-label check (min_dim > 100). A non-
+            # circulation room physically cannot be both very elongated AND span
+            # a large fraction of the sheet; that shape is a mislocalized strip.
+            # Circulation types (corridor/hallway/lobby/stairwell/elevator/riser/
+            # vestibule) are EXEMPT — they are legitimately long-and-thin.
+            # Conjunction (aspect AND span) is deliberate: spares normal-aspect
+            # rooms and small thin closets (low span).
+            _CIRC = {"corridor", "hallway", "lobby", "elevator", "stairwell",
+                     "riser", "vestibule"}
+            _type = (room.get("type") or room.get("category") or "").lower()
+            _name = (rn or "").lower()
+            _is_circ = any(c in _type or c in _name for c in _CIRC)
+            if (not _is_circ and img_w_pre > 0 and img_h_pre > 0
+                    and aspect > 4.0
+                    and max(bw / img_w_pre, bh / img_h_pre) > 0.25):
+                logger.warning(
+                    f"T-ASPECT: dropped degenerate strip '{rn}' "
+                    f"(type={_type or 'n/a'}, aspect={aspect:.1f}, "
+                    f"span={max(bw/img_w_pre, bh/img_h_pre):.0%} of a dimension)"
+                )
+                continue
+
         geom_filtered.append(room)
     rooms = geom_filtered
     n_geom = pre_geom - len(rooms)
@@ -1145,6 +1365,11 @@ def prepare_sft_annotation(annotation: Dict, min_rooms_for_sft: int = 1) -> Dict
     # to ensure clean spatial geometry for SFT.
     pre_overlap = len(rooms)
     rooms = _resolve_bbox_overlaps(rooms)
+    # Fix2b (Phase 2): same-type containment dedup — catches nested duplicate
+    # boxes (esp. circulation types skipped by _resolve_bbox_overlaps) whose
+    # IoU falls just under the 0.5 merge threshold, leaving an oversized copy
+    # that survives past the 8% single-unit ceiling.
+    rooms = _dedup_nested_same_type(rooms)
     n_resolved = pre_overlap - len(rooms)
     drop_attribution["overlap"] = n_resolved
     if n_resolved > 0:

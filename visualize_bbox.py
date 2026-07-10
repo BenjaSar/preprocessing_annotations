@@ -29,27 +29,76 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Color palette: room type -> (R, G, B)
 # ---------------------------------------------------------------------------
+# Semantic-group palette covering all 22 mandatory taxonomy types (see
+# automation/taxonomy.py VALID_TYPES). Each group shares a hue family (derived
+# from the dataviz skill's validated 8-slot categorical ramp); members within a
+# group are distinguished by shade — safe because every box always carries a
+# text label banner (secondary encoding), per the skill's floor-band exception
+# for >12 categories. Validated: node validate_palette.js on the 7 group anchors
+# + fallback, worst adjacent CVD ΔE 11.2 (floor band, legal with labels).
 ROOM_COLORS = {
-    "PRIVATE OFFICE":    (55,  126, 184),   # steel blue
-    "OPEN OFFICE":       (0,   190, 210),   # cyan
-    "CONFERENCE":        (77,  175, 74),    # green
-    "MEETING":           (0,   166, 153),   # teal
-    "LOBBY":             (255, 127, 0),     # orange
-    "CORRIDOR":          (255, 215, 0),     # gold
-    "RESTROOM":          (152, 78,  163),   # purple
-    "STAIRWELL":         (228, 26,  28),    # red
-    "ELECTRICAL ROOM":   (150, 150, 150),   # gray
-    "STORAGE ROOM":      (166, 86,  40),    # brown
-    "ELEVATOR":          (200, 100, 100),   # dusty rose
-    "KITCHEN":           (245, 130, 48),    # tangerine
-    "RECEPTION":         (70,  130, 180),   # light steel blue
+    # Office — blue family
+    "PRIVATE OFFICE":     (42,  120, 214),
+    "OPEN OFFICE":        (30,  86,  155),
+    "CONFERENCE":         (93,  153, 224),
+    "MEETING":            (20,  58,  103),
+    # Circulation — gold family
+    "CORRIDOR":           (237, 161, 0),
+    "LOBBY":              (166, 112, 0),
+    "STAIRWELL":          (255, 187, 43),
+    # Service / Utility — violet family
+    "ELECTRICAL ROOM":    (74,  58,  167),
+    "STORAGE ROOM":       (51,  40,  114),
+    "JANITOR CLOSET":     (105, 89,  197),
+    "PARKING GARAGE":     (37,  29,  83),
+    "WAREHOUSE":          (139, 127, 210),
+    # Residential — green family
+    "RESIDENTIAL UNIT":   (0,   131, 0),
+    # Education — orange family
+    "CLASSROOM":          (235, 104, 52),
+    "LECTURE HALL":       (196, 70,  19),
+    "TRAINING ROOM":      (240, 145, 108),
+    "MULTIPURPOSE ROOM":  (141, 50,  14),
+    "GYMNASIUM":          (242, 158, 125),
+    # Retail / Food — magenta family
+    "RETAIL":             (232, 123, 164),
+    "RESTAURANT":         (221, 62,  122),
+    "CAFETERIA":          (234, 133, 171),
+    # Sanitary — aqua family
+    "RESTROOM":           (27,  175, 122),
+    # Legacy / extended types seen in some data (not in mandatory taxonomy)
+    "ELEVATOR":           (200, 100, 100),
+    "KITCHEN":            (245, 130, 48),
+    "RECEPTION":          (70,  130, 180),
 }
-DEFAULT_COLOR = (200, 200, 200)  # light gray for unknown types
+# Pure magenta: not used by any group above, so an unmapped type is unmistakable
+# rather than silently rendered near-invisible (the bug this replaces).
+DEFAULT_COLOR = (255, 0, 255)
 
 
 def _get_color(room_type: str) -> tuple:
     """Look up color for a room type (case-insensitive)."""
     return ROOM_COLORS.get(room_type.upper(), DEFAULT_COLOR)
+
+
+def _dashed_rectangle(draw: ImageDraw.ImageDraw, box, color, width: int = 1, dash: int = 10):
+    """Draw a dashed rectangle outline — visually distinct from a solid one.
+
+    Used for the T-5 enlarged visibility marker so it's never mistaken for a
+    real room-sized box (both previously rendered as identical solid rects).
+    """
+    x1, y1, x2, y2 = box
+    edges = [((x1, y1), (x2, y1)), ((x2, y1), (x2, y2)),
+             ((x2, y2), (x1, y2)), ((x1, y2), (x1, y1))]
+    for (sx, sy), (ex, ey) in edges:
+        length = max(abs(ex - sx), abs(ey - sy))
+        steps = max(1, length // dash)
+        for i in range(0, int(steps), 2):
+            t0, t1 = i / steps, min(1.0, (i + 1) / steps)
+            draw.line([
+                (sx + (ex - sx) * t0, sy + (ey - sy) * t0),
+                (sx + (ex - sx) * t1, sy + (ey - sy) * t1),
+            ], fill=color, width=width)
 
 
 def _load_font(image_width: int):
@@ -85,7 +134,22 @@ def draw_annotations(image_path: Path, annotation: dict, output_path: Path,
     """
     # Load base image and convert to RGBA for compositing
     base = Image.open(image_path).convert("RGBA")
-    
+
+    # Coord-space guard: bboxes are in annotation["image_size"] space. If that
+    # doesn't match the loaded image (e.g. a re-extraction changed resolution),
+    # blindly drawing raw coords silently mislocates every box off the real
+    # geometry ("outside floorplan"). Scale instead of trusting them as-is.
+    ann_size = annotation.get("image_size") or {}
+    ann_w, ann_h = ann_size.get("width"), ann_size.get("height")
+    scale_x = scale_y = 1.0
+    if ann_w and ann_h and (ann_w != base.width or ann_h != base.height):
+        scale_x, scale_y = base.width / ann_w, base.height / ann_h
+        logger.warning(
+            f"{image_path.name}: annotation image_size {ann_w}x{ann_h} != "
+            f"loaded image {base.width}x{base.height} — scaling bboxes "
+            f"(x*{scale_x:.3f}, y*{scale_y:.3f})"
+        )
+
     # Create two overlay layers: one for semi-transparent fills, one for strokes/text
     fill_layer = Image.new("RGBA", base.size, (0, 0, 0, 0))
     stroke_layer = Image.new("RGBA", base.size, (0, 0, 0, 0))
@@ -95,6 +159,7 @@ def draw_annotations(image_path: Path, annotation: dict, output_path: Path,
     font = _load_font(base.width)
     rooms = annotation.get("roomsRecognized", [])
     stroke_width = max(2, int(base.width * 0.0006))
+    drawn = 0
 
     for room in rooms:
         bbox = room.get("coordinates", {}).get("bbox")
@@ -102,8 +167,12 @@ def draw_annotations(image_path: Path, annotation: dict, output_path: Path,
             continue
 
         x1, y1, x2, y2 = [int(v) for v in bbox]
+        if scale_x != 1.0 or scale_y != 1.0:
+            x1, x2 = int(x1 * scale_x), int(x2 * scale_x)
+            y1, y2 = int(y1 * scale_y), int(y2 * scale_y)
         if min_area > 0 and (x2 - x1) * (y2 - y1) < min_area:
             continue
+        drawn += 1
 
         room_type = room.get("type", "UNKNOWN")
         room_name = room.get("name", "")
@@ -117,7 +186,8 @@ def draw_annotations(image_path: Path, annotation: dict, output_path: Path,
         # on the true bbox — only the visibility marker is enlarged.
         MIN_VIS = max(24, int(base.width * 0.006))  # ~27px at 4500px width
         vx1, vy1, vx2, vy2 = x1, y1, x2, y2
-        if (x2 - x1) < MIN_VIS or (y2 - y1) < MIN_VIS:
+        is_enlarged = (x2 - x1) < MIN_VIS or (y2 - y1) < MIN_VIS
+        if is_enlarged:
             cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
             half = MIN_VIS // 2
             vx1, vy1, vx2, vy2 = cx - half, cy - half, cx + half, cy + half
@@ -125,8 +195,14 @@ def draw_annotations(image_path: Path, annotation: dict, output_path: Path,
         # Semi-transparent fill on fill layer (true bbox)
         draw_fill.rectangle([x1, y1, x2, y2], fill=(*color, fill_alpha))
 
-        # Solid outline on stroke layer (min-visible box)
-        draw_stroke.rectangle([vx1, vy1, vx2, vy2], outline=(*color, 255), width=stroke_width)
+        # Solid outline for real-size boxes; dashed + thinner outline for the
+        # enlarged visibility marker so it's never mistaken for an actual
+        # room-sized detection (a real bug this session mistook for one).
+        if is_enlarged:
+            _dashed_rectangle(draw_stroke, [vx1, vy1, vx2, vy2], (*color, 255),
+                               width=max(1, stroke_width // 2))
+        else:
+            draw_stroke.rectangle([vx1, vy1, vx2, vy2], outline=(*color, 255), width=stroke_width)
 
         # Label text
         label = f"{room_type}"
@@ -160,7 +236,7 @@ def draw_annotations(image_path: Path, annotation: dict, output_path: Path,
 
     # Save as RGB PNG (drop alpha)
     result.convert("RGB").save(output_path, "PNG")
-    return len(rooms)
+    return drawn
 
 
 def draw_room_crops(image_path: Path, annotation: dict, output_dir: Path,

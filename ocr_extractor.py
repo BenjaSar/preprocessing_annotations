@@ -57,6 +57,35 @@ _DOCUMENTATION_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+# Vendor/BOM/notes-panel markers (verified present via OCR on real sheets:
+# "AVI-ON BOM", "AVI-ON NOTES", standalone "NOTES:", "KEY NOTES"). These panels
+# sit outside the floorplan drawing and must never seed a room.
+_FORBIDDEN_ZONE_PATTERN = re.compile(
+    r"(avi[\s-]*on|^bom$|^notes?\s*:?$|^key\s+notes\s*:?$|avi[\s-]*on\s+notes|avi[\s-]*on\s+bom)",
+    re.IGNORECASE,
+)
+
+# Generic AIA-style title-block field labels. Not firm-specific — these are
+# standard drawing title-block fields (verified present on both Kennedy/PARTNERS
+# and Madison/MKDA sheets this session despite different architects). A firm's
+# logo graphic always sits inside/adjacent to this field cluster, so banning
+# the cluster bans the logo by proxy without needing image/graphic detection.
+_TITLE_BLOCK_PATTERN = re.compile(
+    r"(project\s+name|project\s+no|sheet\s+no|sheet\s+name|drawing\s+no|"
+    r"drawing\s+title|drawn\s+by|checked\s+by|approved\s+by|seal\s*&?\s*signature|"
+    r"issues?\s*/\s*revisions|key\s+plan|architect\s+of\s+record|^owner$|^consultant$)",
+    re.IGNORECASE,
+)
+
+# Street / avenue name labels sit OUTSIDE the building footprint (sidewalk,
+# right-of-way). Boxes localised onto them are mislocalized (verified: Rockaway
+# p001 giant TYPE-A1 boxes over "ROCKAWAY AVE (NARROW ST)"). Matched as whole
+# words so they never fire on room labels ("1ST FLOOR" has no ST word-boundary).
+_STREET_PATTERN = re.compile(
+    r"\b(avenue|ave|street|blvd|boulevard)\b|\bst\.?$|\bav\.?$|narrow\s+st",
+    re.IGNORECASE,
+)
+
 
 def _is_excluded_token(text: str) -> bool:
     """Return True if the raw OCR text should never become a room candidate."""
@@ -65,6 +94,9 @@ def _is_excluded_token(text: str) -> bool:
         or _EQUIPMENT_ONLY_PATTERN.match(text)
         or _INSTRUCTION_PATTERN.search(text)
         or _DOCUMENTATION_PATTERN.search(text)
+        or _FORBIDDEN_ZONE_PATTERN.search(text)
+        or _TITLE_BLOCK_PATTERN.search(text)
+        or _STREET_PATTERN.search(text)
     )
 
 
@@ -861,12 +893,15 @@ class MEPTextExtractor:
         clusters: list = []   # each entry = list of TextDetection
 
         for det in excluded_dets:
-            bx, by, bw, bh = det.bbox
-            cx, cy = bx + bw // 2, by + bh // 2
+            # det.bbox is 4 corner points [[x,y],...], not flat (x,y,w,h) — use
+            # the existing quad-aware centroid helper (matches _bbox_distance,
+            # _same_line elsewhere in this file). The previous flat unpack
+            # crashed with "unsupported operand type(s) for //: 'list' and 'int'".
+            cx, cy = _centroid(det.bbox)
             placed = False
             for cluster in clusters:
                 for member in cluster:
-                    mx, my = member.bbox[0] + member.bbox[2] // 2, member.bbox[1] + member.bbox[3] // 2
+                    mx, my = _centroid(member.bbox)
                     if abs(cx - mx) <= CLUSTER_RADIUS and abs(cy - my) <= CLUSTER_RADIUS:
                         cluster.append(det)
                         placed = True
@@ -878,17 +913,25 @@ class MEPTextExtractor:
 
         zones = []
         for cluster in clusters:
-            if len(cluster) < min_cluster_tokens:
+            # A cluster containing a strong marker (AVI-ON BOM/NOTES, title-block
+            # field label) forms a zone alone — these are precise, low-FP phrases
+            # by construction, unlike generic equipment labels which need the
+            # min_cluster_tokens threshold to avoid false-positiving on a single
+            # stray "PANEL" label in the drawing.
+            has_strong_marker = any(
+                _FORBIDDEN_ZONE_PATTERN.search(d.text) or _TITLE_BLOCK_PATTERN.search(d.text)
+                or _STREET_PATTERN.search(d.text)
+                for d in cluster
+            )
+            if len(cluster) < min_cluster_tokens and not has_strong_marker:
                 continue
-            xs = [d.bbox[0] for d in cluster]
-            ys = [d.bbox[1] for d in cluster]
-            x2s = [d.bbox[0] + d.bbox[2] for d in cluster]
-            y2s = [d.bbox[1] + d.bbox[3] for d in cluster]
+            xs = [p[0] for d in cluster for p in d.bbox]
+            ys = [p[1] for d in cluster for p in d.bbox]
             zones.append((
                 max(0, min(xs) - ZONE_PAD),
                 max(0, min(ys) - ZONE_PAD),
-                max(x2s) + ZONE_PAD,
-                max(y2s) + ZONE_PAD,
+                max(xs) + ZONE_PAD,
+                max(ys) + ZONE_PAD,
             ))
             logger.debug(
                 f"Exclusion zone: {len(cluster)} excluded tokens → "

@@ -75,6 +75,8 @@ MANDATORY_CLASSES: Dict[str, List[str]] = {
         "PRIVATE OFFICE", "PRIVATE", "INDIVIDUAL OFFICE",
         "EXECUTIVE OFFICE", "FACULTY OFFICE", "PERSONAL OFFICE",
         "OFFICE", "OFFICE ROOM", "SINGLE OFFICE",
+        "GYM OFFICE", "BOYS COACH", "GIRLS COACH", "COACH OFFICE",
+        "COUNC OFFICE", "COUNCILING OFFICE", "COUNSELING OFFICE",
     ],
     "OPEN OFFICE": [
         "OPEN OFFICE", "OPEN PLAN", "OPEN PLAN WORKSPACE",
@@ -98,6 +100,8 @@ MANDATORY_CLASSES: Dict[str, List[str]] = {
     "CLASSROOM": [
         "CLASSROOM", "CLASS ROOM", "LAB", "LABORATORY",
         "COMPUTER LAB", "SCIENCE LAB",
+        "SPECIAL EDUCATION", "SPECIAL ED",
+        "SCIENCE CLASSROOM", "LITERATURE CLASSROOM",
     ],
     "LECTURE HALL": [
         "LECTURE HALL", "AUDITORIUM", "THEATER", "THEATRE",
@@ -137,8 +141,15 @@ MANDATORY_CLASSES: Dict[str, List[str]] = {
 
     # ── Sanitary ────────────────────────────────────────────────────────────
     "RESTROOM": [
-        "RESTROOM", "BATHROOM", "TOILET", "WC", "LAVATORY",
+        "RESTROOM", "BATHROOM", "WC", "LAVATORY",
         "POWDER ROOM", "MEN'S RESTROOM", "WOMEN'S RESTROOM",
+    ],
+    # TOILET is its own class (per taxonomy decision): school/institutional
+    # plans label gendered toilet rooms distinctly from generic RESTROOM.
+    "TOILET": [
+        "TOILET", "BOYS TOILET", "GIRLS TOILET", "BOY TOILET", "GIRL TOILET",
+        "MENS TOILET", "WOMENS TOILET", "MEN'S TOILET", "WOMEN'S TOILET",
+        "STAFF TOILET", "STUDENT TOILET",
     ],
 
     # ── Vertical Circulation ────────────────────────────────────────────────
@@ -177,6 +188,16 @@ MANDATORY_CLASSES: Dict[str, List[str]] = {
     # ── Industrial ──────────────────────────────────────────────────────────
     "WAREHOUSE": [
         "WAREHOUSE", "LOADING DOCK", "RECEIVING", "WAREHOUSE SPACE",
+    ],
+
+    # ── Other (kept, detected, but no dedicated class) ───────────────────────
+    # Real spaces that must be DETECTED (not dropped) but do not fit any
+    # specific mandatory class — per taxonomy decision: CUSTODIAL, LOCKER rooms.
+    "OTHER": [
+        "OTHER", "CUSTODIAL", "CUSTODIAN OFFICE",
+        "LOCKER", "LOCKERS", "LOCKER ROOM",
+        "BOYS LOCKER", "GIRLS LOCKER", "BOYS LOCKERS", "GIRLS LOCKERS",
+        "MENS LOCKER", "WOMENS LOCKER",
     ],
 }
 
@@ -353,7 +374,18 @@ VLM_CATEGORY_MAP: Dict[str, str] = {
 
     # Janitor
     "janitor": "JANITOR CLOSET",
-    "custodial": "JANITOR CLOSET",
+    "custodial": "OTHER",  # per taxonomy decision: CUSTODIAL → OTHER, not janitor
+
+    # Sanitary — gendered toilet rooms are their own TOILET class
+    "toilet": "TOILET",
+    "boys toilet": "TOILET",
+    "girls toilet": "TOILET",
+    "mens toilet": "TOILET",
+    "womens toilet": "TOILET",
+
+    # Other (detected, no dedicated class)
+    "locker": "OTHER",
+    "locker_room": "OTHER",
 
     # Education
     "classroom": "CLASSROOM",
@@ -414,6 +446,8 @@ VLM_PROMPT_CATEGORIES: List[str] = [
     "GYMNASIUM",
     "PARKING GARAGE",
     "WAREHOUSE",
+    "TOILET",
+    "OTHER",
 ]
 
 # ---------------------------------------------------------------------------
