@@ -139,6 +139,16 @@ class OCRConfig:
             r"^CARPENTRY(\s+SHOP)?$",
             r"^COMMUNITY\s+FACILITY$",
             r"^KITCHEN$",
+            # --- School spaces ---
+            # School sheets (Kennedy, Masonic, Lake Shore) are dominated by
+            # CLASSROOM / TOILET / CLOSET labels, which were absent here and so
+            # discarded at the OCR gate before reaching the taxonomy — leaving
+            # whole school floors with zero detections. Formats verified via OCR:
+            # "CLASSROOM5", "CLASSROOM 6A", "CLASSROOM - 117",
+            # "SCIENCE CLASSROOM - 116", bare "TOILET", bare "CLOSET".
+            r"^(SCIENCE\s+|STUDIO\s+)?CLASSROOM[\s\-]*\d*[A-Z]?$",
+            r"^(BOYS|GIRLS|STAFF|STUDENT)?\s*TOILET$",
+            r"^CLOSET$",
             # --- Residential unit-type codes (multi-family / mixed-use plans) ---
             # Matches architectural unit-type codes like "TYPE-A1 OBR",
             # "TYPE-B3 1BR", "TYPE-C6.1", "TYPE-A15.2" as a complete token
