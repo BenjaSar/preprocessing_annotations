@@ -79,10 +79,26 @@ _TITLE_BLOCK_PATTERN = re.compile(
 
 # Street / avenue name labels sit OUTSIDE the building footprint (sidewalk,
 # right-of-way). Boxes localised onto them are mislocalized (verified: Rockaway
-# p001 giant TYPE-A1 boxes over "ROCKAWAY AVE (NARROW ST)"). Matched as whole
-# words so they never fire on room labels ("1ST FLOOR" has no ST word-boundary).
+# p001 giant TYPE-A1 boxes over "ROCKAWAY AVE (NARROW ST)"). Full street words
+# match anywhere. The abbreviations "ST"/"AV" match ONLY when preceded by a name
+# word in the same token (e.g. "29TH ST", "622.45TH ST") — a bare standalone
+# "ST"/"AV" is a mis-split OCR fragment, not a street (verified: a stray "ST"
+# split from "STORAGE" formed a spurious drawing zone that dropped a real room).
 _STREET_PATTERN = re.compile(
-    r"\b(avenue|ave|street|blvd|boulevard)\b|\bst\.?$|\bav\.?$|narrow\s+st",
+    r"\b(avenue|ave|street|blvd|boulevard)\b|\S+\s+st\.?$|\S+\s+av\.?$|narrow\s+st",
+    re.IGNORECASE,
+)
+
+# Intellectual-property / legal-boilerplate statement text. Firm-agnostic phrases
+# (verified present via OCR: "Statement of Intellectual Property", "without the
+# written consent", "PARTNERS in Architecture, PLC" copyright block). These sit in
+# the title-block/logo margin outside the drawing; a box localised onto them is
+# mislocalized (verified: Violet FLAT p002 giant CORRIDOR over this block).
+# Phrases chosen to have no floor-plan-room collision.
+_IP_STATEMENT_PATTERN = re.compile(
+    r"(intellectual\s+propert|statement\s+of\s+intellectual|written\s+consent|"
+    r"all\s+rights\s+reserved|not\s+to\s+be\s+(used|reproduced)|"
+    r"copyright|©|in\s+architecture)",
     re.IGNORECASE,
 )
 
@@ -97,6 +113,7 @@ def _is_excluded_token(text: str) -> bool:
         or _FORBIDDEN_ZONE_PATTERN.search(text)
         or _TITLE_BLOCK_PATTERN.search(text)
         or _STREET_PATTERN.search(text)
+        or _IP_STATEMENT_PATTERN.search(text)
     )
 
 
@@ -920,7 +937,7 @@ class MEPTextExtractor:
             # stray "PANEL" label in the drawing.
             has_strong_marker = any(
                 _FORBIDDEN_ZONE_PATTERN.search(d.text) or _TITLE_BLOCK_PATTERN.search(d.text)
-                or _STREET_PATTERN.search(d.text)
+                or _STREET_PATTERN.search(d.text) or _IP_STATEMENT_PATTERN.search(d.text)
                 for d in cluster
             )
             if len(cluster) < min_cluster_tokens and not has_strong_marker:

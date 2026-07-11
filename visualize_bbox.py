@@ -239,6 +239,34 @@ def draw_annotations(image_path: Path, annotation: dict, output_path: Path,
     return drawn
 
 
+def remove_stale_visualizations(stem: str, overview_dir: Path, regions_dir: Path) -> int:
+    """Delete a page's previously-written overview and region crops.
+
+    Called when a page now has zero rooms: without this, an earlier run's
+    visualizations linger on disk and misrepresent the current annotation
+    (a page filtered down to no rooms would still show the old boxes). Keeps
+    the visualization directory a faithful mirror of the annotation data.
+
+    Args:
+        stem:         Annotation filename stem (json_path.stem), used to match
+                      both "<stem>_overview.png" and "<stem>_<id>_<type>.png".
+        overview_dir: Directory holding overview images.
+        regions_dir:  Directory holding per-room crop images.
+
+    Returns:
+        Number of files removed.
+    """
+    removed = 0
+    overview = overview_dir / f"{stem}_overview.png"
+    if overview.exists():
+        overview.unlink()
+        removed += 1
+    for crop in regions_dir.glob(f"{stem}_*.png"):
+        crop.unlink()
+        removed += 1
+    return removed
+
+
 def draw_room_crops(image_path: Path, annotation: dict, output_dir: Path,
                     padding_pct: float = 0.1, opacity: float = 0.25,
                     min_area: int = 0) -> int:
@@ -486,7 +514,15 @@ def main():
 
         n_rooms = len(annotation.get("roomsRecognized", []))
         if n_rooms == 0:
-            logger.warning(f"No roomsRecognized in {json_path.name}, skipping")
+            removed = remove_stale_visualizations(
+                json_path.stem, overview_dir, regions_dir
+            )
+            if removed:
+                logger.info(
+                    f"{json_path.name}: 0 rooms — removed {removed} stale visualization(s)"
+                )
+            else:
+                logger.debug(f"No roomsRecognized in {json_path.name}, nothing to draw")
             skipped += 1
             continue
 
