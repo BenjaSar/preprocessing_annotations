@@ -12,6 +12,9 @@ from PIL import Image
 import io
 import logging
 
+import cv2
+import numpy as np
+
 logger = logging.getLogger(__name__)
 
 try:
@@ -1026,6 +1029,102 @@ def _filter_low_ink_rooms(
     return kept, dropped
 
 
+# ── FIX-6: ruled-table detection drop ────────────────────────────────────────
+# Verified defect (Rockaway p000): the OCR reads a BOM/schedule row as a room and
+# places a box on the table. Its footprint has ink (table rules + text), so FIX-5
+# (blank-ink) cannot catch it, and no excluded-token cluster covers the body so
+# FIX-4 (zones) misses it too. A ruled table is visually distinct from the floor
+# plan: it is a stack of evenly-spaced full-width horizontal rules. This detects
+# that structure directly from the image and drops rooms whose centroid lands in
+# a detected table — independent of OCR, so no re-OCR is needed.
+#
+# Constants are data-derived, measured over table + drawing regions on all 58
+# sheets (see /tmp validation), not chosen:
+#   TABLE_ROW_REGULARITY_MAX: row-gap std/mean. Real tables measured 0.000-0.005;
+#     floor-plan line groups measured >= 1.2. Cut placed in that wide empty gap.
+#   TABLE_MIN_ROWS: smallest real table sampled had 6 rows; 4 = conservative floor.
+#   *_FRAC: geometric fractions of image width (scale-invariant) — a rule spans
+#     >= 3% width, a >90%-width line is a sheet border (not a table row), and one
+#     table's rows share left/right edges within 2% of width.
+# Validated: fires on 7 BOM tables across 58 sheets, catches the bug box, drops
+# zero legit on-drawing rooms.
+TABLE_ROW_REGULARITY_MAX = 0.10
+TABLE_MIN_ROWS = 4
+TABLE_RULE_MIN_WIDTH_FRAC = 0.03
+TABLE_BORDER_MAX_WIDTH_FRAC = 0.90
+TABLE_ROW_EDGE_TOL_FRAC = 0.02
+
+
+def _detect_ruled_tables(gray: Image.Image, binarise_max: int) -> List[Tuple[int, int, int, int]]:
+    """Detect ruled tables (BOM/schedule blocks) as (x1, y1, x2, y2) rectangles.
+
+    A table is a group of >= TABLE_MIN_ROWS full-width horizontal rules that share
+    left/right edges and are evenly spaced (row-gap regularity below the cut).
+    Isolates tables from the floor plan, whose line groups are irregular.
+    """
+    arr = np.asarray(gray)
+    H, W = arr.shape
+    _, ink = cv2.threshold(arr, binarise_max, 255, cv2.THRESH_BINARY_INV)
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (max(1, int(W * TABLE_RULE_MIN_WIDTH_FRAC)), 1))
+    horiz = cv2.morphologyEx(ink, cv2.MORPH_OPEN, kernel)
+    n, _lbl, stats, _cent = cv2.connectedComponentsWithStats(horiz, 8)
+
+    rules = []  # (cy, x1, x2)
+    for i in range(1, n):
+        x, y, w, h, _area = stats[i]
+        if W * TABLE_RULE_MIN_WIDTH_FRAC <= w <= W * TABLE_BORDER_MAX_WIDTH_FRAC:
+            rules.append((y + h / 2.0, x, x + w))
+    rules.sort()
+
+    edge_tol = W * TABLE_ROW_EDGE_TOL_FRAC
+    tables: List[Tuple[int, int, int, int]] = []
+    used = [False] * len(rules)
+    for i in range(len(rules)):
+        if used[i]:
+            continue
+        band = [rules[i]]
+        used[i] = True
+        for j in range(i + 1, len(rules)):
+            if used[j]:
+                continue
+            if (abs(rules[j][1] - band[0][1]) <= edge_tol
+                    and abs(rules[j][2] - band[0][2]) <= edge_tol):
+                band.append(rules[j])
+                used[j] = True
+        if len(band) < TABLE_MIN_ROWS:
+            continue
+        ys = sorted(b[0] for b in band)
+        gaps = np.diff(ys)
+        regularity = float(np.std(gaps) / np.mean(gaps)) if len(gaps) and np.mean(gaps) else 9.9
+        if regularity <= TABLE_ROW_REGULARITY_MAX:
+            x1 = min(b[1] for b in band)
+            x2 = max(b[2] for b in band)
+            tables.append((int(x1), int(ys[0]), int(x2), int(ys[-1])))
+    return tables
+
+
+def _filter_rooms_in_tables(
+    rooms: List[Dict], tables: List[Tuple[int, int, int, int]]
+) -> Tuple[List[Dict], int]:
+    """Drop rooms whose bbox centroid falls inside a detected ruled table."""
+    if not tables:
+        return rooms, 0
+    kept: List[Dict] = []
+    dropped = 0
+    for room in rooms:
+        bbox = room.get("bbox") or []
+        if len(bbox) >= 4:
+            bx, by, bw, bh = bbox[:4]
+            cx, cy = bx + bw / 2, by + bh / 2
+            if any(x1 <= cx <= x2 and y1 <= cy <= y2 for x1, y1, x2, y2 in tables):
+                rn = room.get("room_name") or room.get("name", "?")
+                logger.warning(f"FIX-6: dropped bbox '{rn}' — centroid inside ruled table")
+                dropped += 1
+                continue
+        kept.append(room)
+    return kept, dropped
+
+
 def prepare_sft_annotation(
     annotation: Dict,
     min_rooms_for_sft: int = 1,
@@ -1117,7 +1216,6 @@ def prepare_sft_annotation(
             try:
                 with Image.open(img_path) as im:
                     gray = im.convert("L")
-                pre_ink = len(rooms)
                 rooms, n_ink = _filter_low_ink_rooms(
                     rooms, gray, INK_MIN_FRAC, INK_BINARISE_MAX
                 )
@@ -1126,10 +1224,20 @@ def prepare_sft_annotation(
                     logger.info(
                         f"FIX-5: dropped {n_ink} room(s) placed over non-drawing region"
                     )
-            except Exception as exc:  # noqa: BLE001 — never fail the page on FIX-5
-                logger.warning(f"FIX-5 skipped ({img_path.name}): {exc}")
+
+                # FIX-6: drop rooms whose centroid lands in a ruled table (BOM/
+                # schedule). Reuses the image already loaded for FIX-5.
+                tables = _detect_ruled_tables(gray, INK_BINARISE_MAX)
+                rooms, n_table = _filter_rooms_in_tables(rooms, tables)
+                if n_table:
+                    drop_attribution["ruled_table"] = n_table
+                    logger.info(
+                        f"FIX-6: dropped {n_table} room(s) placed over a ruled table"
+                    )
+            except Exception as exc:  # noqa: BLE001 — never fail the page on FIX-5/6
+                logger.warning(f"FIX-5/6 skipped ({img_path.name}): {exc}")
         else:
-            logger.debug("FIX-5 skipped: image not found for %s", img_name)
+            logger.debug("FIX-5/6 skipped: image not found for %s", img_name)
 
     # Step 0: Normalize VLM output fields (room_name → name, category → type)
     for room in rooms:
