@@ -149,6 +149,34 @@ class OCRConfig:
             r"^(SCIENCE\s+|STUDIO\s+)?CLASSROOM[\s\-]*\d*[A-Z]?$",
             r"^(BOYS|GIRLS|STAFF|STUDENT)?\s*TOILET$",
             r"^CLOSET$",
+            # Verified via live OCR (Masonic Heights): "JANITOR CLOSET",
+            # "STAFF LOUNGE 19A", "SUPPLY". TEACHER LOUNGE/WORK ROOM and
+            # PRINCIPAL per explicit taxonomy directive (not yet OCR-traced).
+            r"^JANITOR\s+CLOSET$",
+            r"^(STAFF|TEACHER)\s+(LOUNGE|WORK\s+ROOM)(\s*\d*[A-Z]?)?$",
+            r"^PRINCIPAL(\s+OFFICE)?$",
+            r"^SUPPLY$",
+            r"^COMPUTER\s+LAB(\s*\d*)?$",
+            # Verified real omitted room labels (user-confirmed present on
+            # school floor plans; each currently discarded at the OCR gate).
+            r"^(TEACHER\s+)?WORK\s+(RM|ROOM)$",
+            r"^MAIL\s+(RM|ROOM)$",
+            r"^JAN\s+CLOSET$",
+            r"^LOUNGE$",
+            r"^COUNC(?:IL(?:ING)?)?\s+OFFICE$",
+            r"^TEACHER\s+COUNCELING$",
+            r"^SECRETARY$",
+            r"^SOCIAL\s+WORKER\s+OFFICE$",
+            r"^MAIN\s+ENTRANCE\s+LOBBY$",
+            r"^OPEN\s+OFFICE$",
+            r"^FOOD\s+SERVICE\s+OFFICE$",
+            r"^VENDING$",
+            r"^SCHOOL\s+STORAGE$",
+            r"^VAULT$",
+            r"^GYMNASIUM$",
+            r"^FITNESS\s+ROOM$",
+            r"^LEASING\s+OFFICE$",
+            r"^YOGA/MEDITATION\s+ROOM$",
             # --- Residential unit-type codes (multi-family / mixed-use plans) ---
             # Matches architectural unit-type codes like "TYPE-A1 OBR",
             # "TYPE-B3 1BR", "TYPE-C6.1", "TYPE-A15.2" as a complete token

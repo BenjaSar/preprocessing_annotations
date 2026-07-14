@@ -77,6 +77,9 @@ MANDATORY_CLASSES: Dict[str, List[str]] = {
         "OFFICE", "OFFICE ROOM", "SINGLE OFFICE",
         "GYM OFFICE", "BOYS COACH", "GIRLS COACH", "COACH OFFICE",
         "COUNC OFFICE", "COUNCILING OFFICE", "COUNSELING OFFICE",
+        "PRINCIPAL",
+        "WORK RM", "WORK ROOM", "TEACHER WORK ROOM",
+        "SECRETARY", "VENDING", "MAIL ROOM", "MAIL RM",
     ],
     "OPEN OFFICE": [
         "OPEN OFFICE", "OPEN PLAN", "OPEN PLAN WORKSPACE",
@@ -119,6 +122,7 @@ MANDATORY_CLASSES: Dict[str, List[str]] = {
     "CAFETERIA": [
         "CAFETERIA", "CAFE", "BREAK ROOM", "BREAKROOM",
         "KITCHEN", "KITCHENETTE", "PANTRY", "BREAK AREA",
+        "STAFF LOUNGE", "TEACHER LOUNGE",
     ],
 
     # ── Retail ──────────────────────────────────────────────────────────────
@@ -162,6 +166,10 @@ MANDATORY_CLASSES: Dict[str, List[str]] = {
     "STORAGE ROOM": [
         "STORAGE", "STORAGE ROOM", "STOREROOM", "STORE ROOM",
         "SUPPLY ROOM", "ARCHIVES", "FILE ROOM",
+        # VAULT per explicit taxonomy directive. Was resolving to STORAGE ROOM
+        # only via the unknown-token fallback; made explicit so it does not
+        # break silently if the fallback default ever changes.
+        "VAULT",
     ],
     "JANITOR CLOSET": [
         "JANITOR", "JANITOR CLOSET", "JANITOR ROOM",
@@ -198,6 +206,7 @@ MANDATORY_CLASSES: Dict[str, List[str]] = {
         "LOCKER", "LOCKERS", "LOCKER ROOM",
         "BOYS LOCKER", "GIRLS LOCKER", "BOYS LOCKERS", "GIRLS LOCKERS",
         "MENS LOCKER", "WOMENS LOCKER",
+        "FITNESS ROOM", "YOGA/MEDITATION ROOM",
     ],
 }
 
@@ -370,7 +379,9 @@ VLM_CATEGORY_MAP: Dict[str, str] = {
     # Storage
     "storage": "STORAGE ROOM",
     "storage_room": "STORAGE ROOM",
-    "closet": "STORAGE ROOM",
+    # CLOSET is not storage — folded into JANITOR CLOSET, which already
+    # holds the closest existing synonyms (CUSTODIAL CLOSET, CLEANING CLOSET).
+    "closet": "JANITOR CLOSET",
 
     # Janitor
     "janitor": "JANITOR CLOSET",

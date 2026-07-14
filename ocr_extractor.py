@@ -46,7 +46,13 @@ _INSTRUCTION_PATTERN = re.compile(
     r"(contractor\s+to\s+verify|sensor\s+placement|take\s+off|use\s+\w+\s+for|"
     r"for\s+\w+\s+only|shall\s+(be|not)|must\s+(be|not)|as\s+directed|"
     r"refer\s+to|see\s+sheet|per\s+(code|nec|nfpa)|"
-    r"installation|coordination|approved\s+equal)",
+    r"installation|coordination|approved\s+equal|"
+    # Numbered KEY NOTES sentences (verified via OCR: Masonic Heights sheet) —
+    # imperative electrical-contractor instructions that carry no room name,
+    # but were not excluded, so the KEY NOTES panel's zone under-covered its
+    # own text block and left a phantom room candidate sitting on the notes.
+    r"circuit\s+breaker|respective\s+feeder|rough-in|"
+    r"occupancy\s+sensor|coverplate|unused\s+gangs)",
     re.IGNORECASE,
 )
 _DOCUMENTATION_PATTERN = re.compile(
@@ -150,6 +156,56 @@ def _same_line(a_points: List[List[int]], b_points: List[List[int]],
     ay = _centroid(a_points)[1]
     by = _centroid(b_points)[1]
     return abs(ay - by) <= y_tolerance
+
+
+# ── Rotated-sheet OCR recovery ───────────────────────────────────────────────
+# Some floor-plan sheets have the drawing (and its room labels) rotated 90° while
+# the title block stays horizontal. PaddleOCR's angle classifier only handles
+# 0°/180° (verified: label_list=["0","180"] in installed source), so 90°-rotated
+# labels come back garbled. Rotating the whole image 90° brings those labels to
+# a readable orientation; re-running OCR recovers them. A second pass is ADDITIVE
+# — the original pass (horizontal title block etc.) is untouched.
+#
+# ROTATION_TEXT_VERTICAL_FRAC: a sheet is treated as rotated when this fraction
+# of its multi-char text detections are taller-than-wide (vertical). Data-derived
+# — measured over 58 sheets the split was bimodal with an empty band between
+# 3.4% (not rotated) and 94.7% (rotated); the cut sits in that empty middle.
+# ROTATION_MIN_TOKENS: guard against judging orientation from too few detections.
+ROTATION_TEXT_VERTICAL_FRAC = 0.5
+ROTATION_MIN_TOKENS = 10
+_ROTATION_MIN_TOKEN_LEN = 3
+
+
+def _vertical_text_fraction(detections: List["TextDetection"]) -> float:
+    """Fraction of multi-char detections whose bbox is taller than wide.
+
+    Near 1.0 on a 90°-rotated sheet, near 0.0 on a normal one. Returns 0.0 when
+    there are too few tokens to judge (caller also guards on ROTATION_MIN_TOKENS).
+    """
+    considered = 0
+    vertical = 0
+    for d in detections:
+        if len(d.text.strip()) < _ROTATION_MIN_TOKEN_LEN:
+            continue
+        xs = [p[0] for p in d.bbox]
+        ys = [p[1] for p in d.bbox]
+        w = max(xs) - min(xs)
+        h = max(ys) - min(ys)
+        if w <= 0:
+            continue
+        considered += 1
+        if h > w:
+            vertical += 1
+    return (vertical / considered) if considered else 0.0
+
+
+def _inverse_cw90_quad(quad: List[List[int]], orig_height: int) -> List[List[int]]:
+    """Map a quad from a cv2 ROTATE_90_CLOCKWISE image back to original space.
+
+    Verified empirically for cv2.ROTATE_90_CLOCKWISE: a point (nx, ny) in the
+    rotated image came from original (ny, H-1-nx), where H is the ORIGINAL height.
+    """
+    return [[ny, (orig_height - 1) - nx] for (nx, ny) in quad]
 
 
 class OCRError(Exception):
@@ -344,32 +400,74 @@ class MEPTextExtractor:
         except Exception as e:
             raise OCRError(f"OCR failed on {image_path}: {e}") from e
 
-        # Apply length-aware confidence thresholds.
-        # OCR models systematically underestimate confidence for short tokens
-        # (fewer characters = less context) so abbreviations like BR/LR at 0.6
-        # confidence are often correct, while a 20-char token at 0.6 is likely
-        # garbled. Conversely, single characters need very high confidence to
-        # avoid spurious symbol detections.
+        detections = self._length_conf_filter(raw_detections)
+
+        # Rotated-sheet recovery (additive): if this sheet's text is
+        # predominantly vertical, its drawing labels are 90°-rotated and OCR
+        # read them garbled. Rotate the image 90° CW, re-OCR, map the recovered
+        # boxes back to original coordinates, and ADD them. The original
+        # detections are never removed, so non-rotated content is unaffected.
+        if (len(detections) >= ROTATION_MIN_TOKENS
+                and _vertical_text_fraction(detections) >= ROTATION_TEXT_VERTICAL_FRAC):
+            rotated = self._extract_rotated_detections(processed)
+            if rotated:
+                logger.info(
+                    f"Rotated-sheet recovery: {image_path.name} — added "
+                    f"{len(rotated)} detections from 90° pass"
+                )
+                detections.extend(rotated)
+
+        logger.debug(f"Extracted {len(detections)} text regions from {image_path.name}")
+        return detections
+
+    def _length_conf_filter(self, raw_detections) -> List["TextDetection"]:
+        """Apply length-aware confidence thresholds + convert bbox to quad.
+
+        OCR models underestimate confidence for short tokens (less context), so
+        abbreviations like BR/LR at 0.6 are often correct while a 20-char token at
+        0.6 is likely garbled; single chars need high confidence to avoid spurious
+        symbol detections. Shared by the primary and rotated OCR passes.
+        """
         MIN_CONF_BY_LEN = {1: 0.85, 2: 0.70, 3: 0.65, 4: 0.60}
         DEFAULT_MIN_CONF = self.config.confidence_threshold  # 0.50
-
-        detections = []
+        out = []
         for detection in raw_detections:
             min_conf = MIN_CONF_BY_LEN.get(len(detection.text.strip()), DEFAULT_MIN_CONF)
             if detection.confidence >= min_conf:
-                # Convert normalized bbox [x1,y1,x2,y2] to quadrilateral format
-                # expected by downstream code
-                quad_bbox = _normalized_bbox_to_quad(detection.bbox)
-                detections.append(
+                out.append(
                     TextDetection(
-                        bbox=quad_bbox,
+                        bbox=_normalized_bbox_to_quad(detection.bbox),
                         text=detection.text,
                         confidence=detection.confidence,
                     )
                 )
+        return out
 
-        logger.debug(f"Extracted {len(detections)} text regions from {image_path.name}")
-        return detections
+    def _extract_rotated_detections(self, image) -> List["TextDetection"]:
+        """Run OCR on the image rotated 90° CW; map detections to original space.
+
+        Recovers 90°-rotated drawing labels PaddleOCR cannot read in place. Bboxes
+        are inverse-transformed back to the original (pre-rotation) coordinate
+        frame so downstream consumers stay in one coordinate space. Returns [] on
+        failure — recovery must never break the primary pass.
+        """
+        try:
+            orig_height = image.shape[0]
+            rotated_image = cv2.rotate(image, cv2.ROTATE_90_CLOCKWISE)
+            raw = self.ocr_backend.extract_text(rotated_image)
+            mapped = []
+            for det in self._length_conf_filter(raw):
+                mapped.append(
+                    TextDetection(
+                        bbox=_inverse_cw90_quad(det.bbox, orig_height),
+                        text=det.text,
+                        confidence=det.confidence,
+                    )
+                )
+            return mapped
+        except Exception as exc:  # noqa: BLE001 — recovery is best-effort, never fatal
+            logger.warning(f"Rotated-sheet OCR recovery skipped: {exc}")
+            return []
 
     def find_room_candidates(
         self, detections: List[TextDetection]
