@@ -264,6 +264,26 @@ class SemanticRoomValidator:
         "STUDIO",
         "OBR",          # 0BR misread by OCR (O/0 confusion); maps to RESIDENTIAL UNIT
         "1BR", "2BR", "3BR", "4BR",
+        # School-sheet keywords — verified via live OCR re-run (Masonic Heights,
+        # Violet Elementary): reached the keyword gate and were filtered
+        # because the underlying word was absent from this whitelist, even
+        # though taxonomy.py already had a mapping for the full label.
+        "SUPPLY",       # "SUPPLY" (room label) → STORAGE ROOM
+        "PRINCIPAL",    # "PRINCIPAL" (office) → PRIVATE OFFICE
+        "TEACHER",      # "TEACHER LOUNGE" / "TEACHER WORK ROOM" → CAFETERIA
+        "COMPUTER",     # "COMPUTER LAB" → CLASSROOM
+        # User-confirmed omitted room labels (sprint38 review) — real labels
+        # reaching the keyword gate and filtered because the underlying word
+        # was absent from this whitelist.
+        "WORK",         # "WORK RM" → STORAGE ROOM
+        "SECRETARY",    # "SECRETARY" → STORAGE ROOM
+        "MEN'S", "WOMEN'S",  # → RESTROOM
+        "VENDING",      # "VENDING" → STORAGE ROOM
+        "VAULT",        # "VAULT" → STORAGE ROOM
+        "ELECTRICAL",   # "ELECTRICAL ROOM" → ELECTRICAL ROOM (was missing entirely)
+        "FITNESS",      # "FITNESS ROOM" → STORAGE ROOM
+        "YOGA", "MEDITATION",  # "YOGA/MEDITATION ROOM" → STORAGE ROOM
+        "MAIL",         # "MAIL ROOM" → STORAGE ROOM
     }
 
     # Class-level compiled word-boundary pattern built from VALID_ROOM_KEYWORDS.
@@ -410,9 +430,18 @@ class SemanticRoomValidator:
 # Build the class-level keyword pattern now that VALID_ROOM_KEYWORDS is defined.
 # Sorted longest-first so multi-word phrases ("FIRE PUMP") match before their
 # constituent words ("PUMP") when both could apply to the same string.
-_sorted_kws = sorted(SemanticRoomValidator.VALID_ROOM_KEYWORDS, key=len, reverse=True)
+#
+# CLASSROOM alone gets a widened trailing boundary (plain \b OR immediate
+# digit) to match the concatenated room-number form school sheets emit with
+# no separator ("CLASSROOM5", "CLASSROOM17") — verified via live OCR. This is
+# scoped to CLASSROOM only, not all keywords: applying it globally let
+# "SUITE" + digit match "SUITE301", reviving a known VLM-hallucinated giant
+# box (verified: spans an entire floor, was previously — coincidentally —
+# blocked by this same gate). Every other keyword keeps the strict \b.
+_sorted_kws = sorted(SemanticRoomValidator.VALID_ROOM_KEYWORDS - {"CLASSROOM"}, key=len, reverse=True)
+_kw_alternation = "|".join(re.escape(kw) for kw in _sorted_kws)
 SemanticRoomValidator._KW_PATTERN = re.compile(
-    r"\b(?:" + "|".join(re.escape(kw) for kw in _sorted_kws) + r")\b",
+    r"\bCLASSROOM(?:\b|(?=\d))|\b(?:" + _kw_alternation + r")\b",
     re.IGNORECASE,
 )
 
@@ -469,7 +498,11 @@ class TaxonomyNormalizer:
                 f"— verify it represents a single room (e.g., IT/STORAGE) and not two rooms"
             )
 
-        return normalize_to_mandatory(room_name)
+        # _expand_abbreviation existed on this class but was never called here,
+        # so a bare abbreviation (e.g. "CL") reached normalize_to_mandatory()
+        # unexpanded, hit the short-token guard, and fell back to STORAGE ROOM
+        # instead of resolving through its real expansion ("CLOSET").
+        return normalize_to_mandatory(self._expand_abbreviation(room_name))
 
 
 def filter_by_confidence(rooms: List[Dict], min_confidence: float = 0.85,
@@ -1054,6 +1087,16 @@ TABLE_RULE_MIN_WIDTH_FRAC = 0.03
 TABLE_BORDER_MAX_WIDTH_FRAC = 0.90
 TABLE_ROW_EDGE_TOL_FRAC = 0.02
 
+# T-C1 SAM-over-expansion revert ceiling. SAM sometimes expands a correctly-
+# placed tiny OCR label into a giant multi-room/floor-plate blob; when the
+# expanded box exceeds this fraction of the image it is reverted to the pre-SAM
+# located label (original_bbox). Data-derived (measured over 200+ sam_expanded
+# rooms, sprint36+38): normal expansions top out at 0.91% of image; every
+# over-expansion giant was >= 1.63%. Cut placed in that empty gap. Replaces the
+# previous inline 0.08 ceiling, which was ~6x too loose and let 9 giants
+# (1.63-7.72%) survive.
+SAM_OVEREXPAND_MAX_FRAC = 0.012
+
 
 def _detect_ruled_tables(gray: Image.Image, binarise_max: int) -> List[Tuple[int, int, int, int]]:
     """Detect ruled tables (BOM/schedule blocks) as (x1, y1, x2, y2) rectangles.
@@ -1164,6 +1207,21 @@ def prepare_sft_annotation(
     vlm_rooms = annotation.get("rooms", [])
     ocr_rooms = annotation.get("ocr_rooms", [])
     rooms = _merge_vlm_and_ocr(vlm_rooms, ocr_rooms)
+
+    # FIX-7: drop VLM detections with no OCR corroboration (source == vlm_only).
+    # By merge semantics a real *labeled* room's VLM box matches an OCR label and
+    # becomes vlm_ocr_merged; a surviving vlm_only box is a pure-visual detection
+    # no text confirms. Qwen3-VL visual grounding on CAD line-art is unreliable
+    # (verified: 11/11 vlm_only rooms >=1.67% area across 116 files were oversized
+    # /mislocated giants — logo/margin hallucinations and on-drawing swallowers;
+    # zero legit vlm_only found). Dropping them removes exactly that class; the
+    # VLM's real value (refining an OCR box → vlm_ocr_merged) is untouched.
+    pre_vlm = len(rooms)
+    rooms = [r for r in rooms if r.get("source") != "vlm_only"]
+    n_vlm = pre_vlm - len(rooms)
+    if n_vlm:
+        drop_attribution["vlm_uncorroborated"] = n_vlm
+        logger.info(f"FIX-7: dropped {n_vlm} uncorroborated vlm_only room(s)")
 
     # Step 0-pre: FIX-4 — drop rooms whose centroid falls inside a BOM/title-block exclusion zone.
     # Exclusion zones are computed from OCR excluded-token clusters (BOM tables, panel schedules,
@@ -1365,17 +1423,18 @@ def prepare_sft_annotation(
                 # label 0.02% of image -> SAM box 8.8%). The located label
                 # itself (original_bbox, pre-SAM) is correct; the expansion is
                 # not. Revert to the located label rather than drop the room
-                # or keep the drifted giant. Reuses the existing single-unit
-                # ceiling (MAX_VLM_UNIT_FRAC, defined below) — no new threshold.
+                # or keep the drifted giant. Ceiling is SAM_OVEREXPAND_MAX_FRAC
+                # (data-derived gap 0.91%-1.63%); the old 8% inline ceiling let
+                # 9 giants (1.63-7.72%) survive.
                 if (room.get("sam_expanded") and room.get("original_bbox")
                         and img_area_pre > 0
-                        and area > img_area_pre * 0.08):
+                        and area > img_area_pre * SAM_OVEREXPAND_MAX_FRAC):
                     ob = room["original_bbox"]
                     if len(ob) == 4 and ob[2] * ob[3] >= OCR_MIN_AREA_PX:
                         logger.warning(
                             f"T-C1: reverted over-expanded OCR bbox '{rn}' "
                             f"(sam_area={area:.0f} = {100*area/img_area_pre:.1f}% "
-                            f"> 8%) to located label {ob}"
+                            f"> {SAM_OVEREXPAND_MAX_FRAC:.1%}) to located label {ob}"
                         )
                         room["bbox"] = ob
                         bbox = ob
