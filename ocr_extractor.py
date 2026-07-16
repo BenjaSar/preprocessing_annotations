@@ -7,6 +7,7 @@ with optional preprocessing. Supports both PaddleOCR (default) and EasyOCR (lega
 """
 
 import logging
+import math
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -14,6 +15,7 @@ from typing import List, Optional, Tuple
 
 import cv2
 import numpy as np
+from PIL import Image
 
 try:
     from .config import OCRConfig
@@ -299,6 +301,27 @@ class MEPTextExtractor:
             for pattern in self.config.room_name_patterns
         ]
 
+    def release(self) -> None:
+        """Drop the OCR backend and return its native heap to the OS.
+
+        PaddleOCR's CPU inference allocates a large glibc-arena pool that persists
+        for the life of the process; dropping the Python object + gc reclaims only
+        part of it, so malloc_trim(0) is needed to hand the rest back. Called once
+        the OCR pass is complete so the freed memory is available before the VLM
+        loads. No-op-safe: tolerates a non-glibc libc.
+        """
+        backend = self._ocr_backend
+        if backend is not None and getattr(backend, "ocr", None) is not None:
+            backend.ocr = None
+        self._ocr_backend = None
+        import gc
+        gc.collect()
+        try:
+            import ctypes
+            ctypes.CDLL("libc.so.6").malloc_trim(0)
+        except (OSError, AttributeError) as exc:
+            logger.debug(f"malloc_trim unavailable ({exc}); relying on gc only")
+
     @property
     def ocr_backend(self):
         """Lazy initialization of OCR backend (EasyOCR or PaddleOCR)."""
@@ -394,31 +417,105 @@ class MEPTextExtractor:
         else:
             processed = image
 
-        # Run OCR using the configured backend (EasyOCR or PaddleOCR)
-        try:
-            raw_detections = self.ocr_backend.extract_text(processed)
-        except Exception as e:
-            raise OCRError(f"OCR failed on {image_path}: {e}") from e
-
-        detections = self._length_conf_filter(raw_detections)
-
-        # Rotated-sheet recovery (additive): if this sheet's text is
-        # predominantly vertical, its drawing labels are 90°-rotated and OCR
-        # read them garbled. Rotate the image 90° CW, re-OCR, map the recovered
-        # boxes back to original coordinates, and ADD them. The original
-        # detections are never removed, so non-rotated content is unaffected.
-        if (len(detections) >= ROTATION_MIN_TOKENS
-                and _vertical_text_fraction(detections) >= ROTATION_TEXT_VERTICAL_FRAC):
-            rotated = self._extract_rotated_detections(processed)
-            if rotated:
-                logger.info(
-                    f"Rotated-sheet recovery: {image_path.name} — added "
-                    f"{len(rotated)} detections from 90° pass"
-                )
-                detections.extend(rotated)
+        tile_max = getattr(self.config, "ocr_tile_max_px", 0) or 0
+        if tile_max > 0 and max(processed.shape[0], processed.shape[1]) > tile_max:
+            detections = self._detect_tiled(processed, tile_max, image_path.name)
+        else:
+            detections = self._detect_on_image(processed, image_path.name)
 
         logger.debug(f"Extracted {len(detections)} text regions from {image_path.name}")
         return detections
+
+    def _detect_on_image(self, image: np.ndarray, label: str) -> List["TextDetection"]:
+        """Run the OCR backend + length filter + rotated-sheet recovery on one
+        (already-preprocessed) image, returning detections in that image's own
+        pixel coordinates. Shared by the single-pass and tiled paths.
+        """
+        try:
+            raw_detections = self.ocr_backend.extract_text(image)
+        except Exception as e:
+            raise OCRError(f"OCR failed on {label}: {e}") from e
+
+        detections = self._length_conf_filter(raw_detections)
+
+        # Rotated-sheet recovery (additive): if this image's text is
+        # predominantly vertical, its drawing labels are 90°-rotated and OCR
+        # read them garbled. Rotate 90° CW, re-OCR, map boxes back, and ADD them.
+        # The original detections are never removed.
+        if (len(detections) >= ROTATION_MIN_TOKENS
+                and _vertical_text_fraction(detections) >= ROTATION_TEXT_VERTICAL_FRAC):
+            rotated = self._extract_rotated_detections(image)
+            if rotated:
+                logger.info(
+                    f"Rotated-sheet recovery: {label} — added "
+                    f"{len(rotated)} detections from 90° pass"
+                )
+                detections.extend(rotated)
+        return detections
+
+    def _detect_tiled(
+        self, image: np.ndarray, tile_max: int, label: str
+    ) -> List["TextDetection"]:
+        """Detect text by splitting a large page into overlapping tiles, running
+        detection on each tile, and remapping boxes to full-image coordinates.
+
+        Bounds PaddleOCR-CPU peak memory (which scales with input area) without
+        downscaling — each tile is detected at full resolution. Backend-agnostic.
+        Adjacent-tile duplicates from the overlap are removed.
+        """
+        try:
+            from .tile_splitter import TileSplitter
+        except ImportError:
+            from tile_splitter import TileSplitter
+
+        h, w = image.shape[0], image.shape[1]
+        cols = max(1, math.ceil(w / tile_max))
+        rows = max(1, math.ceil(h / tile_max))
+        overlap = getattr(self.config, "ocr_tile_overlap_pct", 0.10)
+        splitter = TileSplitter(cols=cols, rows=rows, overlap_pct=overlap)
+
+        pil_image = Image.fromarray(image)
+        merged: List["TextDetection"] = []
+        for tile_img, meta in splitter.split(pil_image):
+            tile_arr = np.asarray(tile_img)
+            tile_dets = self._detect_on_image(tile_arr, f"{label}[{meta.col},{meta.row}]")
+            for det in tile_dets:
+                merged.append(self._offset_detection(det, meta.x_offset, meta.y_offset))
+        logger.info(
+            f"OCR tiling: {label} {w}x{h} -> {cols}x{rows} tiles "
+            f"(overlap={overlap:.0%})"
+        )
+        return self._dedupe_detections(merged)
+
+    @staticmethod
+    def _offset_detection(
+        det: "TextDetection", x_offset: int, y_offset: int
+    ) -> "TextDetection":
+        """Translate a tile-local detection's quad into full-image coordinates."""
+        shifted = [[p[0] + x_offset, p[1] + y_offset] for p in det.bbox]
+        return TextDetection(bbox=shifted, text=det.text, confidence=det.confidence)
+
+    @staticmethod
+    def _dedupe_detections(
+        detections: List["TextDetection"], center_tol: int = 20
+    ) -> List["TextDetection"]:
+        """Drop duplicate detections produced in tile-overlap regions: same text
+        whose box centroids are within `center_tol` px. Keeps the higher
+        confidence one. center_tol is a small pixel tolerance, not a tuned value.
+        """
+        kept: List["TextDetection"] = []
+        for det in sorted(detections, key=lambda d: d.confidence, reverse=True):
+            cx, cy = _centroid(det.bbox)
+            dup = False
+            for k in kept:
+                if k.text == det.text:
+                    kx, ky = _centroid(k.bbox)
+                    if abs(cx - kx) <= center_tol and abs(cy - ky) <= center_tol:
+                        dup = True
+                        break
+            if not dup:
+                kept.append(det)
+        return kept
 
     def _length_conf_filter(self, raw_detections) -> List["TextDetection"]:
         """Apply length-aware confidence thresholds + convert bbox to quad.

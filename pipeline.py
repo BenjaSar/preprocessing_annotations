@@ -21,7 +21,7 @@ import numpy as np
 try:
     from .config import PipelineConfig
     from .pdf_extractor import PDFExtractor, PageTypeClassifier
-    from .ocr_extractor import MEPTextExtractor, RoomCandidate
+    from .ocr_extractor import MEPTextExtractor, RoomCandidate, TextDetection
     from .two_pass_ocr_extractor import TwoPassOCRExtractor
     from .vlm_annotator import VLMAnnotator
     from .semantic_reconciler import SemanticReconciler
@@ -45,7 +45,7 @@ try:
 except ImportError:
     from config import PipelineConfig
     from pdf_extractor import PDFExtractor, PageTypeClassifier
-    from ocr_extractor import MEPTextExtractor, RoomCandidate
+    from ocr_extractor import MEPTextExtractor, RoomCandidate, TextDetection
     #from test.two_pass_ocr_extractor import TwoPassOCRExtractor
     from two_pass_ocr_extractor import TwoPassOCRExtractor
     from vlm_annotator import VLMAnnotator
@@ -542,20 +542,21 @@ class AnnotationPipeline:
         self._print_step("STEP 2: OCR text extraction + abbreviation recovery")
 
         ocr_results: Dict[str, List[RoomCandidate]] = {}
+        # Raw Pass-1 detections retained per image for the deferred assembly step
+        # (VLM refine + abbreviation recovery run after the OCR heap is released).
+        raw_detections_by_image: Dict[str, List[TextDetection]] = {}
         # FIX-4: per-image BOM/title-block exclusion zones derived from OCR excluded-token clusters.
         exclusion_zones_by_image: Dict[str, list] = {}
-        abbrev_recovery = AbbreviationOCRRecovery()  # uses pattern matching only
 
         _ocr_first_image = True  # track first image to restore logger after Paddle import
         for img_path in self._iter_images(images_dir):
             try:
-                # 2a: Two-Pass OCR room detection (PaddleOCR + VLM fallback).
-                # extract_and_find_rooms_with_vlm_fallback returns (candidates, raw_detections):
-                # - Pass 1: PaddleOCR extraction (fast baseline)
-                # - Pass 2: VLM fallback for low-confidence results (confidence < 0.7)
-                # - Merge: Returns best candidates from both passes
-                # raw_detections are reused for abbreviation recovery and exclusion zones.
-                rooms, raw_detections = self.ocr_extractor.extract_and_find_rooms_with_vlm_fallback(img_path)
+                # Pass 1 only: the memory-heavy PaddleOCR sweep runs for every page
+                # with no VLM resident. Pass 2 (VLM refine) + abbreviation recovery
+                # are deferred to the assembly step below, after the OCR native heap
+                # is released, so PaddleOCR and the VLM model are never co-resident
+                # (which would exceed host RAM). Order (refine → abbrev) is preserved.
+                pass1_rooms, raw_detections = self.ocr_extractor.find_rooms_pass1(img_path)
 
                 # FIX-4: Compute exclusion zones from excluded-token clusters.
                 try:
@@ -578,51 +579,43 @@ class AnnotationPipeline:
                     verify_logging_handlers()
                     _ocr_first_image = False
 
-                recovered_abbrevs: List[RoomCandidate] = []
-                for det in raw_detections:
-                    text = det.text.strip().upper()
-                    if ResidentialAbbreviationRecovery.is_residential_abbreviation(text):
-                        expanded = ResidentialAbbreviationRecovery.expand_abbreviation(text)
-                        x_coords = [p[0] for p in det.bbox]
-                        y_coords = [p[1] for p in det.bbox]
-                        x, y = min(x_coords), min(y_coords)
-                        w, h = max(x_coords) - x, max(y_coords) - y
-                        recovered_abbrevs.append(
-                            RoomCandidate(
-                                bbox=(x, y, w, h),
-                                room_number="",
-                                room_name=expanded,
-                                confidence=det.confidence,
-                                raw_text=text,
-                            )
-                        )
-
-                # Merge, deduplicate by proximity (50px threshold)
-                all_rooms = list(rooms)
-                for abbrev_cand in recovered_abbrevs:
-                    ax, ay = abbrev_cand.bbox[0], abbrev_cand.bbox[1]
-                    already_covered = any(
-                        abs(r.bbox[0] - ax) < 50 and abs(r.bbox[1] - ay) < 50
-                        for r in all_rooms
-                    )
-                    if not already_covered:
-                        all_rooms.append(abbrev_cand)
-
-                ocr_results[img_path.name] = all_rooms
-                logger.info(
-                    f"  {img_path.name}: {len(rooms)} rooms + "
-                    f"{len(recovered_abbrevs)} abbreviations recovered"
-                )
+                ocr_results[img_path.name] = pass1_rooms
+                raw_detections_by_image[img_path.name] = raw_detections
             except Exception as e:
                 logger.error(f"  {img_path.name}: OCR failed - {e}")
                 ocr_results[img_path.name] = []
+                raw_detections_by_image[img_path.name] = []
             finally:
                 if img_path.name in image_status:
                     image_status[img_path.name]["ocr"] = True
+                # PaddleOCR's native allocator retains a new high-watermark chunk
+                # for every distinct input shape it sees (measured: flat across
+                # same-aspect pages, stepped +1-1.2GB on each new page size/tile
+                # shape), so across many differently-sized sheets the resident
+                # heap ratchets up over the run even though each page's own peak
+                # is small. Releasing after every page resets that ratchet before
+                # it can accumulate toward the host memory ceiling.
+                self.ocr_extractor.release_ocr()
 
         # Verify logging handlers after Step 2 OCR completes
         # (PaddlePaddle may have reset the root logger level during import)
         verify_logging_handlers()
+
+        # Pass 1 (PaddleOCR) is done for all pages — release its native heap so the
+        # ~14GB CPU-arena is returned to the OS before the VLM model loads for
+        # Pass 2 / Step 3. Keeps the two engines from being co-resident.
+        self.ocr_extractor.release_ocr()
+
+        # Assembly (VLM heap now free): Pass-2 VLM refine, then abbreviation
+        # recovery — same order and logic as the original single-pass path, so
+        # ocr_results match the pre-change baseline. refine_with_vlm is a no-op
+        # when there is no VLM backend, so this is safe with use_vlm disabled too.
+        for img_path in self._iter_images(images_dir):
+            ocr_results[img_path.name] = self._assemble_ocr_candidates(
+                img_path,
+                ocr_results.get(img_path.name, []),
+                raw_detections_by_image.get(img_path.name, []),
+            )
 
         # Step 3: VLM annotation (optional)
         if self.config.use_vlm:
@@ -1213,6 +1206,57 @@ class AnnotationPipeline:
         logger.info("Pipeline run() complete — all steps finished.")
         return stats
 
+    def _assemble_ocr_candidates(
+        self,
+        img_path: Path,
+        pass1_rooms: List[RoomCandidate],
+        raw_detections: List[TextDetection],
+    ) -> List[RoomCandidate]:
+        """Finalize OCR candidates for one page: Pass-2 VLM refine, then residential
+        abbreviation recovery.
+
+        Runs after the PaddleOCR heap is released so the VLM can load without
+        co-residence. Order (refine → abbrev) and the per-candidate logic match the
+        original in-loop two-pass path, so outputs are unchanged.
+        """
+        refined = self.ocr_extractor.refine_with_vlm(img_path, pass1_rooms)
+
+        recovered_abbrevs: List[RoomCandidate] = []
+        for det in raw_detections:
+            text = det.text.strip().upper()
+            if ResidentialAbbreviationRecovery.is_residential_abbreviation(text):
+                expanded = ResidentialAbbreviationRecovery.expand_abbreviation(text)
+                x_coords = [p[0] for p in det.bbox]
+                y_coords = [p[1] for p in det.bbox]
+                x, y = min(x_coords), min(y_coords)
+                w, h = max(x_coords) - x, max(y_coords) - y
+                recovered_abbrevs.append(
+                    RoomCandidate(
+                        bbox=(x, y, w, h),
+                        room_number="",
+                        room_name=expanded,
+                        confidence=det.confidence,
+                        raw_text=text,
+                    )
+                )
+
+        # Merge, deduplicate by proximity (50px threshold)
+        all_rooms = list(refined)
+        for abbrev_cand in recovered_abbrevs:
+            ax, ay = abbrev_cand.bbox[0], abbrev_cand.bbox[1]
+            already_covered = any(
+                abs(r.bbox[0] - ax) < 50 and abs(r.bbox[1] - ay) < 50
+                for r in all_rooms
+            )
+            if not already_covered:
+                all_rooms.append(abbrev_cand)
+
+        logger.info(
+            f"  {img_path.name}: {len(refined)} rooms + "
+            f"{len(recovered_abbrevs)} abbreviations recovered"
+        )
+        return all_rooms
+
     def _get_vlm_result(self, img_path: Path):
         """Get VLM annotation result, with optional tiled inference for local backends."""
         vlm = self.vlm_annotator
@@ -1231,12 +1275,26 @@ class AnnotationPipeline:
         return result
 
     @staticmethod
-    def _dedup_rooms_by_iou(rooms: List[dict], iou_threshold: float = 0.5) -> List[dict]:
-        """Drop duplicate room boxes produced by SAM for adjacent labels (F-C).
+    def _room_identity(room: dict) -> tuple:
+        """Identity key for a room: (normalized name, room number).
 
-        Two distinct label centroids inside one enclosing region yield the same
-        SAM mask. Keep the higher-priority box (sam_expanded first, then larger
-        area); drop any later box overlapping a kept box with IoU >= threshold.
+        Two boxes are the *same* room only if they carry the same label. Distinct
+        labels are distinct rooms even when their boxes overlap — this is what
+        keeps SAM over-expansion (flood) from collapsing many real, differently
+        labelled units into one via IoU merging.
+        """
+        name = (room.get("room_name") or room.get("name") or "").strip().upper()
+        number = (str(room.get("room_number") or "")).strip().upper()
+        return (name, number)
+
+    def _dedup_rooms_by_iou(self, rooms: List[dict], iou_threshold: float = 0.5) -> List[dict]:
+        """Drop only genuine duplicate room boxes produced by SAM (F-C).
+
+        A later box is dropped only when it overlaps a kept box with IoU >=
+        threshold AND shares the same room identity (same label) — i.e. the same
+        seed segmented twice. Boxes with a *distinct* identity are always kept,
+        even if they overlap, so flooded expansions never suppress real rooms.
+        Unlabelled boxes fall back to identity () and dedup among themselves.
         Operates on xywh bboxes.
         """
         def _iou_xywh(a, b):
@@ -1264,15 +1322,18 @@ class AnnotationPipeline:
             if len(b) != 4:
                 kept.append(room)
                 continue
+            identity = self._room_identity(room)
             if any(
-                len(k.get("bbox", [])) == 4 and _iou_xywh(b, k["bbox"]) >= iou_threshold
+                self._room_identity(k) == identity
+                and len(k.get("bbox", [])) == 4
+                and _iou_xywh(b, k["bbox"]) >= iou_threshold
                 for k in kept
             ):
                 dropped += 1
                 continue
             kept.append(room)
         if dropped:
-            logger.info(f"F-C dedup: removed {dropped} duplicate SAM box(es)")
+            logger.info(f"F-C dedup: removed {dropped} same-identity duplicate box(es)")
         return kept
 
     # Non-room fixture/tag patterns observed in production data.

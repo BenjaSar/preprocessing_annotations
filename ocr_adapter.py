@@ -166,78 +166,111 @@ class PaddleOCRBackend(OCRBackend):
 
     def __init__(self, config):
         """Initialize PaddleOCR backend.
-        
+
         Args:
             config: OCRConfig instance
         """
         self.config = config
         self.ocr = None
         self.initialized = False
+        # Whether the live model is on GPU. Tracked so a cuDNN/CUDA failure that
+        # only surfaces at inference time (PaddleOCR loads its predictors lazily,
+        # so init can succeed and the first .ocr() call is where cuDNN is really
+        # touched) can trigger a one-time rebuild on CPU. See extract_text.
+        self._use_gpu = False
+
+    @staticmethod
+    def _is_cuda_error(exc: Exception) -> bool:
+        """True if the exception is a GPU/cuDNN driver-loading failure.
+
+        These are recoverable by rebuilding the model on CPU. Any other error is
+        a real fault and must propagate.
+        """
+        msg = str(exc).lower()
+        return 'cudnn' in msg or 'cuda' in msg
+
+    def _build_paddle(self, use_gpu: bool):
+        """Construct a PaddleOCR predictor. Single source of constructor args so
+        the GPU and CPU paths cannot drift apart.
+        """
+        from paddleocr import PaddleOCR
+        return PaddleOCR(
+            use_angle_cls=True,  # Enable text line orientation classification
+            lang='en' if 'en' in self.config.languages else 'ch',
+            use_gpu=use_gpu,
+            det_limit_side_len=self._det_limit,
+            det_limit_type='max',
+        )
+
+    def _rebuild_on_cpu(self, reason: str) -> None:
+        """Swap the live predictor for a CPU one after a GPU/cuDNN failure."""
+        logger.warning(f"{reason}. Falling back to CPU mode.")
+        self.ocr = self._build_paddle(use_gpu=False)
+        self._use_gpu = False
+        logger.info(
+            f"PaddleOCR now on device: CPU (fallback; det_limit_side_len={self._det_limit})"
+        )
 
     def initialize(self) -> None:
         """Lazy-load PaddleOCR model on first use.
-        
+
         Uses PaddleOCR 2.x API with use_gpu parameter for device control.
         Falls back to CPU if GPU initialization fails (e.g., cuDNN not installed).
         """
         if self.initialized:
             return
         try:
-            from paddleocr import PaddleOCR
-            
-            # PaddleOCR 2.x: use_gpu parameter controls device
-            # Try GPU first if configured for CUDA
-            use_gpu = (self.config.device == "cuda")
-            
             # Detection input-size limit. 4608 recovers small in-plan labels
             # (measured: 960→0 unit-labels, 4608→72 unit-labels on 9600px pages).
             # CPU timing measured at 28s/page for ~546 boxes — acceptable.
             # No per-CPU cap: use the configured value on both GPU and CPU.
-            det_limit = getattr(self.config, "det_limit_side_len", 4608)
+            self._det_limit = getattr(self.config, "det_limit_side_len", 4608)
 
-            # Attempt GPU initialization with fallback
+            # PaddleOCR 2.x: use_gpu parameter controls device. Try GPU first if
+            # configured for CUDA; a cuDNN failure here falls back to CPU.
+            want_gpu = (self.config.device == "cuda")
             try:
-                self.ocr = PaddleOCR(
-                    use_angle_cls=True,  # Enable text line orientation classification
-                    lang='en' if 'en' in self.config.languages else 'ch',
-                    use_gpu=use_gpu,
-                    det_limit_side_len=det_limit,
-                    det_limit_type='max',
-                )
-                self.initialized = True
-                device_str = 'GPU' if use_gpu else 'CPU'
+                self.ocr = self._build_paddle(use_gpu=want_gpu)
+                self._use_gpu = want_gpu
                 logger.info(
-                    f"PaddleOCR initialized on device: {device_str} "
-                    f"(det_limit_side_len={det_limit})"
+                    f"PaddleOCR initialized on device: {'GPU' if want_gpu else 'CPU'} "
+                    f"(det_limit_side_len={self._det_limit})"
                 )
             except RuntimeError as e:
-                # Catch cuDNN loading errors and other GPU-specific issues
-                if use_gpu and ('cudnn' in str(e).lower() or 'cuda' in str(e).lower()):
-                    logger.warning(
-                        f"GPU initialization failed (cuDNN not found or incompatible): {e}. "
-                        "Falling back to CPU mode."
-                    )
-                    # Retry with CPU — same det_limit (28s/page at 4608, acceptable)
-                    self.ocr = PaddleOCR(
-                        use_angle_cls=True,
-                        lang='en' if 'en' in self.config.languages else 'ch',
-                        use_gpu=False,
-                        det_limit_side_len=det_limit,
-                        det_limit_type='max',
-                    )
-                    self.initialized = True
-                    logger.info(
-                        f"PaddleOCR initialized on device: CPU "
-                        f"(fallback; det_limit_side_len={det_limit})"
+                if want_gpu and self._is_cuda_error(e):
+                    self._rebuild_on_cpu(
+                        f"GPU initialization failed (cuDNN not found or incompatible): {e}"
                     )
                 else:
-                    # Re-raise if not a cuDNN issue
                     raise
+            self.initialized = True
         except ImportError:
             logger.error(
                 "PaddleOCR not installed. Install via: "
                 "pip install paddlepaddle-gpu paddleocr"
             )
+            raise
+
+    def _invoke_paddle(self, image_input: str):
+        """Call PaddleOCR, tolerating API drift in the `cls` parameter."""
+        try:
+            return self.ocr.ocr(image_input, cls=True)
+        except TypeError:
+            # Newer paddleocr versions don't accept cls parameter
+            return self.ocr.ocr(image_input)
+
+    def _run_ocr(self, image_input: str):
+        """Run inference, recovering from a GPU/cuDNN failure that only surfaces
+        here (predictors are loaded lazily on the first call). On such a failure
+        while on GPU, rebuild once on CPU and retry; the result is identical
+        because the CPU and GPU models share weights.
+        """
+        try:
+            return self._invoke_paddle(image_input)
+        except RuntimeError as e:
+            if self._use_gpu and self._is_cuda_error(e):
+                self._rebuild_on_cpu(f"GPU inference failed (cuDNN/CUDA): {e}")
+                return self._invoke_paddle(image_input)
             raise
 
     def extract_text(self, image_source: Union[str, Path, np.ndarray]) -> List[TextDetection]:
@@ -263,13 +296,8 @@ class PaddleOCRBackend(OCRBackend):
             image_input = str(image_source)
         
         try:
-            # Try with cls parameter first (older versions), then without (newer versions)
-            try:
-                results = self.ocr.ocr(image_input, cls=True)
-            except TypeError:
-                # Newer paddleocr versions don't accept cls parameter
-                results = self.ocr.ocr(image_input)
-            
+            results = self._run_ocr(image_input)
+
             detections = []
             # PaddleOCR returns a list of result lines (one per detected region)
             # Each line contains detections

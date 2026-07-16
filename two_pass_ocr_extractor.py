@@ -97,54 +97,67 @@ class TwoPassOCRExtractor:
                 "vlm_backend not provided; will use PaddleOCR only (no VLM fallback)"
             )
     
-    def extract_and_find_rooms_with_vlm_fallback(
+    def find_rooms_pass1(
         self,
         image_path: Union[str, Path],
     ) -> Tuple[List[RoomCandidate], List[TextDetection]]:
-        """
-        Extract rooms using two-pass strategy: PaddleOCR + VLM fallback.
-        
-        Pass 1: Run PaddleOCR on all regions, returns baseline room candidates
-        Pass 2: For low-confidence results (< threshold), use VLM as fallback
-        Merge: Combine results, preferring higher confidence results
-        
+        """Pass 1 only: PaddleOCR extraction (no VLM).
+
+        Separated from Pass 2 so the caller can run the memory-heavy PaddleOCR
+        sweep for every page, release its native heap, and only then load the VLM
+        for Pass 2 — keeping the two engines from being resident at the same time.
+
         Args:
             image_path: Path to floor plan image
-        
+
         Returns:
-            Tuple of (room_candidates, raw_text_detections)
-            - room_candidates: List of RoomCandidate with merged results
-            - raw_text_detections: List of all raw TextDetection objects from OCR
-        
+            Tuple of (pass1_room_candidates, raw_text_detections)
+
         Raises:
             OCRError: If OCR extraction fails
         """
         image_path = Path(image_path)
-        
-        # Pass 1: PaddleOCR extraction
         logger.info(f"Pass 1 (PaddleOCR): Extracting rooms from {image_path.name}")
         try:
             pass1_rooms, raw_detections = self.ocr_extractor.extract_and_find_rooms(image_path)
         except Exception as e:
             logger.error(f"Pass 1 (PaddleOCR) failed: {e}")
             raise
-        
         logger.info(f"Pass 1 complete: extracted {len(pass1_rooms)} room candidates")
-        
-        # If no VLM backend or all results are high-confidence, return Pass 1 results
+        return pass1_rooms, raw_detections
+
+    def refine_with_vlm(
+        self,
+        image_path: Union[str, Path],
+        pass1_rooms: List[RoomCandidate],
+    ) -> List[RoomCandidate]:
+        """Pass 2: VLM fallback + merge for low-confidence Pass-1 rooms.
+
+        No-op (returns pass1_rooms unchanged) when there is no VLM backend or no
+        low-confidence room — identical gating to the original single-call path,
+        so results match regardless of when this runs.
+
+        Args:
+            image_path: Path to floor plan image
+            pass1_rooms: Room candidates from find_rooms_pass1
+
+        Returns:
+            Merged room candidates (or pass1_rooms unchanged when Pass 2 skipped)
+        """
+        image_path = Path(image_path)
+
         low_confidence_rooms = [
             r for r in pass1_rooms
             if r.confidence < self.confidence_threshold
         ]
-        
+
         if not low_confidence_rooms or self.vlm_backend is None:
             logger.info(
                 f"Pass 2 skipped: {len(low_confidence_rooms)} low-confidence rooms, "
                 f"VLM backend available: {self.vlm_backend is not None}"
             )
-            return pass1_rooms, raw_detections
-        
-        # Pass 2: VLM fallback for low-confidence rooms
+            return pass1_rooms
+
         logger.info(
             f"Pass 2 (VLM Fallback): Processing {len(low_confidence_rooms)} "
             f"low-confidence rooms (confidence < {self.confidence_threshold})"
@@ -153,15 +166,45 @@ class TwoPassOCRExtractor:
             pass2_rooms = self._extract_rooms_via_vlm(image_path)
             if not pass2_rooms:
                 logger.warning("Pass 2 (VLM) returned no results, using Pass 1 only")
-                return pass1_rooms, raw_detections
+                return pass1_rooms
         except Exception as e:
             logger.warning(f"Pass 2 (VLM) failed, using Pass 1 results: {e}")
-            return pass1_rooms, raw_detections
-        
-        # Merge results: prefer higher confidence
+            return pass1_rooms
+
         merged_rooms = self._merge_room_candidates(pass1_rooms, pass2_rooms)
         logger.info(f"Merged {len(pass1_rooms)} OCR + {len(pass2_rooms)} VLM → {len(merged_rooms)} final candidates")
-        
+        return merged_rooms
+
+    def release_ocr(self) -> None:
+        """Release Pass-1 PaddleOCR native memory (safe to call once Pass 1 is done
+        for all pages). Delegates to the underlying MEPTextExtractor."""
+        self.ocr_extractor.release()
+
+    def extract_and_find_rooms_with_vlm_fallback(
+        self,
+        image_path: Union[str, Path],
+    ) -> Tuple[List[RoomCandidate], List[TextDetection]]:
+        """
+        Extract rooms using two-pass strategy: PaddleOCR + VLM fallback.
+
+        Pass 1: Run PaddleOCR on all regions, returns baseline room candidates
+        Pass 2: For low-confidence results (< threshold), use VLM as fallback
+        Merge: Combine results, preferring higher confidence results
+
+        Kept as the single-call composition of find_rooms_pass1 + refine_with_vlm
+        for callers that do not need to separate the two passes in time.
+
+        Args:
+            image_path: Path to floor plan image
+
+        Returns:
+            Tuple of (room_candidates, raw_text_detections)
+
+        Raises:
+            OCRError: If OCR extraction fails
+        """
+        pass1_rooms, raw_detections = self.find_rooms_pass1(image_path)
+        merged_rooms = self.refine_with_vlm(image_path, pass1_rooms)
         return merged_rooms, raw_detections
     
     def _extract_rooms_via_vlm(self, image_path: Path) -> List[RoomCandidate]:
