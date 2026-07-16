@@ -54,6 +54,24 @@ class PDFConfig:
     # - 300 DPI: High detail, recommended for small electrical symbols
     dpi: int = 200
 
+    # Minimum longest-edge pixel count per rendered page.
+    #
+    # A flat `dpi` renders every page at the same pixels-per-inch, so a small
+    # physical sheet (e.g. 8.5x11" Letter) that packs an entire multi-unit
+    # building into a tiny area produces glyphs too small for OCR/VLM to read,
+    # while a large sheet (e.g. ARCH-D) of the same building reads fine at the
+    # same dpi. This floor guarantees each page is rasterized to at least this
+    # many pixels on its longest edge by raising dpi per-page when needed; it
+    # NEVER lowers dpi, so pages that already exceed it (large sheets) are
+    # rendered exactly as before.
+    #
+    # Default matches the established downstream working resolution used across
+    # the pipeline — OCR (`MEPTextExtractor._OCR_MAX_DIM_PX`), the VLM pre-resize
+    # target, and the bbox validators all operate at 4500px longest edge — so
+    # rendering below it starves those stages and rendering above it is discarded
+    # by their own down-resize.
+    min_longest_edge_px: int = 4500
+
     # Output image format
     output_format: str = "PNG"
 
@@ -86,6 +104,20 @@ class OCRConfig:
     # legible on both 4500px resized and 9600px original extractions (labels scale
     # with resolution). Measured: default(960) → 0 unit labels; 4608 → 69.
     det_limit_side_len: int = 4608
+
+    # OCR tiling: longest-edge (px) above which a page is split into overlapping
+    # tiles for detection, then detections are remapped to full-image coordinates.
+    # PaddleOCR-CPU memory scales with input area; a full 4500px page peaks ~14.7GB
+    # (measured), too close to a 16GB host, while a ~1200px tile peaks ~5.3GB
+    # (measured). Tiling bounds peak memory independently of the VLM backend, at
+    # full detection resolution per tile (no recall loss from downscaling).
+    # 0 disables tiling (single-pass detection). Default 1200 mirrors the VLM
+    # tile target and the ~5.3GB/tile measurement, giving comfortable headroom on
+    # a 16GB host regardless of VLM backend.
+    ocr_tile_max_px: int = 1200
+    # Fractional overlap between adjacent tiles so labels on a tile seam are still
+    # wholly visible in at least one tile.
+    ocr_tile_overlap_pct: float = 0.10
 
     # Whether to apply image preprocessing before OCR
     preprocess: bool = True

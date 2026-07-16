@@ -41,8 +41,29 @@ class PDFExtractor:
             image.save(f"page_{page_num}.png")
     """
 
+    # PDF user-space is defined at 72 points per inch.
+    _PDF_POINTS_PER_INCH = 72.0
+
     def __init__(self, config: Optional[PDFConfig] = None):
         self.config = config or PDFConfig()
+
+    def _page_scale(self, page: "fitz.Page") -> float:
+        """Rasterization scale: the configured flat dpi, capped so the longest
+        edge never exceeds `config.min_longest_edge_px`.
+
+        This reproduces the established baseline output sizes — large sheets are
+        capped to the cap value, physically small sheets keep their dpi-driven
+        size (they are NOT up-scaled). Up-scaling small sheets was tried to
+        recover otherwise-unreadable small-format pages, but on a CPU-only OCR
+        host it drove those pages' detection memory past the RAM ceiling; the cap
+        keeps memory bounded and matches the known-good baseline.
+        """
+        base_scale = self.config.dpi / self._PDF_POINTS_PER_INCH
+        longest_edge_pts = max(page.rect.width, page.rect.height)
+        if longest_edge_pts <= 0:
+            return base_scale
+        cap_scale = self.config.min_longest_edge_px / longest_edge_pts
+        return min(base_scale, cap_scale)
 
     def extract(
         self, pdf_path: str | Path
@@ -80,14 +101,11 @@ class PDFExtractor:
             else:
                 pages = range(len(doc))
 
-            # Calculate transformation matrix for target DPI
-            # PDF base resolution is 72 DPI
-            scale = self.config.dpi / 72.0
-            mat = fitz.Matrix(scale, scale)
-
             for page_num in pages:
                 try:
                     page = doc[page_num]
+                    scale = self._page_scale(page)
+                    mat = fitz.Matrix(scale, scale)
                     pix = page.get_pixmap(matrix=mat)
 
                     # Convert to PIL Image

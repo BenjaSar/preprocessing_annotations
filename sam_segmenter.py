@@ -206,38 +206,13 @@ class RoomSegmenter:
     def _select_room_mask(
         self, masks: np.ndarray, scores: np.ndarray
     ) -> Tuple[np.ndarray, float]:
+        """Select a room-scale mask from SAM multimask candidates (F-A).
+
+        Thin delegate to the module-level `select_room_mask` so any promptable
+        segmenter (not just this SAM1 predictor) can reuse the identical
+        selection algorithm — see sam21_probe for the SAM2.1 comparison.
         """
-        Select a room-scale mask from SAM multimask candidates (F-A).
-
-        SAM scores favour the largest (whole-floor) mask on floor plans.
-        Instead: among masks whose area is below max_expand_frac of the image,
-        pick the highest-scoring. If none qualify (all are floor-plate-sized),
-        fall back to the smallest mask available.
-
-        Args:
-            masks: (N, H, W) boolean masks from predictor.predict.
-            scores: (N,) confidence scores.
-
-        Returns:
-            (selected_mask, confidence).
-        """
-        img_area = masks.shape[1] * masks.shape[2]
-        max_area = img_area * self.config.max_expand_frac
-
-        areas = [int(m.sum()) for m in masks]
-
-        # Candidates below the over-segmentation ceiling
-        valid = [i for i, a in enumerate(areas) if 0 < a <= max_area]
-        if valid:
-            best_idx = max(valid, key=lambda i: scores[i])
-        else:
-            # All masks too large -> take the smallest non-empty one
-            non_empty = [i for i, a in enumerate(areas) if a > 0]
-            if not non_empty:
-                return masks[0], float(scores[0])
-            best_idx = min(non_empty, key=lambda i: areas[i])
-
-        return masks[best_idx], float(scores[best_idx])
+        return select_room_mask(masks, scores, self.config.max_expand_frac)
 
     def segment_from_labels(
         self,
@@ -478,31 +453,12 @@ class RoomSegmenter:
     def _mask_to_bbox(
         self, mask: np.ndarray
     ) -> Tuple[List[int], Optional[np.ndarray]]:
+        """Convert binary mask to bounding box and contour.
+
+        Thin delegate to the module-level `mask_to_bbox` (shared with
+        sam21_probe's SAM2.1 adapter).
         """
-        Convert binary mask to bounding box and contour.
-
-        Args:
-            mask: Binary segmentation mask.
-
-        Returns:
-            Tuple of (bbox as [x, y, w, h], largest contour).
-        """
-        mask_uint8 = mask.astype(np.uint8)
-
-        contours, _ = cv2.findContours(
-            mask_uint8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
-        )
-
-        if not contours:
-            return [0, 0, 0, 0], None
-
-        # Get largest contour
-        largest = max(contours, key=cv2.contourArea)
-
-        # Get bounding box
-        x, y, w, h = cv2.boundingRect(largest)
-
-        return [x, y, w, h], largest
+        return mask_to_bbox(mask)
 
     def refine_annotations(
         self,
@@ -560,7 +516,11 @@ class RoomSegmenter:
         expanded = 0
         kept_original = 0
 
-        for ann in annotations:
+        # Precompute every seed's centroid so each expansion can be rejected if it
+        # floods past its own room and swallows a neighbouring seed (G1).
+        seed_centers = [seed_center(a.get("bbox", [])) for a in annotations]
+
+        for idx, ann in enumerate(annotations):
             bbox = ann.get("bbox", [0, 0, 100, 100])
 
             # Centroid of label box → SAM prompt point
@@ -582,8 +542,7 @@ class RoomSegmenter:
                 # prompt so SAM can grow to the enclosing room boundary. For large
                 # originals (already room-scale or over-sized VLM boxes) keep the
                 # box prompt as a coarse constraint against runaway segmentation.
-                LABEL_SCALE_BOX_MAX = 50_000  # px²; ~224×224, generous label ceiling
-                use_box = len(bbox) == 4 and original_area > LABEL_SCALE_BOX_MAX
+                use_box = len(bbox) == 4 and should_use_box_prompt(original_area)
                 result = self.segment_from_point(
                     image_path, (center_x, center_y), include_mask=need_mask,
                     label_bbox=bbox if use_box else None,
@@ -605,13 +564,27 @@ class RoomSegmenter:
                     kept_original += 1
                     continue
 
+                # G1: anti-flood — expansion that swallows a neighbour seed would
+                # absorb that room's distinct label in the VLM/OCR merge, collapsing
+                # two rooms into one. Keep the label box instead.
+                if expansion_swallows_other_seed(list(result.bbox), idx, seed_centers):
+                    logger.debug(
+                        "SAM flood guardrail: expansion swallowed a neighbour seed. "
+                        "Keeping original."
+                    )
+                    refined_ann = ann.copy()
+                    refined_ann["sam_expanded"] = False
+                    refined_ann["sam_skip_reason"] = "flood_swallowed_seed"
+                    refined.append(refined_ann)
+                    kept_original += 1
+                    continue
+
                 # Guardrail 2: collapse — only when the original was LABEL-SCALE.
                 # A label box is small; SAM shrinking below it means SAM failed, so
                 # keep the label. But when the original is already a giant mislocalized
                 # box (VLM drew a schedule/notes region), SAM's SMALLER result is the
                 # desired refinement — accepting it fixes the huge-box error.
-                LABEL_SCALE_MAX = 150_000  # px²; ~387×387, generous text-label ceiling
-                if sam_area < original_area and original_area <= LABEL_SCALE_MAX:
+                if is_collapse(sam_area, original_area):
                     logger.debug(
                         f"SAM collapse guardrail: sam_area={sam_area} < "
                         f"original={original_area} (label-scale). Keeping original."
@@ -804,3 +777,124 @@ class RoomSegmenter:
             logger.info(f"Saved visualization to {output_path}")
 
         return overlay
+
+
+# P-2B: label-scale originals get a point-only prompt (so SAM can grow past the
+# label to the enclosing room boundary); already room/VLM-scale originals keep a
+# box prompt as a coarse constraint against runaway segmentation. Shared with
+# sam21_probe so the SAM2.1 comparison exercises the identical prompt decision.
+LABEL_SCALE_BOX_MAX = 50_000  # px²; ~224x224, generous label ceiling
+
+
+def should_use_box_prompt(original_area: int) -> bool:
+    """True when `original_area` is large enough that SAM should be box-constrained
+    rather than given a bare point prompt."""
+    return original_area > LABEL_SCALE_BOX_MAX
+
+
+# Guardrail 2 (collapse): a label box is small; SAM shrinking below it means SAM
+# failed, so the caller should keep the label. When the original is already a
+# giant mislocalized box (VLM drew a schedule/notes region), SAM's smaller result
+# is the desired refinement instead. Shared with sam21_probe so the SAM2.1
+# comparison can classify collapse the same way production does.
+LABEL_SCALE_MAX = 150_000  # px²; ~387x387, generous text-label ceiling
+
+
+def is_collapse(sam_area: int, original_area: int) -> bool:
+    """True when SAM's result should be rejected as a collapse: it shrank below
+    a label-scale original (SAM failed to find the room, not a refinement)."""
+    return sam_area < original_area and original_area <= LABEL_SCALE_MAX
+
+
+def seed_center(bbox: List[int]) -> Optional[Tuple[int, int]]:
+    """Centroid (x, y) of a label bbox [x, y, w, h], or None if malformed."""
+    if not bbox or len(bbox) != 4:
+        return None
+    x, y, w, h = bbox
+    return (x + w // 2, y + h // 2)
+
+
+def expansion_swallows_other_seed(
+    sam_bbox: List[int], own_index: int, seed_centers: List[Optional[Tuple[int, int]]]
+) -> bool:
+    """True if the expanded SAM box contains a *different* seed's centroid.
+
+    Such an expansion flooded past its own room into a neighbour. In the
+    downstream VLM/OCR merge (overlap-based), that oversized box would absorb the
+    neighbour's distinct label, collapsing two real rooms into one — the measured
+    cause of the room-count regression. Reject it and keep the label box.
+    """
+    sx, sy, sw, sh = sam_bbox
+    for i, c in enumerate(seed_centers):
+        if c is None or i == own_index:
+            continue
+        cx, cy = c
+        if sx <= cx <= sx + sw and sy <= cy <= sy + sh:
+            return True
+    return False
+
+
+def select_room_mask(
+    masks: np.ndarray, scores: np.ndarray, max_expand_frac: float
+) -> Tuple[np.ndarray, float]:
+    """
+    Select a room-scale mask from SAM multimask candidates (F-A).
+
+    SAM scores favour the largest (whole-floor) mask on floor plans.
+    Instead: among masks whose area is below max_expand_frac of the image,
+    pick the highest-scoring. If none qualify (all are floor-plate-sized),
+    fall back to the smallest mask available.
+
+    Args:
+        masks: (N, H, W) boolean masks from predictor.predict.
+        scores: (N,) confidence scores.
+        max_expand_frac: max fraction of image area a mask may occupy.
+
+    Returns:
+        (selected_mask, confidence).
+    """
+    img_area = masks.shape[1] * masks.shape[2]
+    max_area = img_area * max_expand_frac
+
+    areas = [int(m.sum()) for m in masks]
+
+    # Candidates below the over-segmentation ceiling
+    valid = [i for i, a in enumerate(areas) if 0 < a <= max_area]
+    if valid:
+        best_idx = max(valid, key=lambda i: scores[i])
+    else:
+        # All masks too large -> take the smallest non-empty one
+        non_empty = [i for i, a in enumerate(areas) if a > 0]
+        if not non_empty:
+            return masks[0], float(scores[0])
+        best_idx = min(non_empty, key=lambda i: areas[i])
+
+    return masks[best_idx], float(scores[best_idx])
+
+
+def mask_to_bbox(mask: np.ndarray) -> Tuple[List[int], Optional[np.ndarray]]:
+    """
+    Convert binary mask to bounding box and contour.
+
+    Args:
+        mask: Binary segmentation mask.
+
+    Returns:
+        Tuple of (bbox as [x, y, w, h], largest contour).
+    """
+    mask_uint8 = mask.astype(np.uint8)
+
+    contours, _ = cv2.findContours(
+        mask_uint8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+    )
+
+    if not contours:
+        return [0, 0, 0, 0], None
+
+    # Get largest contour
+    largest = max(contours, key=cv2.contourArea)
+
+    # Get bounding box
+    x, y, w, h = cv2.boundingRect(largest)
+
+    return [x, y, w, h], largest
