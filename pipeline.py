@@ -1274,28 +1274,16 @@ class AnnotationPipeline:
 
         return result
 
-    @staticmethod
-    def _room_identity(room: dict) -> tuple:
-        """Identity key for a room: (normalized name, room number).
+    def _dedup_rooms_by_iou(self, rooms: List[dict], iou_threshold: float = 0.9) -> List[dict]:
+        """Drop only genuine duplicate room boxes — near-identical geometry (F-C).
 
-        Two boxes are the *same* room only if they carry the same label. Distinct
-        labels are distinct rooms even when their boxes overlap — this is what
-        keeps SAM over-expansion (flood) from collapsing many real, differently
-        labelled units into one via IoU merging.
-        """
-        name = (room.get("room_name") or room.get("name") or "").strip().upper()
-        number = (str(room.get("room_number") or "")).strip().upper()
-        return (name, number)
-
-    def _dedup_rooms_by_iou(self, rooms: List[dict], iou_threshold: float = 0.5) -> List[dict]:
-        """Drop only genuine duplicate room boxes produced by SAM (F-C).
-
-        A later box is dropped only when it overlaps a kept box with IoU >=
-        threshold AND shares the same room identity (same label) — i.e. the same
-        seed segmented twice. Boxes with a *distinct* identity are always kept,
-        even if they overlap, so flooded expansions never suppress real rooms.
-        Unlabelled boxes fall back to identity () and dedup among themselves.
-        Operates on xywh bboxes.
+        The F-C case is two label points inside one room that SAM segments into the
+        *same mask*, yielding near-identical boxes. Those are merged. Distinct rooms
+        that merely overlap — including SAM over-expansions (flood) and distinct
+        units that share a generic label (e.g. several "0BR")— have IoU well below
+        the near-identical threshold and are kept. The default threshold is high on
+        purpose: only same-mask duplicates (IoU→1.0) are dropped; ordinary overlap
+        (~0.5-0.8) is preserved so real rooms are never collapsed. Operates on xywh.
         """
         def _iou_xywh(a, b):
             ax1, ay1, aw, ah = a
@@ -1322,18 +1310,15 @@ class AnnotationPipeline:
             if len(b) != 4:
                 kept.append(room)
                 continue
-            identity = self._room_identity(room)
             if any(
-                self._room_identity(k) == identity
-                and len(k.get("bbox", [])) == 4
-                and _iou_xywh(b, k["bbox"]) >= iou_threshold
+                len(k.get("bbox", [])) == 4 and _iou_xywh(b, k["bbox"]) >= iou_threshold
                 for k in kept
             ):
                 dropped += 1
                 continue
             kept.append(room)
         if dropped:
-            logger.info(f"F-C dedup: removed {dropped} same-identity duplicate box(es)")
+            logger.info(f"F-C dedup: removed {dropped} near-identical duplicate box(es)")
         return kept
 
     # Non-room fixture/tag patterns observed in production data.

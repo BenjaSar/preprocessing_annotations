@@ -73,6 +73,15 @@ _FORBIDDEN_ZONE_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+# AVI-ON BOM part-number rows (verified via OCR: "AVI-SEN-DUCM-24",
+# "AVI-XPP-16A-1CH-CL2", "AVI-DC-PIR"). These equipment rows sit below the
+# "AVI-ON BOM" header; excluding them lets the BOM exclusion zone extend over
+# the whole schedule instead of just its header, so rooms mislocalized onto the
+# table's lower rows are dropped (verified: 3 TOILET boxes over the AVI-XPP row,
+# Violet-electrical p000). Anchored to the AVI- vendor prefix — no room name
+# carries it, so real rooms are unaffected.
+_BOM_PARTCODE_PATTERN = re.compile(r"^AVI-[A-Z0-9-]+$", re.IGNORECASE)
+
 # Generic AIA-style title-block field labels. Not firm-specific — these are
 # standard drawing title-block fields (verified present on both Kennedy/PARTNERS
 # and Madison/MKDA sheets this session despite different architects). A firm's
@@ -119,6 +128,7 @@ def _is_excluded_token(text: str) -> bool:
         or _INSTRUCTION_PATTERN.search(text)
         or _DOCUMENTATION_PATTERN.search(text)
         or _FORBIDDEN_ZONE_PATTERN.search(text)
+        or _BOM_PARTCODE_PATTERN.match(text)
         or _TITLE_BLOCK_PATTERN.search(text)
         or _STREET_PATTERN.search(text)
         or _IP_STATEMENT_PATTERN.search(text)

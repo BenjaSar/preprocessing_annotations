@@ -80,6 +80,7 @@ MANDATORY_CLASSES: Dict[str, List[str]] = {
         "PRINCIPAL",
         "WORK RM", "WORK ROOM", "TEACHER WORK ROOM",
         "SECRETARY", "VENDING", "MAIL ROOM", "MAIL RM",
+        "PREP",
     ],
     "OPEN OFFICE": [
         "OPEN OFFICE", "OPEN PLAN", "OPEN PLAN WORKSPACE",
@@ -166,6 +167,8 @@ MANDATORY_CLASSES: Dict[str, List[str]] = {
     "STORAGE ROOM": [
         "STORAGE", "STORAGE ROOM", "STOREROOM", "STORE ROOM",
         "SUPPLY ROOM", "ARCHIVES", "FILE ROOM",
+        "MECH ROOM",
+        "ELEC ROOM",
         # VAULT per explicit taxonomy directive. Was resolving to STORAGE ROOM
         # only via the unknown-token fallback; made explicit so it does not
         # break silently if the fallback default ever changes.
