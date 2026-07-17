@@ -189,6 +189,20 @@ class OCRConfig:
             r"^PRINCIPAL(\s+OFFICE)?$",
             r"^SUPPLY$",
             r"^COMPUTER\s+LAB(\s*\d*)?$",
+            # verify41 OCR-confirmed, user-flagged school/amenity labels that the
+            # OCR gate dropped (present in taxonomy, but never reached it). Anchored
+            # to the whole token to avoid matching documentation/instruction text.
+            r"^MEDIA\s+CENTER$",
+            r"^COUNTER\s+LAB$",
+            r"^CAFETERIA$",
+            r"^SPECIAL\s+EDUCATION$",
+            r"^GYM\s+OFFICE$",
+            r"^(BOYS|GIRLS)\s+COACH$",
+            r"^(BOYS|GIRLS)\s+LOCKERS?$",
+            r"^OUTDOOR\s+STORAGE$",
+            r"^PREP(\s+[A-Z]?\d+)?$",
+            r"^(ELEC|MECH)\s+ROOM$",
+            r"^(MEN|WOMEN)('?S)?\s+TOILET$",
             # Verified real omitted room labels (user-confirmed present on
             # school floor plans; each currently discarded at the OCR gate).
             r"^(TEACHER\s+)?WORK\s+(RM|ROOM)$",

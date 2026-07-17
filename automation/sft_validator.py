@@ -193,6 +193,11 @@ class SemanticRoomValidator:
         # ------------------------------------------------------------------ #
         r"^ELECTRICAL$",         # block bare "ELECTRICAL" – must be "ELECTRICAL ROOM"
         r"ELECTRICAL\s+(?!ROOM\b)",  # ELECTRICAL + anything except ROOM
+        # Bare "GARAGE" alone is a fixture/zone legend token (VLM misread on
+        # office/school/residential floors), not a room; it was mapping to
+        # PARKING GARAGE. Real parking spaces use "PARKING"/"PARKING GARAGE",
+        # which are unaffected. Anchored so only the standalone token is dropped.
+        r"^GARAGE$",
     ]
 
     VALID_ROOM_KEYWORDS = {
