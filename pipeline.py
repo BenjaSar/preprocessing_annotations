@@ -560,7 +560,12 @@ class AnnotationPipeline:
 
                 # FIX-4: Compute exclusion zones from excluded-token clusters.
                 try:
-                    zones = self.ocr_extractor.ocr_extractor.compute_exclusion_zones(raw_detections)
+                    from PIL import Image
+                    with Image.open(img_path) as _im:
+                        _img_w, _img_h = _im.size
+                    zones = self.ocr_extractor.ocr_extractor.compute_exclusion_zones(
+                        raw_detections, _img_w, _img_h
+                    )
                     exclusion_zones_by_image[img_path.name] = zones
                     if zones:
                         logger.info(
@@ -2185,9 +2190,10 @@ Examples:
     )
     parser.add_argument(
         "--unsloth-model",
-        default="qwen3-vl-8b",
-        help="Model key for 'unsloth' backend. Options: qwen3-vl-8b (default, best grounding), "
-             "qwen2.5-vl-7b, qwen3-vl-2b, qwen3-vl-4b",
+        default=None,
+        help="Model key for 'unsloth' backend. Options: qwen3-vl-8b (default), "
+             "qwen3-vl-2b, qwen3-vl-4b, qwen3-vl-2b-thinking, "
+             "qwen3-vl-4b-thinking, qwen3-vl-8b-thinking",
     )
     parser.add_argument(
         "--use-sam", action="store_true", help="Use SAM for boundary refinement"
@@ -2265,7 +2271,8 @@ Examples:
     if args.vlm_model is not None:
         config.vlm.model = args.vlm_model
     config.vlm.qwen_model = args.qwen_model
-    config.vlm.unsloth_model = args.unsloth_model
+    if args.unsloth_model is not None:
+        config.vlm.unsloth_model = args.unsloth_model
 
     if args.dpi:
         config.pdf.dpi = args.dpi
