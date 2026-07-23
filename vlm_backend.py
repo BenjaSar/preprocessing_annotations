@@ -27,6 +27,8 @@ import json
 import base64
 import io
 
+import prompt_templates
+
 # Try to import torch at module level for VLM inference
 # Some VLM models may reference torch directly during generation
 try:
@@ -36,6 +38,148 @@ except ImportError:
     torch = None
 
 logger = logging.getLogger(__name__)
+
+# Generation budget for Unsloth door detection; mirrors the window tier's value.
+_DOOR_MAX_NEW_TOKENS = 4096
+
+# Default per-detection confidence when the model omits one.
+_DETECTION_DEFAULT_CONFIDENCE = 0.7
+
+_BBOX_LEN = 4
+_NO_RESCALE = 1.0
+
+
+def _extract_json_array(response_text: str) -> Optional[List[Any]]:
+    """Extract and repair the first JSON array in a model response.
+
+    Strips markdown fences and trailing commas, and closes unbalanced
+    braces/brackets from truncated output.
+
+    Returns:
+        The parsed list, or None if no recoverable array is present.
+    """
+    import re
+
+    # Strip <think> blocks (Qwen3 Thinking model preamble)
+    response_text = re.sub(r'<think>.*?</think>', '', response_text, flags=re.DOTALL)
+
+    match = re.search(r'\[.*\]', response_text, re.DOTALL)
+    if not match:
+        return None
+
+    text = re.sub(r'^```(?:json)?\s*', '', match.group())
+    text = re.sub(r'\s*```$', '', text)
+    text = re.sub(r',\s*([}\]])', r'\1', text)
+
+    parsed = _load_json_with_recovery(text)
+    if parsed is None:
+        return None
+    return parsed if isinstance(parsed, list) else [parsed]
+
+
+def _load_json_with_recovery(text: str) -> Optional[Any]:
+    """Parse JSON, retrying once with unbalanced structures closed."""
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        open_braces = text.count('{') - text.count('}')
+        open_brackets = text.count('[') - text.count(']')
+        if open_braces <= 0 and open_brackets <= 0:
+            return None
+        try:
+            return json.loads(text + '}' * open_braces + ']' * open_brackets)
+        except json.JSONDecodeError:
+            return None
+
+
+def _clamp_bbox(
+    bbox: List[float], img_width: int, img_height: int
+) -> Optional[List[int]]:
+    """Clamp a pixel bbox to image bounds; None if degenerate (zero-area)."""
+    x1, y1, x2, y2 = bbox
+    x1 = max(0.0, min(float(img_width), x1))
+    x2 = max(0.0, min(float(img_width), x2))
+    y1 = max(0.0, min(float(img_height), y1))
+    y2 = max(0.0, min(float(img_height), y2))
+    if x2 <= x1 or y2 <= y1:
+        return None
+    return [int(x1), int(y1), int(x2), int(y2)]
+
+
+def _pixel_object_from_entry(
+    entry: Any,
+    img_width: int,
+    img_height: int,
+    default_type: str,
+) -> Optional[Dict[str, Any]]:
+    """Convert one detection entry (integer pixel bbox) to a clamped object.
+
+    Returns None for malformed, out-of-range, or degenerate boxes.
+    """
+    if not isinstance(entry, dict) or len(entry.get("bbox", [])) != _BBOX_LEN:
+        return None
+    try:
+        coords = [float(v) for v in entry["bbox"]]
+    except (ValueError, TypeError):
+        return None
+    clamped = _clamp_bbox(coords, img_width, img_height)
+    if clamped is None:
+        return None
+    confidence = entry.get("confidence", _DETECTION_DEFAULT_CONFIDENCE)
+    return {
+        "bbox": clamped,
+        "confidence": float(confidence),
+        "type": entry.get("type", default_type),
+    }
+
+
+def _parse_pixel_bbox_objects(
+    response_text: str,
+    img_width: int,
+    img_height: int,
+    default_type: str,
+) -> List[Dict[str, Any]]:
+    """Parse a JSON array of ``{bbox(px), type, confidence}`` detections.
+
+    Bboxes are absolute integer pixels in the given image space, clamped to
+    bounds; degenerate boxes are dropped. Coordinates stay in that image's
+    space (rescale separately if the image was resized before inference).
+
+    Args:
+        response_text: Raw model output.
+        img_width: Width of the image the model saw.
+        img_height: Height of the image the model saw.
+        default_type: Type label used when an entry omits ``type``.
+
+    Returns:
+        Validated detections; empty if none are recoverable.
+    """
+    raw = _extract_json_array(response_text)
+    if not raw:
+        return []
+    objects = (
+        _pixel_object_from_entry(entry, img_width, img_height, default_type)
+        for entry in raw
+    )
+    return [obj for obj in objects if obj is not None]
+
+
+def _scale_for_max_dim(width: int, height: int, max_dim: int) -> float:
+    """Return a downscale factor keeping the longest edge <= max_dim."""
+    longest_edge = max(width, height)
+    if longest_edge <= max_dim:
+        return _NO_RESCALE
+    return max_dim / longest_edge
+
+
+def _rescale_bbox_objects(
+    objects: List[Dict[str, Any]], factor: float
+) -> None:
+    """Scale each object's pixel bbox in place by ``factor``."""
+    if factor == _NO_RESCALE:
+        return
+    for obj in objects:
+        obj["bbox"] = [int(value * factor) for value in obj["bbox"]]
 
 
 class VLMBackend(ABC):
@@ -88,7 +232,25 @@ class VLMBackend(ABC):
         # Default implementation: not supported by this backend
         logger.debug(f"{self.__class__.__name__} does not implement window detection")
         return []
-    
+
+    def detect_doors(
+        self, image_path: Union[str, Path]
+    ) -> List[Dict[str, Any]]:
+        """Detect doors from a floor plan image (VLM door tier).
+
+        Sends the image with a door-detection prompt and parses a JSON array
+        of per-door detections
+        ``[{"bbox": [x1, y1, x2, y2], "confidence", "type"}, ...]``.
+
+        Default: not implemented by this backend (returns []), so backends
+        without a door tier degrade gracefully — same contract as
+        ``detect_windows``.
+        """
+        logger.debug(
+            "%s does not implement door detection", self.__class__.__name__
+        )
+        return []
+
     def detect_hallucinations(self, rooms: List[Dict[str, Any]], check_stripes: bool = True) -> List[Dict[str, Any]]:
         """Wrapper around the shared hallucination_detector module."""
         from hallucination_detector import detect_hallucinations as detect_hallucinations_util
@@ -229,33 +391,11 @@ class ClaudeBackend(VLMBackend):
         Uses VLM_PROMPT_CATEGORIES from automation.taxonomy for consistent
         room type vocabulary across all VLM backends.
         """
-        from automation.taxonomy import VLM_PROMPT_CATEGORIES, get_vlm_categories_string
-        
+        from automation.taxonomy import get_vlm_categories_string
+
         categories_str = get_vlm_categories_string()
-        
-        return f"""Analyze this architectural floor plan and identify all rooms and spaces.
 
-For each room or space visible, return a JSON object with:
-{{
-    "room_id": "unique identifier like room_0, room_1",
-    "room_type": "{categories_str}",
-    "room_name": "extracted room name or label from the plan",
-    "bbox": [x1, y1, x2, y2] as percentage of image dimensions (0-100),
-    "confidence": 0.0-1.0 confidence in detection,
-    "metadata": {{}}
-}}
-
-Office Classification Rules:
-- For office spaces: classify as PRIVATE OFFICE if visually enclosed with walls/doors, 
-  or OPEN OFFICE if it's part of an open floor plan with shared/common areas.
-- If unclear, assume OPEN OFFICE (more common in modern designs).
-
-General Rules:
-- Only include rooms/spaces/areas. Exclude legends, title blocks, schedules, notes, and title sheets.
-- Preserve original room labels and numbers from the plan (do NOT expand abbreviations).
-- Return valid JSON array only, no markdown or explanation.
-
-Return ONLY a JSON array, e.g.: [{"room_id": "room_0", "room_type": "CONFERENCE", ...}, ...]"""
+        return prompt_templates.build_room_prompt_claude(categories_str)
     
     def _parse_room_response(self, response_text: str, img_width: int = 1000, img_height: int = 1000) -> List[Dict[str, Any]]:
         """Parse JSON response from Claude (bbox values expected as 0-100 percentages)."""
@@ -274,13 +414,14 @@ Return ONLY a JSON array, e.g.: [{"room_id": "room_0", "room_type": "CONFERENCE"
                     f"(dropped {rooms_before_halluc - len(rooms)})"
                 )
              
-             # Cap rooms at 25 (as per prompt specification)
-            if len(rooms) > 25:
+             # Cap rooms at the configured maximum (kept in sync with the prompt)
+            max_rooms = self.config.max_rooms
+            if len(rooms) > max_rooms:
                 logger.warning(
-                    f"VLM generated {len(rooms)} rooms, exceeding prompt limit of 25. "
-                    f"Capping at 25."
+                    f"VLM generated {len(rooms)} rooms, exceeding prompt limit of {max_rooms}. "
+                    f"Capping at {max_rooms}."
                 )
-                rooms = rooms[:25]
+                rooms = rooms[:max_rooms]
             
             # Normalize response format with bbox validation
             normalized = []
@@ -366,10 +507,10 @@ Return ONLY a JSON array, e.g.: [{"room_id": "room_0", "room_type": "CONFERENCE"
     def detect_windows(self, image_path: Union[str, Path]) -> List[Dict[str, Any]]:
         """
         Detect windows in floor plan image using Qwen2.5-VL (Phase 2, Tier 3).
-        
+
         Args:
             image_path: Path to floor plan image
-        
+
         Returns:
             List of window detections
         """
@@ -381,19 +522,27 @@ Return ONLY a JSON array, e.g.: [{"room_id": "room_0", "room_type": "CONFERENCE"
             
             image = Image.open(image_path)
             prompt = self._build_window_detection_prompt()
-            
-            logger.debug(f"Running Qwen2.5-VL window detection on {image_path.name}")
-            
+
+            logger.debug(f"Running Qwen2.5-VL window detection on {Path(image_path).name}")
+
             # Prepare inputs
             inputs = self.processor(
                 text=prompt,
                 images=image,
                 return_tensors="pt"
             ).to(self.device)
-            
-            # Run inference with deterministic decoding
+
+            # Run inference with config-driven generation parameters
             with torch.no_grad():
-                output = self.model.generate(**inputs, max_new_tokens=2048, do_sample=False)
+                output = self.model.generate(
+                    **inputs,
+                    max_new_tokens=2048,
+                    do_sample=self.config.do_sample,
+                    temperature=self.config.temperature,
+                    top_p=self.config.top_p,
+                    top_k=self.config.top_k,
+
+                )
             
             # Decode response: only the generated tokens (exclude input prompt echo)
             input_len = inputs["input_ids"].shape[-1]
@@ -416,24 +565,8 @@ Return ONLY a JSON array, e.g.: [{"room_id": "room_0", "room_type": "CONFERENCE"
     
     def _build_window_detection_prompt(self) -> str:
         """Build prompt for window detection."""
-        return """Analyze this architectural floor plan and identify all windows and openings.
+        return prompt_templates.build_window_prompt()
 
-For each window visible, return a JSON array with:
-[{
-    "bbox": [x1, y1, x2, y2] as percentage of image dimensions (0-100),
-    "type": "window" or "skylight" or "side_opening",
-    "confidence": 0.0-1.0 confidence in detection
-}]
-
-Rules:
-- Windows are typically represented as thin lines breaking wall segments
-- Skylights are shown as rectangular areas within roof spaces
-- Side openings are openings on exterior walls at ground level
-- Exclude doors, vents, and other small openings
-- Return valid JSON array only
-
-Return ONLY a JSON array: [{"bbox": [10, 20, 30, 40], "type": "window", "confidence": 0.95}, ...]"""
-    
     def _parse_window_response(self, response_text: str, img_width: int = 1000, img_height: int = 1000) -> List[Dict[str, Any]]:
         """Parse window detection response."""
         try:
@@ -606,9 +739,17 @@ class Qwen2_5VLBackend(VLMBackend):
             )
             inputs = {k: v.to(self.device) for k, v in inputs.items()}
             
-            # Generate response using inference mode (deterministic for reproducibility)
+            # Generate response with config-driven generation parameters
             with torch.no_grad():
-                output_ids = self.model.generate(**inputs, max_new_tokens=1024, do_sample=False)
+                output_ids = self.model.generate(
+                    **inputs,
+                    max_new_tokens=1024,
+                    do_sample=self.config.do_sample,
+                    temperature=self.config.temperature,
+                    top_p=self.config.top_p,
+                    top_k=self.config.top_k,
+
+                )
             
             # Decode response: only the generated tokens (exclude input prompt echo)
             # batch_decode returns list of decoded sequences (one per batch item)
@@ -652,30 +793,7 @@ class Qwen2_5VLBackend(VLMBackend):
         - Explicit anti-hallucination instruction: "Do NOT invent or fabricate"
         - Room count limit prevents 75-room generation
         """
-        return """You are a floor plan annotation expert. Analyze this architectural floor plan image and identify all labeled rooms and spaces that are actually visible in the image.
-
-TASK: For each room/space you can see labeled in the floor plan, extract:
-  - room_type: one of PRIVATE OFFICE, OPEN OFFICE, CONFERENCE, LOBBY, CORRIDOR, RESTROOM, STAIRWELL, ELECTRICAL ROOM, STORAGE ROOM, MEETING, or another descriptive type that fits
-  - room_name: the exact label text as written on the plan
-  - bbox: bounding box as [x1, y1, x2, y2] percentage of image size (0-100)
-    where (x1,y1) is top-left corner and (x2,y2) is bottom-right corner.
-    ALL values MUST be between 0 and 100.
-
-INCLUDE only: physical rooms and labeled spaces (offices, restrooms, corridors, etc.)
-EXCLUDE: legends, title blocks, schedules, notes, equipment labels, panel lists
-
-Office rule: PRIVATE OFFICE = enclosed with walls/doors; OPEN OFFICE = shared open area
-
-Return ONLY a JSON array. Example format (do not copy exact values):
-[{"room_id": "room_0", "room_type": "CONFERENCE", "room_name": "Conf Rm A",
-  "bbox": [x1, y1, x2, y2], "confidence": 0.9}]
-
-Rules:
-- ONLY include rooms that have visible labels in the image
-- Do NOT invent or fabricate rooms that are not shown
-- All bbox values must be between 0 and 100
-- Maximum 25 rooms
-- Return valid JSON only, no markdown"""
+        return prompt_templates.build_room_prompt_qwen(self.config.max_rooms)
 
     def _parse_room_response(self, response_text: str, img_width: int = 1000, img_height: int = 1000) -> List[Dict[str, Any]]:
         """Parse JSON response from Qwen2.5-VL."""
@@ -795,34 +913,42 @@ Rules:
     def detect_windows(self, image_path: Union[str, Path]) -> List[Dict[str, Any]]:
         """
         Detect windows in floor plan image using Qwen2.5-VL (Phase 2, Tier 3).
-        
+
         Args:
             image_path: Path to floor plan image
-        
+
         Returns:
             List of window detections
         """
         try:
             import torch
             from PIL import Image
-            
+
             self.initialize()
-            
+
             image = Image.open(image_path)
             prompt = self._build_window_detection_prompt()
-            
-            logger.debug(f"Running Qwen2.5-VL window detection on {image_path.name}")
-            
+
+            logger.debug(f"Running Qwen2.5-VL window detection on {Path(image_path).name}")
+
             # Prepare inputs
             inputs = self.processor(
                 text=prompt,
                 images=image,
                 return_tensors="pt"
             ).to(self.device)
-            
-            # Run inference with deterministic decoding
+
+            # Run inference with config-driven generation parameters
             with torch.no_grad():
-                output = self.model.generate(**inputs, max_new_tokens=2048, do_sample=False)
+                output = self.model.generate(
+                    **inputs,
+                    max_new_tokens=2048,
+                    do_sample=self.config.do_sample,
+                    temperature=self.config.temperature,
+                    top_p=self.config.top_p,
+                    top_k=self.config.top_k,
+
+                )
             
             # Decode response: only the generated tokens (exclude input prompt echo)
             input_len = inputs["input_ids"].shape[-1]
@@ -845,24 +971,8 @@ Rules:
     
     def _build_window_detection_prompt(self) -> str:
         """Build prompt for window detection."""
-        return """Analyze this architectural floor plan and identify all windows and openings.
+        return prompt_templates.build_window_prompt()
 
-For each window visible, return a JSON array with:
-[{
-    "bbox": [x1, y1, x2, y2] as percentage of image dimensions (0-100),
-    "type": "window" or "skylight" or "side_opening",
-    "confidence": 0.0-1.0 confidence in detection
-}]
-
-Rules:
-- Windows are typically represented as thin lines breaking wall segments
-- Skylights are shown as rectangular areas within roof spaces
-- Side openings are openings on exterior walls at ground level
-- Exclude doors, vents, and other small openings
-- Return valid JSON array only
-
-Return ONLY a JSON array: [{"bbox": [10, 20, 30, 40], "type": "window", "confidence": 0.95}, ...]"""
-    
     def _parse_window_response(self, response_text: str, img_width: int = 1000, img_height: int = 1000) -> List[Dict[str, Any]]:
         """Parse window detection response."""
         try:
@@ -920,14 +1030,20 @@ class UnslothQwenBackend(VLMBackend):
         - "qwen3-vl-2b": unsloth/Qwen3-VL-2B-Instruct-unsloth-bnb-4bit
         - "qwen3-vl-4b": unsloth/Qwen3-VL-4B-Instruct-unsloth-bnb-4bit
         - "qwen3-vl-8b": unsloth/Qwen3-VL-8B-Instruct-unsloth-bnb-4bit
+        - "qwen3-vl-2b-thinking": unsloth/Qwen3-VL-2B-Thinking-unsloth-bnb-4bit
+        - "qwen3-vl-4b-thinking": unsloth/Qwen3-VL-4B-Thinking-unsloth-bnb-4bit
+        - "qwen3-vl-8b-thinking": unsloth/Qwen3-VL-8B-Thinking-unsloth-bnb-4bit
     """
-    
+
     # Mapping from short model key to Unsloth HuggingFace model ID
     MODEL_REGISTRY = {
         "qwen2.5-vl-7b": "unsloth/Qwen2.5-VL-7B-Instruct-bnb-4bit",
         "qwen3-vl-2b": "unsloth/Qwen3-VL-2B-Instruct-unsloth-bnb-4bit",
         "qwen3-vl-4b": "unsloth/Qwen3-VL-4B-Instruct-unsloth-bnb-4bit",
         "qwen3-vl-8b": "unsloth/Qwen3-VL-8B-Instruct-unsloth-bnb-4bit",
+        "qwen3-vl-2b-thinking": "unsloth/Qwen3-VL-2B-Thinking-unsloth-bnb-4bit",
+        "qwen3-vl-4b-thinking": "unsloth/Qwen3-VL-4B-Thinking-unsloth-bnb-4bit",
+        "qwen3-vl-8b-thinking": "unsloth/Qwen3-VL-8B-Thinking-unsloth-bnb-4bit",
     }
     
     def __init__(self, config):
@@ -1004,7 +1120,37 @@ class UnslothQwenBackend(VLMBackend):
         except Exception as e:
             logger.error(f"Failed to initialize Unsloth Qwen backend: {e}")
             raise
-    
+
+    def _generation_kwargs(self, max_new_tokens: int) -> Dict[str, Any]:
+        """Config-driven ``model.generate`` kwargs — single decoding source.
+
+        All decoding parameters come from ``VLMConfig`` (no hardcoded
+        sampling), so the room, door, and window tiers share one definition
+        and the sampling mode is set by configuration, not baked into each
+        call site. ``presence_penalty`` is intentionally absent: it is not a
+        HuggingFace ``generate`` argument (only ``repetition_penalty`` is).
+        """
+        return {
+            "max_new_tokens": max_new_tokens,
+            "use_cache": True,
+            "do_sample": self.config.do_sample,
+            "temperature": self.config.temperature,
+            "top_p": self.config.top_p,
+            "top_k": self.config.top_k,
+            "repetition_penalty": self.config.repetition_penalty,
+        }
+
+    def _seed_generation(self) -> None:
+        """Seed the RNG from config so sampled decoding stays reproducible.
+
+        No-op influence under greedy decoding (``do_sample=False``), where
+        output is already deterministic; only applied when sampling.
+        """
+        if not self.config.do_sample:
+            return
+        import torch
+        torch.manual_seed(self.config.seed)
+
     def detect_rooms(self, image_path: Union[str, Path]) -> List[Dict[str, Any]]:
          """
          Detect rooms using Unsloth-optimized Qwen VL.
@@ -1027,10 +1173,9 @@ class UnslothQwenBackend(VLMBackend):
              # Save original dimensions before resizing
              original_width, original_height = image.size
              
-             # Resize large images to reduce GPU memory usage
-             # Preserve aspect ratio while capping max dimension at 4096px
-             # (increased from 2048 for 8B model which has 8GB headroom on Tesla T4)
-             max_dim = 4096
+             # Resize large images to reduce GPU memory usage (config-driven cap,
+             # shared with door detection — see VLMConfig.unsloth_detection_max_dim_px)
+             max_dim = self.config.unsloth_detection_max_dim_px
              width, height = image.size
              resize_scale = 1.0  # Track whether we resized
              if max(width, height) > max_dim:
@@ -1045,8 +1190,17 @@ class UnslothQwenBackend(VLMBackend):
              img_width, img_height = image.size
              prompt = self._build_room_detection_prompt(img_width, img_height)
 
-             # Prepare chat messages in Unsloth format
+             # Prepare chat messages in Unsloth format with system message
              messages = [
+                 {
+                     "role": "system",
+                     "content": [
+                         {
+                             "type": "text",
+                             "text": prompt_templates.build_json_array_system_prompt()
+                         }
+                     ]
+                 },
                  {
                      "role": "user",
                      "content": [
@@ -1070,19 +1224,15 @@ class UnslothQwenBackend(VLMBackend):
                  return_tensors="pt",
              ).to(self.device)
              
-             # 768 tokens is ample for ≤25 rooms at ~30 tokens/room.
-             # Smaller budget cuts off autoregressive hallucination loops early.
-             # eos_token_id stops generation the moment the JSON array closes.
-             eos_id = self.tokenizer.eos_token_id
+             # Run inference with config-driven generation parameters
+             logger.debug(f"Running Unsloth Qwen room detection on {Path(image_path).name}")
+             self._seed_generation()
              with torch.no_grad():
                  output_ids = self.model.generate(
                      **inputs,
-                     max_new_tokens=768,
-                     use_cache=True,
-                     do_sample=False,
-                     eos_token_id=eos_id,
+                     **self._generation_kwargs(self.config.room_max_new_tokens),
                  )
-             
+
              # Decode response: only the generated tokens (exclude input prompt echo)
              input_len = inputs["input_ids"].shape[-1]
              generated_ids = output_ids[0][input_len:]
@@ -1156,41 +1306,9 @@ class UnslothQwenBackend(VLMBackend):
              img_width: Actual image width in pixels (after any resizing).
              img_height: Actual image height in pixels (after any resizing).
          """
-         return f"""You are a floor plan annotation expert. The image is {img_width}x{img_height} pixels.
-
-TASK: Identify every labeled room or space visible in this floor plan.
-
-For each room output:
-  - room_type: OFFICE, CONFERENCE, CORRIDOR, RESTROOM, LOBBY, KITCHEN, STORAGE, STAIRWELL, ELEVATOR, or OTHER
-  - room_name: exact label text from the plan
-  - bbox: [x1, y1, x2, y2] in INTEGER PIXELS (top-left origin).
-    x values in [0, {img_width}], y values in [0, {img_height}].
-  - confidence: 0.0-1.0
-
-INCLUDE: enclosed rooms and labeled spaces that are INSIDE the floor plan boundary lines (walls).
-EXCLUDE: legends, title blocks, BOM tables, schedules, notes, panel labels, and any text in the margins or corners of the image.
-
-SPATIAL RULE: The architectural drawing is in the CENTER of the image surrounded by margins.
-Do NOT detect anything in margin areas (corners, edges, table blocks) even if they contain room names.
-A valid room detection must be inside the floor plan boundary walls, not in a table or text block.
-
-CRITICAL — the bbox must enclose the ENTIRE room: its surrounding walls/boundary,
-not just the label text. A room is much larger than its text label. Draw the box
-from wall to wall, with the label inside it.
-
-Return ONLY a JSON array, no markdown:
-[{{"room_id": "<id>", "room_type": "<type>", "room_name": "<label>", "bbox": [<x1>, <y1>, <x2>, <y2>], "confidence": <0-1>}}]
-
-CRITICAL — bbox values must be the ACTUAL pixel location you observe in the image.
-Never reuse any numbers from this prompt text.
-
-Rules:
-- Only rooms with visible labels in the image.
-- Do NOT fabricate rooms.
-- Maximum 25 rooms.
-- Every room must be at a DISTINCT location — no two rooms share the same x1 and y1.
-- bbox must have positive width and height (x2 > x1, y2 > y1).
-- bbox must span the room's walls, not the label glyphs."""
+         return prompt_templates.build_room_prompt_unsloth(
+             img_width, img_height, self.config.max_rooms
+         )
 
 
     def _parse_room_response(self, response_text: str, img_width: int = 1000, img_height: int = 1000) -> List[Dict[str, Any]]:
@@ -1201,6 +1319,9 @@ Rules:
             
             # Debug: Log the first part of the response
             logger.debug(f"Unsloth response (first 300 chars): {response_text[:300]}")
+            
+            # Strip <think> blocks (Qwen3 Thinking model preamble)
+            response_text = re.sub(r'<think>.*?</think>', '', response_text, flags=re.DOTALL)
             
             # Try to find JSON array - use greedy matching
             # First try standard JSON array pattern
@@ -1260,6 +1381,11 @@ Rules:
             normalized = []
             dropped_count = 0
             for idx, room in enumerate(rooms):
+                if not isinstance(room, dict):
+                    logger.debug(f"Room {idx}: non-object entry {room!r}, skipping")
+                    dropped_count += 1
+                    continue
+
                 bbox = room.get("bbox")
                 if bbox and len(bbox) == 4:
                     try:
@@ -1346,8 +1472,17 @@ Rules:
             # Build window detection prompt
             prompt = self._build_window_detection_prompt()
             
-            # Prepare chat messages in Unsloth format (same as detect_rooms)
+            # Prepare chat messages in Unsloth format with system message
             messages = [
+                {
+                    "role": "system",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": prompt_templates.build_json_array_system_prompt()
+                        }
+                    ]
+                },
                 {
                     "role": "user",
                     "content": [
@@ -1371,22 +1506,21 @@ Rules:
                 return_tensors="pt",
             ).to(self.device)
             
-            # Run inference
-            logger.debug(f"Running Unsloth Qwen window detection on {image_path.name}")
+            # Run inference with config-driven generation parameters
+            logger.debug(f"Running Unsloth Qwen window detection on {Path(image_path).name}")
+            self._seed_generation()
             with torch.no_grad():
                 output_ids = self.model.generate(
                     **inputs,
-                    max_new_tokens=4096,
-                    use_cache=True,
-                    do_sample=False,
+                    **self._generation_kwargs(self.config.window_max_new_tokens),
                 )
-            
+
             # Decode response: only the generated tokens (exclude input prompt echo)
             input_len = inputs["input_ids"].shape[-1]
             generated_ids = output_ids[0][input_len:]
             if hasattr(generated_ids, 'cpu'):
                 generated_ids = generated_ids.cpu()
-            
+
             response_text = self.tokenizer.decode(
                 generated_ids,
                 skip_special_tokens=True
@@ -1412,34 +1546,14 @@ Rules:
     
     def _build_window_detection_prompt(self) -> str:
         """Build prompt for window detection."""
-        return """Analyze this architectural floor plan and identify all windows and openings.
-
-For each window visible, return a JSON array with:
-[{
-    "bbox": [x1, y1, x2, y2] as percentage of image dimensions (0-100),
-    "type": "window" or "skylight" or "side_opening",
-    "confidence": 0.0-1.0 confidence in detection
-}]
-
-Rules:
-- Windows are typically represented as thin lines breaking wall segments
-- Skylights are shown as rectangular areas within roof spaces
-- Side openings are openings on exterior walls at ground level
-- Exclude doors, vents, and other small openings
-- Return valid JSON array only
-
-Examples of window symbols in floor plans:
-- Parallel thin lines on wall segments
-- Double lines at angles (double-hung windows)
-- Simple rectangles on wall perimeters
-- Repeated grid patterns (curtain walls, glazing)
-
-Return ONLY a JSON array: [{"bbox": [10, 20, 30, 40], "type": "window", "confidence": 0.95}, ...]"""
+        return prompt_templates.build_window_prompt_unsloth()
     
     def _parse_window_response(self, response_text: str, img_width: int = 1000, img_height: int = 1000) -> List[Dict[str, Any]]:
         """Parse window detection response from Unsloth Qwen."""
         try:
             import re
+            # Strip <think> blocks (Qwen3 Thinking model preamble)
+            response_text = re.sub(r'<think>.*?</think>', '', response_text, flags=re.DOTALL)
             # Extract JSON array from response
             json_match = re.search(r'\[.*\]', response_text, re.DOTALL)
             if not json_match:
@@ -1507,6 +1621,138 @@ Return ONLY a JSON array: [{"bbox": [10, 20, 30, 40], "type": "window", "confide
         except (json.JSONDecodeError, AttributeError) as e:
             logger.debug(f"Failed to parse window response: {e}")
             return []
+
+    def detect_doors(
+        self, image_path: Union[str, Path]
+    ) -> List[Dict[str, Any]]:
+        """Detect doors using Unsloth Qwen (VLM door tier).
+
+        Requests absolute pixel bboxes (Qwen's native convention). Large plans
+        are resized for memory/speed; detections are parsed in the resized
+        space and rescaled back to the original image dimensions.
+
+        Args:
+            image_path: Path to the floor plan image.
+
+        Returns:
+            Door detections in the original image's pixel space; [] on failure.
+        """
+        image = self._open_image_rgb(image_path)
+        if image is None:
+            return []
+        resized, scale = self._resize_for_detection(image)
+        doors = self._run_door_inference(resized)
+        _rescale_bbox_objects(doors, _NO_RESCALE / scale)
+        return doors
+
+    def _open_image_rgb(self, image_path: Union[str, Path]) -> Optional[Any]:
+        """Initialize the model and open the image as RGB; None on failure."""
+        try:
+            from PIL import Image
+        except ImportError as error:
+            logger.error("Pillow unavailable for door detection: %s", error)
+            return None
+        try:
+            self.initialize()
+            return Image.open(image_path).convert("RGB")
+        except (OSError, ValueError) as error:
+            logger.error("Could not open image: %s", error)
+            return None
+
+    def _resize_for_detection(self, image: Any) -> Tuple[Any, float]:
+        """Downscale to fit the detection cap; return (image, scale)."""
+        from PIL import Image
+
+        width, height = image.size
+        scale = _scale_for_max_dim(
+            width, height, self.config.unsloth_detection_max_dim_px
+        )
+        if scale >= _NO_RESCALE:
+            return image, scale
+        resized = image.resize(
+            (int(width * scale), int(height * scale)),
+            Image.Resampling.LANCZOS,
+        )
+        return resized, scale
+
+    def _run_door_inference(self, image: Any) -> List[Dict[str, Any]]:
+        """Detect doors on an already-sized image; boxes in its pixel space."""
+        width, height = image.size
+        prompt = self._build_door_detection_prompt(width, height)
+        text = self._generate_for_image(
+            image, prompt, _DOOR_MAX_NEW_TOKENS
+        )
+        return self._parse_door_response(text, width, height)
+
+    def _generate_for_image(
+        self, image: Any, prompt: str, max_new_tokens: int
+    ) -> str:
+        """Run deterministic generation for one image+prompt; return text."""
+        import torch
+
+        inputs = self._encode_image_prompt(image, prompt)
+        self._seed_generation()
+        with torch.no_grad():
+            output_ids = self.model.generate(
+                **inputs,
+                **self._generation_kwargs(max_new_tokens),
+            )
+        input_len = inputs["input_ids"].shape[-1]
+        text = self._decode_generated(output_ids, input_len)
+        del inputs, output_ids
+        torch.cuda.empty_cache()
+        return text
+
+    def _encode_image_prompt(self, image: Any, prompt: str) -> Any:
+        """Build tokenized model inputs for one image + text prompt."""
+        messages = [
+            {
+                "role": "system",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": prompt_templates.build_json_array_system_prompt()
+                    }
+                ]
+            },
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image"},
+                    {"type": "text", "text": prompt}
+                ]
+            }
+        ]
+        input_text = self.tokenizer.apply_chat_template(
+            messages, add_generation_prompt=True
+        )
+        return self.tokenizer(
+            image, input_text, add_special_tokens=False, return_tensors="pt"
+        ).to(self.device)
+
+    def _decode_generated(self, output_ids: Any, input_len: int) -> str:
+        """Decode only newly generated tokens to stripped text."""
+        generated = output_ids[0][input_len:]
+        if hasattr(generated, "cpu"):
+            generated = generated.cpu()
+        decoded = self.tokenizer.decode(generated, skip_special_tokens=True)
+        return decoded.strip()
+
+    def _build_door_detection_prompt(
+        self, img_width: int, img_height: int
+    ) -> str:
+        """Build the pixel-coordinate door-detection prompt."""
+        return prompt_templates.build_door_prompt_unsloth(
+            img_width, img_height
+        )
+
+    def _parse_door_response(
+        self, response_text: str, img_width: int, img_height: int
+    ) -> List[Dict[str, Any]]:
+        """Parse door detection response (integer pixel bbox)."""
+        return _parse_pixel_bbox_objects(
+            response_text, img_width, img_height, default_type="door"
+        )
 
 
 class VLMFactory:

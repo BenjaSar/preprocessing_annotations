@@ -20,8 +20,10 @@ from PIL import Image
 try:
     from .config import VLMConfig
     from .automation.taxonomy import VLM_PROMPT_CATEGORIES, get_vlm_categories_string
+    from . import prompt_templates
 except ImportError:
     from config import VLMConfig
+    import prompt_templates
     try:
         from automation.taxonomy import VLM_PROMPT_CATEGORIES, get_vlm_categories_string
     except ImportError:
@@ -149,37 +151,7 @@ class VLMAnnotator:
         except Exception:
             categories = ", ".join(self.config.room_categories)
 
-        return f"""You are a floor plan annotation expert. Analyze this MEP/Electrical floor plan image and extract every labeled physical room or functional space.
-
-IMAGE DIMENSIONS: {img_width} x {img_height} pixels
-
-INCLUDE — physical rooms and functional spaces only:
-  Offices, conference rooms, restrooms, kitchens, break rooms, lobbies, hallways, corridors,
-  mechanical rooms, electrical rooms, storage rooms, server rooms, stairwells, elevator lobbies,
-  auditoriums, classrooms, labs, bedrooms, living rooms, compactor rooms, bicycle storage,
-  pump rooms, janitor closets, telecom rooms, community facilities.
-
-EXCLUDE — do not output any of these:
-  - Electrical panels, switchboards, transformers, circuit breakers (these are equipment, not rooms)
-  - Text notes, general notes, symbol lists, legends, disclaimers
-  - Compliance statements, code requirements, energy codes
-  - Title blocks, revision clouds, approval stamps
-  - Schedule tables (door schedules, fixture schedules, panel schedules)
-  - Any text that is not labeling a physical space
-
-For each room, report:
-  room_number: the room number if visible (e.g. "113"), else ""
-  room_name:   the room label as written on the plan (e.g. "MECHANICAL ROOM")
-  category:    one of: {categories}
-  bbox:        fractional coordinates [x/W, y/H, w/W, h/H] where W={img_width}, H={img_height}
-               All values must be in [0.0, 1.0]. (x,y) is the top-left corner.
-
-Output ONLY valid JSON with this exact structure:
-{{
-  "rooms": [
-    {{"room_number": "113", "room_name": "MECHANICAL ROOM", "category": "mechanical", "bbox": [0.42, 0.18, 0.12, 0.08]}}
-  ]
-}}"""
+        return prompt_templates.build_room_prompt_mep(categories, img_width, img_height)
 
     def _parse_response(self, response_text: str) -> Dict[str, Any]:
         """

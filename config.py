@@ -12,7 +12,8 @@ Environment variables:
 
 import os
 from dataclasses import dataclass, field
-from typing import List, Optional
+from pathlib import Path
+from typing import Dict, List, Optional
 
 try:
     import torch
@@ -28,6 +29,29 @@ def _get_vlm_model() -> str:
     See VLMConfig.active_model for the resolved model based on the selected backend.
     """
     return os.getenv("VLM_MODEL", "claude-haiku-4-5-20251001")
+
+
+def _get_vlm_temperature() -> float:
+    return float(os.getenv("VLM_TEMPERATURE", "1.0"))
+
+def _get_vlm_top_p() -> float:
+    return float(os.getenv("VLM_TOP_P", "0.95"))
+
+def _get_vlm_top_k() -> int:
+    return int(os.getenv("VLM_TOP_K", "20"))
+
+def _get_vlm_presence_penalty() -> float:
+    return float(os.getenv("VLM_PRESENCE_PENALTY", "0.0"))
+
+def _get_vlm_repetition_penalty() -> float:
+    return float(os.getenv("VLM_REPETITION_PENALTY", "1.0"))
+
+def _get_vlm_seed() -> int:
+    return int(os.getenv("VLM_SEED", "1234"))
+
+def _get_vlm_do_sample() -> bool:
+    val = os.getenv("VLM_DO_SAMPLE", "true")
+    return val.lower() in ("true", "1", "yes")
 
 
 def _detect_device() -> str:
@@ -315,6 +339,12 @@ class VLMConfig:
     # truncated at 4096 tokens, causing JSON parse failures and room loss.
     max_tokens: int = field(default_factory=lambda: int(os.getenv("VLM_MAX_TOKENS", "8192")))
 
+    # Maximum rooms accepted from one VLM room-detection response. Injected
+    # into the room prompts ("Maximum N rooms") and enforced by the Claude
+    # parser cap, so the prompt instruction and the parser limit stay in sync
+    # instead of both hardcoding 25.
+    max_rooms: int = 25
+
     # Number of retries for API calls (Claude only)
     max_retries: int = 3
 
@@ -332,10 +362,46 @@ class VLMConfig:
     qwen_model: str = "Qwen/Qwen2.5-VL-7B-Instruct"
 
     # Unsloth model key (only used when backend='unsloth')
-    # Options: "qwen2.5-vl-7b", "qwen3-vl-2b", "qwen3-vl-4b", "qwen3-vl-8b" (default)
-    # qwen3-vl-8b has materially better spatial grounding on dense floor plans.
-    # Requires ~8-10GB VRAM at 4-bit. Override via --unsloth-model CLI flag.
+    # Options:
+    #   Instruct: "qwen2.5-vl-7b", "qwen3-vl-2b", "qwen3-vl-4b", "qwen3-vl-8b"
+    #   Thinking: "qwen3-vl-2b-thinking", "qwen3-vl-4b-thinking", "qwen3-vl-8b-thinking"
+    # Thinking variants add reasoning tokens before structured output.
+    # Default is the Instruct 8B variant: this pipeline needs reproducible,
+    # directly-parseable JSON (no <think> preamble) and lower latency, which
+    # the Instruct variant is documented for. Thinking variants stay opt-in
+    # for spatial-reasoning experiments.
+    # Override via --unsloth-model CLI flag.
     unsloth_model: str = "qwen3-vl-8b"
+
+    # Generation parameters for local VLM backends (qwen, unsloth).
+    # Defaults match Qwen3-VL Thinking recommended sampling values. With the
+    # Instruct default model, set the Instruct-recommended values via VLM_*
+    # env vars (VLM_TEMPERATURE, VLM_TOP_P, ...); all params are overridable.
+    temperature: float = field(default_factory=_get_vlm_temperature)
+    top_p: float = field(default_factory=_get_vlm_top_p)
+    top_k: int = field(default_factory=_get_vlm_top_k)
+    presence_penalty: float = field(
+        default_factory=_get_vlm_presence_penalty
+    )
+    repetition_penalty: float = field(
+        default_factory=_get_vlm_repetition_penalty
+    )
+    seed: int = field(default_factory=_get_vlm_seed)
+    do_sample: bool = field(default_factory=_get_vlm_do_sample)
+
+    # Token budgets per task type for local VLM backends.
+    # Room budget is tight (768 tokens = ~25 rooms at 30 tokens/room)
+    # to truncate autoregressive hallucination loops early.
+    # Doors/windows need more because instances are numerous.
+    room_max_new_tokens: int = 1024
+    door_max_new_tokens: int = 4096
+    window_max_new_tokens: int = 4096
+
+    # Longest-edge cap (pixels) for images sent to Unsloth room/door detection.
+    # Shared by both tiers so a single value governs Unsloth's resize-for-memory
+    # step; 4096 matches the prior hardcoded cap (8B model, ~8GB headroom on
+    # Tesla T4 — no behavior change from making this configurable).
+    unsloth_detection_max_dim_px: int = 4096
 
     def __post_init__(self):
         if self.qwen_device is None:
@@ -441,6 +507,207 @@ class ExportConfig:
 
 
 @dataclass
+class EvalConfig:
+    """Configuration for ground-truth evaluation against the test_pcs dataset.
+
+    test_pcs (COCO export, label-studio) has verified GT coverage for a
+    subset of architectural objects only: door (+door2, sliding door
+    variants), window1, toilet, sink1/sink2. It has zero annotations for
+    "wall" (category exists, 0 instances) and no category at all for
+    stairs/elevators/rooms — those cannot be scored against this dataset.
+    """
+
+    # Default points at the repo's own test_pcs export (real asset, same
+    # convention as CubiCasa5KDetector.MODEL_PATH's repo-relative default).
+    # coco/images/ is empty on disk; coco_w_images/images/ holds the pngs —
+    # both result.json files are byte-identical exports, so coco/result.json
+    # is read for annotations and coco_w_images/images/ for pixels.
+    gt_coco_path: Path = field(
+        default_factory=lambda: Path(__file__).parent.parent / "test_pcs" / "coco" / "result.json"
+    )
+    gt_images_dir: Path = field(
+        default_factory=lambda: Path(__file__).parent.parent / "test_pcs" / "coco_w_images" / "images"
+    )
+
+    # Merge label-studio's split annotation categories onto the vocabulary
+    # CubiCasa5KDetector actually predicts (_DETECTABLE in cubicasa5k_detector.py).
+    # Categories not listed here (wall, appliance, bed, table*, ...) have no
+    # matching detector output and are intentionally left unscored.
+    gt_category_merge: Dict[str, str] = field(
+        default_factory=lambda: {
+            "door": "door",
+            "door2": "door",
+            "sliding door": "door",
+            "window1": "window",
+            "toilet": "toilet",
+            "sink1": "sink",
+            "sink2": "sink",
+        }
+    )
+
+    # Match threshold for counting a prediction as a true positive.
+    # 0.5 mirrors the Accuracy@0.5 convention already used by
+    # bbox_metrics.MetricsResult (accuracy_50) elsewhere in this pipeline.
+    gt_iou_threshold: float = 0.5
+
+    # Device for CubiCasa5K inference (auto-detected if None, same convention
+    # as OCRConfig/SAMConfig/VLMConfig.qwen_device via _detect_device()).
+    device: Optional[str] = None
+
+    def __post_init__(self):
+        if self.device is None:
+            self.device = _detect_device()
+
+
+_CUBICASA_CACHE_ROOT = (
+    Path.home() / ".cache" / "kagglehub" / "datasets" / "qmarva"
+    / "cubicasa5k" / "versions" / "4"
+)
+
+
+@dataclass
+class CubicasaEvalConfig:
+    """Configuration for ground-truth evaluation against CubiCasa5K.
+
+    CubiCasa5K's COCO export (kagglehub cache) has verified GT coverage for
+    "wall" and "room" bounding boxes only (2 categories total; no door/window
+    category in this export — those exist only in the raw per-image SVGs).
+    Coverage is BBOX LOCALIZATION on RESIDENTIAL floorplans: no room-type
+    label (generic "room" class only) and no commercial/MEP coverage — do
+    not treat this as ground truth for room-type classification or for the
+    project's commercial-plan domain (test_pcs covers commercial doors and
+    windows; this dataset does not overlap it).
+
+    Every image in this export shares file_name basenames that repeat across
+    the dataset (all 400 test images are literally named "F1_original.png",
+    disambiguated only by their parent folder) — resolving by basename would
+    silently collide, so this config's resolver preserves the relative path
+    instead of using gt_evaluator's default basename resolver.
+    """
+
+    coco_test_path: Path = field(
+        default_factory=lambda: (
+            _CUBICASA_CACHE_ROOT / "cubicasa5k_coco" / "test_coco_pt.json"
+        )
+    )
+
+    # Root that file_name (with kaggle_path_prefix stripped) resolves under.
+    images_root: Path = field(
+        default_factory=lambda: _CUBICASA_CACHE_ROOT
+    )
+
+    # Prefix baked into every file_name by the export tool (kaggle notebook
+    # path), stripped before joining the remainder onto images_root.
+    kaggle_path_prefix: str = "/kaggle/input/cubicasa5k/"
+
+    # Both raw COCO categories are already the vocabulary scored — identity
+    # map, not a translation (this export has no other categories).
+    gt_category_merge: Dict[str, str] = field(
+        default_factory=lambda: {"wall": "wall", "room": "room"}
+    )
+
+    # Same Accuracy@0.5 convention as EvalConfig.gt_iou_threshold.
+    gt_iou_threshold: float = 0.5
+
+    # Cap on images scored per run (None = all). Config-driven so a quick
+    # check and a full run use the same code path, no hardcoded loop bound.
+    sample_size: Optional[int] = None
+
+    # When True, grow raw VLM room boxes to room walls via the production
+    # SAM label-seeded expansion (RoomSegmenter.refine_annotations), matching
+    # the pipeline's use_sam path. Default False: raw detect_rooms boxes are
+    # measured as-is, so the baseline behavior is unchanged.
+    use_room_expansion: bool = False
+
+
+_KAGGLE_FLOORPLAN_CACHE_ROOT = (
+    Path.home() / ".cache" / "kagglehub" / "datasets" / "umairinayat"
+    / "floor-plans-500-annotated-object-detection" / "versions" / "1"
+)
+
+
+@dataclass
+class KaggleFloorplanEvalConfig:
+    """Configuration for ground-truth evaluation against the Kaggle
+    floor-plans-500 dataset (Roboflow export, YOLOv11 format, CC BY 4.0
+    -- the project's first commercially-licensed door/window GT).
+
+    Verified coverage (2026-07-20, counted per-file in Python -- a first
+    shell `cat`-based tally undercounted due to label files lacking a
+    trailing newline, merging lines at file-concatenation boundaries;
+    do not re-derive this count with `cat *.txt | awk`): door (7282)
+    and window (5567) instances across 960 images (train 837 / valid 80
+    / test 43). A third class, "zone", is also present (7495 instances)
+    but its labeling protocol is unverified -- excluded from
+    gt_category_merge by default, so it is loaded but not scored.
+
+    Domain (residential/commercial/MEP) is NOT stated by the source and
+    has not been verified against this project's commercial-MEP scope --
+    treat scores from this dataset as a supplementary signal, not a
+    substitute for test_pcs (EvalConfig), the only confirmed
+    commercial-domain door/window GT in this project.
+    """
+
+    dataset_root: Path = field(
+        default_factory=lambda: _KAGGLE_FLOORPLAN_CACHE_ROOT
+    )
+
+    # Which Roboflow split to load: "train", "valid", or "test".
+    split: str = "test"
+
+    # "zone" is intentionally excluded (protocol unverified, see class
+    # docstring) -- extend this map only after confirming its meaning.
+    gt_category_merge: Dict[str, str] = field(
+        default_factory=lambda: {"door": "door", "window": "window"}
+    )
+
+    # Same Accuracy@0.5 convention as EvalConfig.gt_iou_threshold.
+    gt_iou_threshold: float = 0.5
+
+
+@dataclass
+class FloorplancadEvalConfig:
+    """Config for FloorPlanCAD door/window/wall eval GT (HF Voxel51).
+
+    FloorPlanCAD is a panoptic SYMBOL-spotting CAD dataset covering
+    residential AND commercial buildings -- the only commercial-domain
+    door/window GT at scale assessed in this project. The HF Voxel51
+    mirror is a FiftyOne dataset (5308 samples): a ``samples.json``
+    (per-sample ``ground_truth.detections`` with ``label`` and
+    ``bounding_box`` normalized ``[x, y, w, h]``, plus ``metadata``
+    width/height) alongside a ``data/`` folder of PNGs. Parsed directly
+    -- no FiftyOne dependency needed.
+
+    LICENSE: CC BY-NC 4.0 (non-commercial). EVAL-ONLY here; never route
+    FloorPlanCAD into shipped SFT training data.
+
+    Category-merge is grounded in the verified label counts (2026-07-20,
+    48465 detections, 35 labels): door = single/double/sliding_door
+    (12698); window = window/bay_window/blind_window (1952);
+    ``opening_symbol`` (2 instances) is EXCLUDED -- negligible and
+    semantically ambiguous (opening != window). wall = wall (4710).
+    All other labels (stairs, furniture, class_NN, ...) are dropped.
+    """
+
+    repo_id: str = "Voxel51/FloorPlanCAD"
+    samples_filename: str = "samples.json"
+    gt_category_merge: Dict[str, str] = field(
+        default_factory=lambda: {
+            "single_door": "door",
+            "double_door": "door",
+            "sliding_door": "door",
+            "window": "window",
+            "bay_window": "window",
+            "blind_window": "window",
+            "wall": "wall",
+        }
+    )
+
+    # Same Accuracy@0.5 convention as EvalConfig.gt_iou_threshold.
+    gt_iou_threshold: float = 0.5
+
+
+@dataclass
 class PipelineConfig:
     """Master configuration for the full annotation pipeline.
 
@@ -456,6 +723,7 @@ class PipelineConfig:
     vlm: VLMConfig = field(default_factory=VLMConfig)
     sam: SAMConfig = field(default_factory=SAMConfig)
     export: ExportConfig = field(default_factory=ExportConfig)
+    eval: EvalConfig = field(default_factory=EvalConfig)
 
     # Pipeline options
     # NOTE: use_vlm defaults to False. Use OCR results unless explicitly enabled.

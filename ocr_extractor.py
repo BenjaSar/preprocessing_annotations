@@ -155,6 +155,36 @@ def _centroid(bbox_points: List[List[int]]) -> Tuple[float, float]:
     return sum(xs) / len(xs), sum(ys) / len(ys)
 
 
+def _extend_titleblock_zone(
+    titleblock_zones: List[Tuple[int, int, int, int]],
+    image_width: int,
+    image_height: int,
+) -> Tuple[int, int, int, int]:
+    """Extend the union of title-block field zones to the page edge along the
+    title strip's long axis.
+
+    A firm's logo graphic sits inside/adjacent to the title-block field cluster
+    (see _TITLE_BLOCK_PATTERN) but carries no OCR text, so proximity clustering
+    leaves an uncovered gap between the field text and the page corner. A room
+    box mislocalized onto the logo therefore survives (verified: Violet/Masonic
+    FLAT p003, a CORRIDOR/CLASSROOM over the top-left logo). Extending the field
+    region to the page edge along the strip closes that gap.
+
+    The strip's long axis is the dimension with the larger span: a horizontal
+    title strip (top/bottom margin) is extended across the full page width; a
+    vertical strip (side-column title block) across the full page height. The
+    short axis stays at the detected field extent, so floor-plan content beyond
+    the margin strip is never covered.
+    """
+    x1 = min(z[0] for z in titleblock_zones)
+    y1 = min(z[1] for z in titleblock_zones)
+    x2 = max(z[2] for z in titleblock_zones)
+    y2 = max(z[3] for z in titleblock_zones)
+    if (x2 - x1) >= (y2 - y1):
+        return (0, y1, image_width, y2)
+    return (x1, 0, x2, image_height)
+
+
 def _bbox_distance(a_points: List[List[int]], b_points: List[List[int]]) -> float:
     """Euclidean distance between the centroids of two polygon bboxes."""
     ax, ay = _centroid(a_points)
@@ -1081,7 +1111,9 @@ class MEPTextExtractor:
         return candidates, raw_detections
 
     def compute_exclusion_zones(
-        self, detections: List[TextDetection], min_cluster_tokens: int = 3
+        self, detections: List[TextDetection],
+        image_width: int, image_height: int,
+        min_cluster_tokens: int = 3,
     ) -> List[Tuple[int, int, int, int]]:
         """Compute bounding-box exclusion zones from excluded-token clusters (FIX-4).
 
@@ -1098,8 +1130,14 @@ class MEPTextExtractor:
           3. Return the bounding rectangle of each qualifying cluster, expanded by
              50px on each side so a room centroid just outside the table still hits.
 
+          4. Extend title-block field clusters to the page edge along the title
+             strip so the untexted logo corner abutting them is also excluded
+             (see _extend_titleblock_zone).
+
         Args:
             detections:          All raw TextDetection objects from extract_text().
+            image_width:         Page width in pixels (title-strip edge extension).
+            image_height:        Page height in pixels (title-strip edge extension).
             min_cluster_tokens:  Minimum tokens in a cluster to form a zone (default 3).
 
         Returns:
@@ -1134,6 +1172,7 @@ class MEPTextExtractor:
                 clusters.append([det])
 
         zones = []
+        titleblock_zones = []
         for cluster in clusters:
             # A cluster containing a strong marker (AVI-ON BOM/NOTES, title-block
             # field label) forms a zone alone — these are precise, low-FP phrases
@@ -1149,15 +1188,28 @@ class MEPTextExtractor:
                 continue
             xs = [p[0] for d in cluster for p in d.bbox]
             ys = [p[1] for d in cluster for p in d.bbox]
-            zones.append((
+            zone = (
                 max(0, min(xs) - ZONE_PAD),
                 max(0, min(ys) - ZONE_PAD),
                 max(xs) + ZONE_PAD,
                 max(ys) + ZONE_PAD,
-            ))
+            )
+            # Title-block field clusters are collected separately: their union is
+            # extended to the page edge below so the untexted logo corner abutting
+            # them is covered. Generic BOM/street/note zones stay at their
+            # detected extent.
+            if any(_TITLE_BLOCK_PATTERN.search(d.text) for d in cluster):
+                titleblock_zones.append(zone)
+            else:
+                zones.append(zone)
             logger.debug(
                 f"Exclusion zone: {len(cluster)} excluded tokens → "
-                f"[{zones[-1][0]},{zones[-1][1]},{zones[-1][2]},{zones[-1][3]}]"
+                f"[{zone[0]},{zone[1]},{zone[2]},{zone[3]}]"
+            )
+
+        if titleblock_zones:
+            zones.append(
+                _extend_titleblock_zone(titleblock_zones, image_width, image_height)
             )
 
         return zones
