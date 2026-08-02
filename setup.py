@@ -7,7 +7,8 @@ setup(
     version="0.2.0",
     description="MEP Floor Plan Annotation Pipeline",
     author="Computer Vision Team",
-    packages=find_packages(exclude=["tests"]),
+    package_dir={"": "src"},
+    packages=find_packages(where="src"),
     python_requires=">=3.9",
     install_requires=[
         "fitz>=0.0.1",  # PyMuPDF
@@ -28,7 +29,7 @@ setup(
     },
     entry_points={
         "console_scripts": [
-            "annotate-pipeline=preprocessing_annotations.pipeline:main",
+            "annotate-pipeline=preprocessing_annotations.orchestration.pipeline:main",
         ],
     },
     classifiers=[
