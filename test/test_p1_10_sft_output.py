@@ -16,8 +16,8 @@ from typing import List, Dict, Optional
 sys.path.insert(0, str(Path(__file__).parent))
 
 # Import only the components we need, avoid full pipeline import
-from automation.taxonomy import normalize_to_mandatory, get_extended_type, MANDATORY_CLASSES
-from automation.annotation_schema import SFTAnnotationBuilder, ConfidenceComputer
+from preprocessing_annotations.automation.taxonomy import normalize_to_mandatory, get_extended_type, MANDATORY_CLASSES
+from preprocessing_annotations.automation.annotation_schema import SFTAnnotationBuilder, ConfidenceComputer
 
 # Define minimal dataclasses to avoid dependency issues
 @dataclass
