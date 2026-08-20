@@ -23,9 +23,9 @@ instead of a hardcoded CubiCasa5KDetector -- one registry, not two.
 """
 
 import argparse
-import json
 import logging
 import statistics
+from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
 from preprocessing_annotations.bbox.bbox_metrics import BBox, iou
@@ -37,6 +37,7 @@ from preprocessing_annotations.config import (
 from floorplancad_gt import ensure_images, load_floorplancad_ground_truth
 from gt_evaluator import Detection, GTImage, PredictFn, load_ground_truth
 from kaggle_door_window_eval import DEFAULT_TIER, TIER_BUILDERS
+from report_io import emit_report
 from yolo_gt import load_kaggle_floorplan_ground_truth
 
 logger = logging.getLogger(__name__)
@@ -213,6 +214,19 @@ def _parse_args() -> argparse.Namespace:
         help="Path to a yolo_train.py checkpoint, required for "
              "--tier yolo_finetuned",
     )
+    parser.add_argument(
+        "--yolo-conf", type=float, default=None,
+        help="Confidence floor override for --tier yolo_finetuned_tiled "
+             "(default: YoloObjectDetectorConfig.confidence_threshold). "
+             "TIER_BUILDERS is shared with kaggle_door_window_eval.py, "
+             "which reads this attribute for that tier -- must exist "
+             "here too or Namespace access fails.",
+    )
+    parser.add_argument(
+        "--output", type=Path, default=None,
+        help="Write the JSON report to this path in addition to stdout "
+             "(default: stdout only, unchanged behavior)",
+    )
     return parser.parse_args()
 
 
@@ -232,8 +246,7 @@ def main() -> None:
         name: _diagnose(predict_fn, _GT_LOADERS[name](args), args.category)
         for name in _selected_datasets(args.dataset)
     }
-    print(json.dumps({"category": args.category, "results": results},
-                     indent=2))
+    emit_report({"category": args.category, "results": results}, args.output)
 
 
 if __name__ == "__main__":

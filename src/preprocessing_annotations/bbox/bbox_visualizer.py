@@ -150,6 +150,27 @@ class BboxVisualizer:
 
                 category = det.get("category") or "other"
                 color = OBJECT_COLOR_MAP.get(category, OBJECT_COLOR_MAP["other"])
+                # tech-eval plan: sam3_exemplar additions were reaching this
+                # overlay already (source_tier is on every detection dict,
+                # _collect_object_detections) but rendered identically to
+                # every other tier -- a human reviewing real production
+                # pages had no way to tell a recovered door from a YOLO
+                # door. Marked distinctly, same category color, so
+                # door/window identity is still readable.
+                #
+                # CORRECTION (found via a real review this rendering
+                # itself caused): a first version used width=4 + an
+                # inside-the-box label. On a ~41x46px door symbol that
+                # outline and label occluded the door-swing arc itself --
+                # produced a real false negative (reviewer, not model:
+                # reported "no arc visible" on a detection that does have
+                # one, confirmed by cropping the source image directly).
+                # width stays 2 for every tier; sam3_exemplar is marked by
+                # an OUTSET rectangle (drawn a few px outside the bbox, so
+                # it brackets the symbol instead of covering it) and the
+                # label is placed ABOVE the box instead of inside it.
+                is_sam3_exemplar = det.get("source_tier") == "sam3_exemplar"
+                _OUTSET_PX = 3
 
                 try:
                     x1, y1, x2, y2 = [int(v) for v in bbox[:4]]
@@ -160,10 +181,34 @@ class BboxVisualizer:
                     x2 = max(0, min(x2, img_width))
                     y2 = max(0, min(y2, img_height))
 
-                    draw.rectangle([x1, y1, x2, y2], outline=color, width=2)
+                    if is_sam3_exemplar:
+                        rx1 = max(0, x1 - _OUTSET_PX)
+                        ry1 = max(0, y1 - _OUTSET_PX)
+                        rx2 = min(img_width, x2 + _OUTSET_PX)
+                        ry2 = min(img_height, y2 + _OUTSET_PX)
+                    else:
+                        rx1, ry1, rx2, ry2 = x1, y1, x2, y2
+                    draw.rectangle([rx1, ry1, rx2, ry2], outline=color, width=2)
 
-                    label = f"{category[:6]}"
-                    draw.text((x1 + 2, y1 + 2), label, fill=color, font=font)
+                    label = f"{category[:6]}" + ("+S3" if is_sam3_exemplar else "")
+                    if is_sam3_exemplar:
+                        # Label above the (outset) box, not inside it --
+                        # inside-the-box placement is what occluded the
+                        # symbol before this fix. Every other tier keeps
+                        # its original inside-top placement unchanged
+                        # (see integration contract: non-sam3_exemplar
+                        # rendering must not deviate from pre-fix output).
+                        text_bbox = draw.textbbox((0, 0), label, font=font)
+                        text_h = text_bbox[3] - text_bbox[1]
+                        label_y = ry1 - text_h - 2
+                        if label_y < 0:
+                            # Box near the page top -- no room above it;
+                            # fall back to inside-top (rare, still better
+                            # than drawing off-canvas).
+                            label_y = ry1 + 2
+                    else:
+                        label_y = ry1 + 2
+                    draw.text((rx1 + 2, label_y), label, fill=color, font=font)
 
                 except (ValueError, TypeError):
                     logger.debug(f"Skipping detection {i}: invalid bbox {bbox}")

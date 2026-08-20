@@ -8,7 +8,7 @@ locations detected by OCR or VLM annotation.
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -198,7 +198,11 @@ class RoomSegmenter:
             bbox=bbox,
             confidence=confidence,
             mask=mask if include_mask else None,
-            contour=contour if include_mask else None,
+            # Contour is NOT gated on include_mask: it is a small (N, 1, 2)
+            # polygon already computed by _mask_to_bbox above, whereas `mask`
+            # is a full HxW array -- the memory cost include_mask exists to
+            # avoid. Callers need the polygon for COCO `segmentation` export.
+            contour=contour,
         )
 
         return result
@@ -476,6 +480,8 @@ class RoomSegmenter:
         enclosing room, and replaces the label bbox with the room mask bbox.
 
         Guardrails (keep original on fail):
+          - Seed centroid inside an exclusion_zones rect → BOM/title-block
+            label, no room to find (checked before calling SAM at all)
           - SAM bbox area > max_expand_frac * image_area → over-segmentation
             (SAM grabbed the full floor or a multi-room region)
           - SAM bbox area < original label area → collapse (SAM shrunk)
@@ -515,12 +521,27 @@ class RoomSegmenter:
         refined = []
         expanded = 0
         kept_original = 0
+        # P2 (sprint1_verify47 audit, 2026-08-19): every SAM failure was
+        # already logger.warning'd per-box, but 3,093 of them scrolled by
+        # in one run without anyone noticing every single expansion had
+        # failed -- the per-page summary line below was logger.info even
+        # when expanded==0 for 57/57 pages. Track error causes so that
+        # case gets one loud, impossible-to-miss line instead of relying
+        # on someone counting per-box warnings by hand.
+        error_reasons: Dict[str, int] = {}
 
         # Precompute every seed's centroid so each expansion can be rejected if it
         # floods past its own room and swallows a neighbouring seed (G1).
         seed_centers = [seed_center(a.get("bbox", [])) for a in annotations]
 
-        for idx, ann in enumerate(annotations):
+        for idx, raw_ann in enumerate(annotations):
+            # A previous refine pass (re-run over an already-processed output
+            # dir, or --skip-existing) may have left a "segmentation" polygon
+            # on this dict. That polygon belongs to THAT run's bbox. Drop it up
+            # front so every branch below either writes a matching polygon or
+            # writes none -- a kept-original/cc_split result must never carry a
+            # polygon that disagrees with its bbox.
+            ann = {k: v for k, v in raw_ann.items() if k != "segmentation"}
             bbox = ann.get("bbox", [0, 0, 100, 100])
 
             # Centroid of label box → SAM prompt point
@@ -531,6 +552,36 @@ class RoomSegmenter:
                 original_area = max(1, bw * bh)
             else:
                 center_x, center_y, original_area = 50, 50, 1
+
+            # Guardrail 0: exclusion zone. exclusion_zones was accepted by
+            # this method and threaded here from the pipeline (BOM tables,
+            # title blocks) but was only ever consumed inside the
+            # use_density_prompts branch below -- default off, so this
+            # check never ran on the main label-centroid path. Confirmed
+            # gap (sprint1_verify47 audit, 2026-08-19): a seed centroid
+            # sitting on the word "ELECTRICAL" inside a sheet title
+            # ("ELECTRICAL LIGHTING FIRST FLOOR PLAN") got expanded by SAM
+            # into the entire title block (revision table, seal, sheet
+            # number) -- 3.90% of the page, verified visually. Checked
+            # BEFORE calling SAM (not after, like the other guardrails)
+            # because there is nothing to salvage: a title-block seed has
+            # no enclosing room to find. Same all-or-nothing shape as the
+            # other guardrails: keep original, tag the reason, no new
+            # concept introduced.
+            if exclusion_zones and any(
+                zx1 <= center_x <= zx2 and zy1 <= center_y <= zy2
+                for zx1, zy1, zx2, zy2 in exclusion_zones
+            ):
+                logger.debug(
+                    f"SAM exclusion-zone guardrail: seed ({center_x},{center_y}) "
+                    f"inside a BOM/title-block zone. Keeping original."
+                )
+                refined_ann = ann.copy()
+                refined_ann["sam_expanded"] = False
+                refined_ann["sam_skip_reason"] = "exclusion_zone"
+                refined.append(refined_ann)
+                kept_original += 1
+                continue
 
             try:
                 # T1: request mask for cc_split. T3: need mask for pool, but only
@@ -596,6 +647,26 @@ class RoomSegmenter:
                     kept_original += 1
                     continue
 
+                # Guardrail 3: label-scale no-op. SAM "grew" past the label
+                # (else collapse above would have caught it) but never reached
+                # room scale -- its own multimask candidates were text-glyph-sized
+                # blobs, not the room. Rejected results keep the original label
+                # box, same as every other guardrail here; this does not fix the
+                # geometry, it stops a label blob from being reported as a
+                # successful room expansion. See SAMConfig.min_expansion_area_px.
+                if is_label_scale_result(sam_area, self.config.min_expansion_area_px):
+                    logger.debug(
+                        f"SAM label-scale guardrail: sam_area={sam_area} < "
+                        f"{self.config.min_expansion_area_px} (min room scale). "
+                        f"Keeping original."
+                    )
+                    refined_ann = ann.copy()
+                    refined_ann["sam_expanded"] = False
+                    refined_ann["sam_skip_reason"] = "label_scale_noop"
+                    refined.append(refined_ann)
+                    kept_original += 1
+                    continue
+
                 # T1: connected-component split when flag is set and mask available.
                 if self.config.use_cc_split and result.mask is not None:
                     cc_bboxes = self._split_mask_instances(
@@ -626,6 +697,15 @@ class RoomSegmenter:
                 refined_ann["original_bbox"] = bbox
                 refined_ann["sam_confidence"] = result.confidence
                 refined_ann["sam_expanded"] = True
+                # Real room outline for COCO `segmentation` export. Page-pixel
+                # absolute coords, same space as bbox (both derive from the same
+                # mask via _mask_to_bbox). JSON-safe list-of-[x, y] -- never the
+                # raw mask array, which the _mask strip below exists to keep out
+                # of serialized annotations.
+                if result.contour is not None:
+                    refined_ann["segmentation"] = (
+                        result.contour.reshape(-1, 2).tolist()
+                    )
                 # T3: keep mask in dict for pool collection; stripped after filter.
                 if t3_active and result.mask is not None:
                     refined_ann["_mask"] = result.mask
@@ -634,6 +714,8 @@ class RoomSegmenter:
 
             except Exception as e:
                 logger.warning(f"SAM segment failed, keeping original: {e}")
+                reason = "CUDA out of memory" if "out of memory" in str(e).lower() else type(e).__name__
+                error_reasons[reason] = error_reasons.get(reason, 0) + 1
                 refined_ann = ann.copy()
                 refined_ann["sam_expanded"] = False
                 refined_ann["sam_skip_reason"] = "error"
@@ -721,6 +803,18 @@ class RoomSegmenter:
             f"SAM refine_annotations: {expanded} expanded, "
             f"{kept_original} kept original (of {len(annotations)} total)"
         )
+        # P2: a page where NOTHING expanded because EVERY box errored
+        # (not because the guardrails correctly rejected bad expansions)
+        # is a resource/environment failure, not a normal outcome -- log
+        # it as loud as the OOMs that caused it, once, with a cause
+        # breakdown, instead of leaving it indistinguishable from a
+        # quiet, healthy "0 expanded" page in the per-page INFO line.
+        if expanded == 0 and annotations and sum(error_reasons.values()) == len(annotations):
+            logger.warning(
+                f"SAM refine_annotations: ALL {len(annotations)} boxes failed with "
+                f"an error (0 expanded) -- likely a resource problem, not guardrail "
+                f"rejection. Causes: {dict(error_reasons)}"
+            )
         return refined
 
     def visualize_segmentation(
@@ -804,6 +898,15 @@ def is_collapse(sam_area: int, original_area: int) -> bool:
     """True when SAM's result should be rejected as a collapse: it shrank below
     a label-scale original (SAM failed to find the room, not a refinement)."""
     return sam_area < original_area and original_area <= LABEL_SCALE_MAX
+
+
+def is_label_scale_result(sam_area: int, min_expansion_area_px: int) -> bool:
+    """True when SAM's result grew (passed the collapse check above) but never
+    left label scale -- a room-shaped point prompt whose only candidates were
+    text-glyph-sized blobs. This is NOT a correctness check: an area at or
+    above `min_expansion_area_px` is not verified as a real room, only as not
+    provably a label blob (see SAMConfig.min_expansion_area_px)."""
+    return sam_area < min_expansion_area_px
 
 
 def seed_center(bbox: List[int]) -> Optional[Tuple[int, int]]:

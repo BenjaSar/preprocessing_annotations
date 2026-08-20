@@ -1,7 +1,11 @@
 """
 hg_furukawa_original — CubiCasa5K segmentation backbone.
 
-Vendored from https://github.com/CubiCasa/CubiCasa5k (MIT license).
+Vendored from https://github.com/CubiCasa/CubiCasa5k. Repo LICENSE is
+CC BY-NC 4.0 (non-commercial), not MIT as this comment previously and
+incorrectly claimed -- verified against the repo's own LICENSE file
+this session. This project's use is research/non-commercial, consistent
+with that license; re-check before any commercial/shipped use.
 Removed: floortrans import, init_weights (we load from checkpoint).
 """
 

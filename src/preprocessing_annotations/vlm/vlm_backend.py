@@ -189,7 +189,26 @@ class VLMBackend(ABC):
     def initialize(self) -> None:
         """Initialize VLM model (lazy loading allowed)."""
         pass
-    
+
+    def release(self) -> None:
+        """Free backend resources (GPU memory, loaded weights) so a later
+        GPU-heavy stage in the same process can run. Default no-op --
+        override in backends that hold heavy state (UnslothQwenBackend).
+        Safe to call multiple times and safe to call before initialize().
+        Every detect_* method calls self.initialize() as its own first
+        line, so a caller needing the VLM again after release() does not
+        need to change -- it reloads lazily, automatically.
+
+        Added for a confirmed gap (sprint1_verify47 audit, 2026-08-19):
+        pipeline.py runs VLM room detection (Step 3) then SAM label-
+        expansion (Step 3.5) back-to-back in the same process, with the
+        VLM never released. Measured: 3,093 SAM "CUDA out of memory"
+        failures across the run, 57/57 pages logging "SAM expanded 0 of
+        N" -- SAM's expansion never once succeeded because an 8B VLM
+        was still resident on the GPU.
+        """
+        pass
+
     @abstractmethod
     def detect_rooms(self, image_path: Union[str, Path]) -> List[Dict[str, Any]]:
         """
@@ -1122,6 +1141,26 @@ class UnslothQwenBackend(VLMBackend):
         except Exception as e:
             logger.error(f"Failed to initialize Unsloth Qwen backend: {e}")
             raise
+
+    def release(self) -> None:
+        """Drop the loaded model/tokenizer and free GPU memory.
+
+        See VLMBackend.release's docstring for why this exists. Sets
+        initialized=False so the next detect_* call's self.initialize()
+        (already the first line of every detect_* method) reloads from
+        scratch rather than silently no-op'ing against stale None refs.
+        """
+        if not self.initialized:
+            return
+        import gc
+        import torch
+
+        self.model = None
+        self.tokenizer = None
+        self.initialized = False
+        gc.collect()
+        torch.cuda.empty_cache()
+        logger.info("Unsloth Qwen backend released (model unloaded, GPU cache cleared)")
 
     def _generation_kwargs(self, max_new_tokens: int) -> Dict[str, Any]:
         """Config-driven ``model.generate`` kwargs — single decoding source.

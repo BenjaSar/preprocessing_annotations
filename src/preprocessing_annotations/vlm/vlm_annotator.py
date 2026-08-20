@@ -99,6 +99,14 @@ class VLMAnnotator:
         self.config = config or VLMConfig()
         self._client = client
 
+    def release(self) -> None:
+        """No-op: this is the Claude (API) backend -- no local GPU weights
+        to free. Exists so pipeline.py's release-before-SAM call
+        (AnnotationPipeline.vlm_annotator can be this class OR a local
+        VLMBackend subclass, see the property's own docstring) works
+        polymorphically without a type check at the call site."""
+        pass
+
     @property
     def client(self):
         """Lazy initialization of Anthropic client."""

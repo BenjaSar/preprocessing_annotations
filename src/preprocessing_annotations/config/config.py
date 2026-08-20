@@ -27,6 +27,12 @@ except ImportError:
 # correct when config.py lived directly at the repo root.
 _PROJECT_ROOT = Path(__file__).resolve().parents[4]
 
+# SAM checkpoints live in preprocessing_annotations/weights/, a sibling of
+# src/ -- not under detection/, which is where SAMConfig.checkpoint's old
+# bare-filename default resolved to (sam_segmenter.py's relative-path
+# fallback anchors on Path(__file__).parent, i.e. the module's own dir).
+SAM_WEIGHTS_ROOT = _PROJECT_ROOT / "preprocessing_annotations" / "weights"
+
 
 def _get_vlm_model() -> str:
     """Get VLM model from environment or use default Claude Haiku.
@@ -499,10 +505,24 @@ class SAMConfig:
     model_type: str = "vit_h"
 
     # Checkpoint path
-    checkpoint: str = "sam_vit_h_4b8939.pth"
+    checkpoint: str = field(
+        default_factory=lambda: str(SAM_WEIGHTS_ROOT / "sam_vit_h_4b8939.pth")
+    )
 
     # Device for inference (auto-detected if None)
     device: Optional[str] = None
+
+    # Minimum accepted expansion area (px²), below which a "successful"
+    # expansion is rejected as a label-scale no-op instead of a room.
+    # Measured on 830 real rooms (sprint1_verify45): 81% of sam_expanded=True
+    # results were <10,000px² on 4500x3375px pages -- a random 8-room visual
+    # sample confirmed every room <10,000px² was a pure text-label capture
+    # (0/3 real rooms), while 10,000-50,000px² was a genuine mix of real
+    # rooms, partial fixture-nook captures, and more label-only boxes (2026-
+    # 08-06 spike). This threshold is deliberately conservative: it only
+    # catches the confirmed-unambiguous case. A room surviving this check is
+    # NOT verified correct -- it is only not-provably-a-label-blob.
+    min_expansion_area_px: int = 10_000
 
     # Whether to output multiple masks
     multimask_output: bool = True
@@ -558,6 +578,38 @@ class EvalConfig:
     variants), window1, toilet, sink1/sink2. It has zero annotations for
     "wall" (category exists, 0 instances) and no category at all for
     stairs/elevators/rooms — those cannot be scored against this dataset.
+
+    KNOWN INCOMPLETE for door/window (2026-08-04, GC0/GC1b): full visual
+    census of all 187 door/window predictions with best-IoU==0 against
+    this GT (yolo_finetuned_tiled tier) found 107 (57.2%) are real,
+    correctly-detected door/window symbols this GT never labeled -- not
+    detector false positives. Two images have ZERO window GT at all
+    (d0b1bc03, 54a899cb). Concentrated on detail/schedule/site-plan
+    sheets (confirmed: 7c208ffc, 2f8c1bd5, 06ee3fd7, d0b1bc03), same
+    sheet family that already broke the envelope-distance route
+    (EnvelopeConfig, deleted BA4) for an unrelated reason (no single
+    building outline).
+
+    Practical effect: raw precision computed against this GT
+    UNDERSTATES true detector precision. Recomputed combined door+window
+    precision treating the 107 confirmed real detections as true
+    positives (not false positives): 0.366 -> 0.624 (conservative, 26
+    remaining ambiguous boxes counted as FP) to 0.687 (optimistic, counted
+    as real). Recall is correspondingly OVERSTATED (true object count
+    exceeds this GT's labeled count). Do not cite this GT's raw
+    precision/recall as ground truth without this correction; do treat
+    it as a reliable source for door/window BBOX LOCATIONS that are
+    labeled (those are real, human-verified).
+
+    A candidate "schedule/legend graphic hallucination" explanation was
+    tested and dropped: of the 54 confirmed genuine false positives,
+    most are annotation/schedule content (numbered-triangle room
+    markers, lighting-fixture-schedule icons, hatch-fill legend
+    swatches, dimension-leader callout arrows, bitmap text-rendering
+    artifacts) -- not a shape the detector should be expected to
+    suppress via any door/window feature (elongation, wall-adjacency:
+    both tested, see WindowEvidenceConfig and GC1a). No fix proposed;
+    recorded as a real, currently-unaddressed defect.
     """
 
     # Default points at the repo's own test_pcs export (real asset, same
@@ -600,6 +652,79 @@ class EvalConfig:
     def __post_init__(self):
         if self.device is None:
             self.device = _detect_device()
+
+
+@dataclass
+class WindowEvidenceConfig:
+    """Option B (2026-08-03): local wall-context discriminator for
+    door-mislabeled-as-window, replacing the envelope-distance route
+    (EnvelopeConfig, deleted BA4) killed by BA0/WG1 verification --
+    6/10 test_pcs sheets have no single building envelope to measure
+    distance to (site plans, multi-unit part-plan sheets, enlarged-unit
+    details).
+
+    BA0 spike (2026-08-03, GT crops, test_pcs 363 door/205 window +
+    kaggle_floorplans500 355 door/281 window, throwaway script not
+    committed) tested 3 local features against a best-threshold
+    classification accuracy, not median-gap alone (median gap alone
+    overstated separability):
+
+      arc evidence (HoughCircles response): test_pcs acc .639, kaggle
+      .558 -- EXACTLY the majority-class-door baseline on both (.639 =
+      363/568, .558 = 355/636). Zero real signal. Dropped, not shipped.
+
+      aspect ratio (w/h): test_pcs acc .817 @ threshold 1.714, kaggle
+      .805 @ 1.683 -- real signal, both datasets. Superseded by BA1b
+      below.
+
+      line-pair evidence (near-parallel near-collinear Hough line-
+      segment pairs, the glazing double-line signature): test_pcs acc
+      .894 @ threshold 39, kaggle .786 @ 20 on GT -- real signal there,
+      but BA2 (real yolo_finetuned_tiled predictions) found it
+      collapses kaggle window recall .562->.288 (77 TPs lost) chasing
+      1 confused box, and BA3 (10 pixel-confirmed real ROCKAWAY boxes)
+      missed 2/4 real windows. Not shippable. A fix attempt (derive
+      min_line_length from the crop's LONG axis instead of short, to
+      symmetrically help vertical glazing) made it WORSE on both GT
+      sets (.894->.808 test_pcs, .786->.673 kaggle). Implementation
+      removed as dead code once zero callers remained (no combination
+      step was ever shipped) -- numbers kept here, not reimplemented
+      without a reason to revisit.
+
+    BA1b (2026-08-03): BA2 found real w/h regressed hard on portrait
+    (tall-narrow) windows -- 37-47% of all boxes, portrait-only acc
+    only .656/.623 (test_pcs/kaggle), because a vertical window's w/h
+    sits near a door's, even though it is exactly as elongated as a
+    landscape window. Fixed by making the feature undirected:
+    elongation = max(w,h)/min(w,h). Re-measured on the same GT: acc
+    .910/.917 overall, .902/.918 portrait-only -- both datasets, no
+    regression, portrait failure mode closed. Doors are NOT near 1.0
+    (median elong 1.22/1.18, p90 1.79/1.56, max 15.2/2.6) -- the fix
+    works because the two DISTRIBUTIONS separate, not because doors
+    cluster at a fixed value; do not assume that when reasoning about
+    this feature.
+
+    Default below is test_pcs's measured optimum: test_pcs is this
+    project's only confirmed commercial-domain door/window GT
+    (EvalConfig's own docstring) and the domain carrying the standing
+    door/window complaints this option addresses. Kaggle's own optimal
+    value (1.8485) is recorded here for audit, not silently discarded.
+
+    BA1b only: exposes the one validated, shipped predicate
+    (is_window_shaped, wired into sft_validator.py FIX-9b). No other
+    feature or combination rule remains -- both were measured and
+    dropped, not invented.
+    """
+
+    # BA1b-measured best-threshold on test_pcs (.910 accuracy):
+    # elongation = max(w,h)/min(w,h) <= this -> door-like, > this ->
+    # window-like (undirected -- orientation-independent, unlike raw
+    # w/h). Numerically identical to BA1's w/h threshold (coincidence
+    # of this GT, not assumed to hold in general) -- exact value from
+    # the sweep, not rounded (a rounded 1.714 was tried first and
+    # silently flipped 2/568 boxes' classification vs the measured
+    # optimum).
+    elongation_threshold: float = 1.7142857142856909
 
 
 _CUBICASA_CACHE_ROOT = (
@@ -815,6 +940,81 @@ class FloorplancadEvalConfig:
     gt_iou_threshold: float = 0.5
 
 
+# Same checkpoint CubiCasa5KDetector.MODEL_PATH resolves to (detection/
+# cubicasa5k_detector.py's own parents[3]-relative computation) -- redefined
+# here rather than imported, matching YOLO_CHECKPOINT_ROOT's precedent of
+# config.py owning its own path constants instead of depending on detection/.
+CUBICASA_MODEL_PATH = _PROJECT_ROOT / "preprocessing_annotations" / "models" / "cubicasa5k_model.pkl"
+
+
+@dataclass
+class CubicasaRoomDetectorConfig:
+    """Config for the dormant CubiCasa5K room head (T-A/Technique-1;
+    detection/cubicasa5k_detector.py::CubiCasa5KDetector.detect_rooms).
+
+    NOT currently called from pipeline.py. A corroboration-tagging use
+    (tag VLM/OCR rooms with independent CNN agreement, unlabeled boxes
+    only -- no room_name) was built, wired, and measured this session,
+    then removed after evidence found no discriminative value: on the
+    correctly-powered test (pipeline's own kept-vs-dropped room split,
+    n=259), CNN corroboration rate was statistically indistinguishable
+    between kept and dropped rooms (Fisher exact p=0.603). Removed from
+    sft_validator.py (was _corroborate_with_cnn_rooms + _bbox_containment,
+    called from pipeline.py's Step 4d.5) -- reimplement from this record
+    if revisiting, not preserved elsewhere.
+
+    This config and CubiCasa5KDetector.detect_rooms() remain because the
+    detector itself is validated independent of that removed use --
+    see the localization numbers below -- and stay available for a
+    different application (e.g. geometric room-scale upgrade of
+    label-sized OCR boxes, not yet built).
+
+    Defaults are the swept-and-verified config (this session, full
+    400-image CubiCasa5K test set, class-agnostic room GT, IoU>=0.5):
+    per_class=True + min_area_px=1500 + barrier_dilate_px=2 ->
+    P.622/R.707/mIoU.863, dominating the no-barrier per-class baseline
+    (P.630/R.630/mIoU.843) on recall and mIoU at ~flat precision.
+    barrier_dilate_px uses the model's OWN wall (room slice class 2) and
+    door/window (icon slice classes 1/2) channels from the SAME forward
+    pass to cut same-type adjacent rooms apart before connected-
+    components -- see cubicasa5k_detector.py::detect_rooms docstring for
+    the FN-cause measurements this was tuned against.
+
+    SCOPE, hence off by default (see use_cubicasa_rooms):
+      - Residential-only evidence. CubiCasa5K test set only; test_pcs (this
+        project's only commercial GT) has zero "room" category annotations
+        -- verified, not assumed -- so commercial performance is unmeasured,
+        not merely unmeasured-yet.
+      - License: CC BY-NC 4.0 (upstream CubiCasa5k repo's own LICENSE file;
+        the vendored seg_model.py header previously and incorrectly claimed
+        MIT, corrected this session). Confirmed OK for this project's
+        research/non-commercial use. Re-verify before any commercial/
+        shipped use -- CC BY-NC still blocks that regardless of the domain
+        question above.
+    """
+
+    checkpoint_path: str = field(default_factory=lambda: str(CUBICASA_MODEL_PATH))
+
+    # Same convention as OCRConfig/SAMConfig/VLMConfig.qwen_device/
+    # CubicasaEvalConfig.device -- None resolves via _detect_device() in
+    # __post_init__. Explicit escape hatch to "cpu": use_vlm + use_sam +
+    # use_cubicasa_rooms in one run puts 3 models on one GPU; this
+    # checkpoint is the smallest of the three (hourglass CNN, single
+    # forward pass) so it's the one that can afford to move off-GPU if
+    # co-residence becomes a real problem -- untested, not yet needed
+    # since default is off and P5's verification run avoids co-residence
+    # entirely (use_cubicasa_rooms alone, no --use-vlm/--use-sam).
+    device: Optional[str] = None
+
+    per_class: bool = True
+    min_area_px: int = 1500
+    barrier_dilate_px: int = 2
+
+    def __post_init__(self):
+        if self.device is None:
+            self.device = _detect_device()
+
+
 @dataclass
 class YoloObjectDetectorConfig:
     """Config for T-I's pipeline-integrated YOLO door/window detector
@@ -843,18 +1043,39 @@ class YoloObjectDetectorConfig:
     # R2/R4: tiled detection. Full-page inference downscales to the
     # model's ~640px input, shrinking real doors/windows below
     # detectability (measured: 94-96% pure-miss on test_pcs full-page).
-    # R3 full-dataset measurement (2026-07-29), test_pcs (commercial,
-    # 10 images): door P.0345->P.307, R.0028->R.311 (111x); window
-    # P.119->P.198, R.0244->R.439 (18x) -- both precision AND recall
-    # improved, not a recall-for-precision trade. Kaggle (in-domain,
-    # 43 images): byte-identical to non-tiled (P.8599/R.8817 door,
-    # P.6242/R.6975 window) -- zero regression, because those images
-    # (1119-1633px) sit below tile_trigger_px and detect_objects_tiled
-    # falls back to full-image automatically. Bar cleared on both
-    # datasets -- default promoted to True (R4). Trigger/cols/rows/
-    # overlap/target_px mirror PipelineConfig's own already-tuned
-    # VLM-tiling values (config.py tile_cols/tile_rows/tile_overlap_pct/
-    # tile_trigger_px/tile_target_px) -- same convention, not reinvented.
+    # R3 measurement (2026-07-29) was taken at Ultralytics' implicit
+    # conf=0.25 (no threshold plumbed yet) and is superseded -- kept
+    # below for provenance only, do not cite as current:
+    #   test_pcs: door P.0345->P.307, R.0028->R.311; window
+    #   P.119->P.198, R.0244->R.439. Kaggle: byte-identical to
+    #   non-tiled (P.8599/R.8817 door, P.6242/R.6975 window) --
+    #   because those images (1119-1633px) sit below tile_trigger_px
+    #   and detect_objects_tiled falls back to full-image.
+    #
+    # Re-measured post-R1 at this field's actual default (conf=0.5,
+    # 2026-07-30/31): test_pcs door P.4197/R.2231, window P.3198/R.3463;
+    # kaggle door P.8896/R.8394, window P.7789/R.5516. Kaggle is NO
+    # LONGER byte-identical to non-tiled -- the shift is the conf
+    # threshold (0.5 vs the old implicit 0.25), not tiling; those
+    # images still fall back to full-image either way.
+    #
+    # Confidence sweep (CD1, 2026-07-31, --yolo-conf) shows the
+    # precision/recall trade flattens past conf~0.25 and costs far
+    # more on test_pcs than in-domain: kaggle loses ~11.6pp door
+    # precision (.890->.774) for +8.5pp recall; test_pcs loses ~23.8pp
+    # (.420->.182) for a similar recall band. Diminishing, domain-
+    # dependent -- not evidence for lowering the production default.
+    #
+    # Near-miss oversizing (R0b's recorded 5.8x median area ratio) does
+    # not hold post-tiling/post-R1: door_localization_diagnostic.py
+    # measures 4.69 on test_pcs, 0.41 (undersized) on kaggle -- domain-
+    # specific, weaker than originally recorded.
+    #
+    # Bar cleared on both datasets at the time of R4 -- default
+    # promoted to True. Trigger/cols/rows/overlap/target_px mirror
+    # PipelineConfig's own already-tuned VLM-tiling values (config.py
+    # tile_cols/tile_rows/tile_overlap_pct/tile_trigger_px/
+    # tile_target_px) -- same convention, not reinvented.
     use_tiling: bool = True
     tile_cols: int = 4
     tile_rows: int = 4
@@ -879,7 +1100,241 @@ class YoloObjectDetectorConfig:
     # (yolo_detector.py) -- the eval CLI's yolo_pretrained/yolo_finetuned
     # tiers call yolo_infer.detect_objects directly without this config
     # class, so their recorded baseline numbers are untouched.
-    confidence_threshold: float = 0.5
+    #
+    # Raised 0.5 -> 0.75 by explicit instruction (2026-08-09). Measured cost
+    # on test_pcs GT (conf_sweep, production tiling, IoU 0.5) -- this trades
+    # precision for a large recall loss, and window is hit hardest:
+    #   door    conf .50: P.394 R.242 F1.300  ->  conf .75: P.621 R.131 F1.216
+    #   window  conf .50: P.320 R.346 F1.333  ->  conf .75: P.562 R.044 F1.081
+    # Window recall collapses to 9 TP of 205 GT. F1 falls on BOTH classes;
+    # measured F1 optimum is conf~0.25 for door (.308) and ~0.5 for window
+    # (.333). Revert to 0.5 to restore the prior recorded baselines.
+    confidence_threshold: float = 0.75
+
+
+# facebook/sam3 is a gated HF repo; weights are downloaded once and cached
+# locally under the standard huggingface_hub cache. Shared resolution
+# point (mirrors yolo_checkpoint_path's role above) so the production
+# detector and the eval harness (kaggle_door_window_eval.py) resolve the
+# same file instead of each hardcoding the repo id/filename.
+_SAM3_HF_REPO = "facebook/sam3"
+_SAM3_CKPT_FILENAME = "sam3.pt"
+
+
+def resolve_sam3_checkpoint() -> str:
+    """Resolve the cached facebook/sam3 checkpoint via huggingface_hub.
+
+    ``local_files_only`` -- the gated repo's HEAD revalidation returns 403
+    without a token; the weights are already downloaded, so this never
+    needs network access.
+    """
+    from huggingface_hub import hf_hub_download
+    from huggingface_hub.errors import LocalEntryNotFoundError
+
+    try:
+        return hf_hub_download(
+            repo_id=_SAM3_HF_REPO,
+            filename=_SAM3_CKPT_FILENAME,
+            local_files_only=True,
+        )
+    except LocalEntryNotFoundError as error:
+        raise RuntimeError(
+            f"SAM3 checkpoint not cached ({_SAM3_HF_REPO}/"
+            f"{_SAM3_CKPT_FILENAME}); download once with a valid HF "
+            f"token before offline use"
+        ) from error
+
+
+@dataclass
+class Sam3ExemplarDetectorConfig:
+    """Config for the tiled SAM3 box-exemplar door detector
+    (sam3_exemplar_detector.py::Sam3ExemplarDetector) -- seeded by
+    YoloObjectDetector's own high-confidence detections, recovers
+    additional doors SAM3's concept mode finds in a native-resolution
+    tile around each seed. Door only: the validating spike (tech-eval
+    plan, P1) found window seed supply near-empty with no recall gain;
+    keep_categories is not exposed here the way YoloObjectDetectorConfig
+    exposes it -- this detector does not generalize past door yet.
+
+    Additive only, like YoloObjectDetectorConfig: detections extend the
+    same yolo_detections list before it reaches map_detections_to_rooms,
+    so they inherit that path's existing tag-only behavior (has_door
+    room attribute, never accepts/rejects a room) with no new merge code.
+
+    WITHDRAWN (2026-08-18, P6, numbers superseded same day by P9): the
+    paragraph below this note stated a two-dataset validation beating
+    YOLO-alone on both precision and recall. That number came from a
+    duplicate exemplar implementation that lived in
+    eval/kaggle_door_window_eval.py (seed-centred crops, no scale-
+    consistency gate) and had silently diverged from THIS class -- it
+    was never actually a measurement of the code shipped here. Audit
+    #16 found the divergence (P5). Re-measuring THIS class through the
+    same eval harness (P6) gave test_pcs P.420/R.223 -> P.414/R.231;
+    FloorPlanCAD P.489/R.500 -> P.475/R.609 -- but THAT measurement was
+    itself taken under a still-broken grid (tile_cols/tile_rows=4
+    capped BELOW what the P0 ceil() fix asked for on real pages, so P6
+    silently measured a 1238px-tile/0.81x-downscale grid despite P0
+    having already landed -- caught auditing this file's own numbers).
+    Cap bumped 4->5 (P9, below); precision was STILL below baseline on
+    both datasets at that point.
+
+    RESTORED, on real evidence this time (P13, same day): reconciling
+    the per-box census against the scorer's marginal counts exposed a
+    dedup defect -- detect_additional deduped additions against the
+    high-confidence EXEMPLAR subset rather than every door the caller
+    passed in, so doors YOLO found at confidence 0.5-0.75 were
+    invisible to the dedup and SAM3 re-finding them produced duplicate
+    boxes scoring as false positives (a third of test_pcs's marginal
+    FP). Fixed. Current, measured through THIS class:
+      test_pcs      P.420/R.223 -> P.423/R.242
+      FloorPlanCAD  P.489/R.500 -> P.506/R.580
+    Union now beats YOLO-alone on BOTH axes on BOTH datasets. Same
+    claim as the withdrawn one, but earned by fixing a defect rather
+    than by measuring a fork of the code. Caveats ride with it and are
+    NOT optional: test_pcs GT is documented KNOWN INCOMPLETE (see
+    EvalConfig) so absolute values are unreliable while the comparison
+    holds; P13 costs FloorPlanCAD recall vs P9 (.609->.580);
+    sam3_confidence_threshold=0.70 has never been swept against these
+    numbers; small n (10/40 images), door only. See
+    test/test_sam3_exemplar_gt_regression.py for the pinned numbers and
+    the full three-repin history. use_sam3_exemplar remains default
+    False -- flipping it is a separate decision needing the stated SFT
+    recall-vs-precision objective, not implied by this result.
+
+    THRESHOLD DEPENDENCY, do not drop (found auditing C2, same day):
+    every number above is measured at yolo_conf=0.5 (the eval harness's
+    pinned baseline). The P13 dedup fix it depends on is a NO-OP when
+    the seed detector's own confidence_threshold >= this class's
+    seed_confidence_threshold (0.75) -- the two door lists P13 split
+    apart (all doors vs >=0.75 doors) are then identical, so there is
+    nothing for the wider dedup to catch. PipelineConfig's default
+    YoloObjectDetectorConfig.confidence_threshold IS 0.75 (see that
+    field's own docstring -- raised by explicit instruction 2026-08-09).
+    At that production default, P13 is inert and these numbers do NOT
+    describe production's current configuration; they describe the
+    yolo_conf=0.5 regime the GT harness measures. Whether production
+    should run YOLO at 0.5 is that field's own open question, not
+    decided or touched here.
+
+    Original (now-superseded) claim, for the record: "two-dataset
+    validation (test_pcs commercial, FloorPlanCAD residential+
+    commercial, tech-eval plan P0/P1): at these defaults the union of
+    (YOLO baseline @conf 0.5) + (this detector's additions) beats
+    YOLO-alone on BOTH precision and recall on both datasets -- test_pcs
+    P.420/R.223 -> P.425/R.251; FloorPlanCAD P.489/R.500 -> P.500/R.659."
+    sam3_confidence_threshold=0.70 was picked against that withdrawn
+    number and has not been re-swept against the corrected one -- next
+    lever, not yet pulled. Native tiling is still not optional
+    (unaffected by the withdrawal above): a full-page resize puts a
+    ~44px door under one 14px ViT patch token (imgsz 644 -> 0.45 tokens,
+    measured max confidence .32); a 1008px native tile puts it at ~3
+    tokens (measured max confidence .898 on the same image/exemplar).
+
+    UPDATE (2026-08-12): the original per-seed crop design measured 30%
+    page coverage on a real page (7 seeds -> 7 tiles centred on those
+    seeds, vs YOLO's systematic grid covering 100%) -- a real door
+    anywhere outside a seed's neighborhood was structurally unreachable.
+    Same run surfaced a false-positive cascade (up to 39 detections/page)
+    where SAM3's same-image concept matching locked onto a repeated
+    non-door symbol (light fixture + curved switch-leg wire -- same
+    "rectangle + arc" composition as a door swing) instead. Multi-
+    exemplar was tested as a fix and made it WORSE (K=1->1 instance,
+    K=2->23 instances, same tile) -- refuted, not adopted.
+    Fix: tile_cols/tile_rows/tile_overlap_pct/tile_target_px added below,
+    mirroring YoloObjectDetectorConfig's own adaptive-grid fields exactly
+    (same formula, see Sam3ExemplarDetector._adaptive_grid) so the
+    exemplar-producing and exemplar-consuming stages run under the SAME
+    tiling regime -- systematic, full-coverage, not seed-centred.
+    tile_target_px defaults to tile_px (1008) rather than YOLO's own 1200
+    so grid tiles land near SAM3's own native resolution instead of
+    YOLO's, keeping the native-resolution property above intact.
+    """
+
+    seed_confidence_threshold: float = 0.75
+    sam3_confidence_threshold: float = 0.70
+    tile_px: int = 1008
+
+    # Systematic tiling grid -- same fields/formula as
+    # YoloObjectDetectorConfig (config.py, this file), so the seed
+    # detector and this detector search the page under equivalent
+    # conditions instead of YOLO's full-coverage grid vs this
+    # detector's old seed-centred 30%-coverage crops.
+    #
+    # tile_cols/tile_rows DIVERGE from YOLO's matching cap (4) as of
+    # 2026-08-18 (P9): YOLO's cap is a coverage/cost knob with no
+    # resolution guarantee attached. This detector's cap sat below what
+    # ceil(full_w/tile_target_px) asks for on real project pages
+    # (4500x3375 needs 5 cols, cap was 4 -> _adaptive_grid silently
+    # produced 1238px tiles, 0.81x downscale of tile_target_px, even
+    # after switching round()->ceil() -- the cap, not the rounding
+    # function, was the actual binding constraint). Bumped 4->5:
+    # GEOMETRICALLY verified against every real page in both spot-check
+    # batches (widest 4500px, tallest 4500px) -- cap no longer binds on
+    # any of them, tiles land 807-1100px. That is the ONLY thing
+    # "verified" means here -- it is not a claim that 5 beats 4 on real
+    # detection quality.
+    #
+    # CONTESTED (2026-08-18, C2, same day): paired A/B on 2 real pages
+    # (same seeds, same code, only this cap varied) found 4->5 LOSING
+    # real doors: Lake Shore Electrical p002 lost both of 2 previously-
+    # recovered real doors (and its known false-positive cascade went
+    # from a partial 5-box scatter to a complete, cleaner 12-box grid of
+    # the confusable non-door symbol); Kennedy AVI-ON FLAT p002 lost 3
+    # of 4 previously-confirmed real doors. This is the current default
+    # and it is NOT validated as an improvement on real pages -- the
+    # aggregate GT marginal-precision gain that motivated the bump
+    # (test/test_sam3_exemplar_gt_regression.py) cannot see this kind of
+    # per-page swap (new config finds a different, non-superset result
+    # than old on the same page). C6 (unstarted): paired per-page
+    # comparison across all 26 staged pages, yolo_conf held constant,
+    # before treating either value as decided.
+    tile_cols: int = 5
+    tile_rows: int = 5
+    tile_overlap_pct: float = 0.10
+    # Target px/tile for the adaptive grid. Defaults to tile_px (this
+    # detector's own native-resolution ceiling), NOT YoloObjectDetector-
+    # Config.tile_target_px (1200) -- using YOLO's own grid size would
+    # downscale tiles below SAM3's measured native-resolution requirement.
+    tile_target_px: int = 1008
+
+    # NMS IoU for de-duplicating SAM3's own boxes across overlapping
+    # seed tiles (multiple seeds can rediscover the same instance).
+    dedup_iou: float = 0.6
+
+    # IoU above which a SAM3 box is considered "already found by the
+    # seed detector" and dropped rather than double-counted.
+    seed_overlap_iou: float = 0.5
+
+    # UPDATE (2026-08-16, Audit #16 P1/P2): fixing _adaptive_grid's
+    # round() -> ceil() undershoot (round(4500/1008)=4 cols -> 1238px
+    # tiles, non-native res) restored real recall on ROCKAWAY p001, but
+    # the exact 1->4 count is NOT attributable to this fix alone -- it
+    # sits downstream of the same-day systematic-grid rewrite too, and
+    # the two were never measured apart (see detector module docstring).
+    # It also made the pre-existing false-positive cascade WORSE, not
+    # better (Lake Shore p000: 40 -> 63 additions) -- finer resolution
+    # resolves the confusable MEP symbol better too, it does not
+    # distinguish it from a real door on its own.
+    #
+    # 5th guardrail, same all-or-nothing shape as the existing
+    # over_segmentation/flood_swallowed_seed/collapse/label_scale_noop
+    # family: compare median(addition bbox area) vs median(door seed
+    # bbox area) for the page; if the ratio falls below this threshold,
+    # discard ALL additions for that page. Calibrated on the P0-fixed,
+    # PRE-P9 grid (tile_cols/tile_rows=4): ROCKAWAY p001 (4 real
+    # additions) ratio=0.774; Lake Shore p000 (63 cascade additions)
+    # ratio=0.376 -- clean separation, 0.5 sits in the gap.
+    #
+    # STALE SINCE P9 (2026-08-18, same day tile_cols/tile_rows bumped
+    # 4->5): neither page above has been re-measured at the shipped
+    # cap, and C2 already found this same cap change altering which
+    # pages the cascade appears on and how completely (Lake Shore
+    # Electrical p002: 7->12 additions, tile_cols docstring). This
+    # threshold's separation evidence describes a grid the code no
+    # longer runs. Re-derive together with C6 (grid cap decision), not
+    # before it -- recalibrating against a cap that may itself revert
+    # would be wasted work.
+    min_seed_area_ratio: float = 0.5
 
 
 @dataclass
@@ -901,6 +1356,12 @@ class PipelineConfig:
     eval: EvalConfig = field(default_factory=EvalConfig)
     yolo_objects: YoloObjectDetectorConfig = field(
         default_factory=YoloObjectDetectorConfig
+    )
+    sam3_exemplar: Sam3ExemplarDetectorConfig = field(
+        default_factory=Sam3ExemplarDetectorConfig
+    )
+    cubicasa_rooms: CubicasaRoomDetectorConfig = field(
+        default_factory=CubicasaRoomDetectorConfig
     )
 
     # Pipeline options
@@ -926,6 +1387,36 @@ class PipelineConfig:
     # use_windows; flipping this on is the only way pipeline.py's
     # execution path changes at all (T-I regression guard).
     use_yolo_objects: bool = False
+
+    # Tech-eval plan P2/P3: tiled SAM3 box-exemplar door detector
+    # (sam3_exemplar config above), seeded by use_yolo_objects's own
+    # detections -- has no effect unless use_yolo_objects is also True
+    # (no seed source otherwise). Default False, same off-by-default
+    # precedent as use_windows/use_yolo_objects: two-dataset validation
+    # (P0/P1) beat the YOLO-alone baseline on both P and R, but only at
+    # the scale of that validation (test_pcs 10 img, FloorPlanCAD 40
+    # img) -- ship default-off, flip only on an explicit go-ahead per
+    # the plan's P3 guarded-rollout step.
+    use_sam3_exemplar: bool = False
+
+    # CubicasaRoomDetectorConfig above. Currently READ BY NOTHING in
+    # pipeline.py -- its one caller (Step 4d.5, CNN room corroboration) was
+    # removed after evidence found no discriminative value (see that
+    # config's docstring). Kept as a placeholder for a future consumer of
+    # CubiCasa5KDetector.detect_rooms() so that consumer can reuse this
+    # same off-by-default flag rather than adding a new one; flipping it
+    # on today is a no-op.
+    use_cubicasa_rooms: bool = False
+
+    # BA3 (2026-08-03): drop objectDetections tagged "window" whose bbox
+    # fails WindowEvidenceConfig's elongation predicate (window_evidence.
+    # is_window_shaped) -- catches door-swing symbols the detector
+    # mislabels window (near-square boxes; real windows, portrait or
+    # landscape, are elongated). Verified on 10 pixel-confirmed real
+    # ROCKAWAY boxes (10/10) + test_pcs/kaggle GT (both precision up, at
+    # most 1 TP lost per set, zero on ROCKAWAY). Default False -- same
+    # off-by-default precedent as use_windows/use_yolo_objects.
+    use_window_elongation_filter: bool = False
 
     # Minimum rooms required to mark an image sft_ready=True.
     # Default 1: any image with ≥1 valid room is included.

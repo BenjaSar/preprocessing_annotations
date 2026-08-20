@@ -20,12 +20,31 @@ Detector tiers (--tier, default cubicasa -- unchanged prior behavior):
   tiled path (R2) instead of full-image. Decisive same-image test found
   full-page downscale (not domain gap) as the dominant recall killer;
   this tier measures the real effect on full GT sets, not one image.
+* sam3_exemplar_tiled -- seeds the PRODUCTION Sam3ExemplarDetector
+  (detection/sam3_exemplar_detector.py, P5) with yolo_finetuned_tiled's
+  own high-confidence door detections, union-merges the result back
+  with the seeds. Door only -- the validating spike found window seed
+  supply near-empty and no recall gain there. Native-resolution tiling
+  is required, not optional: a full-page resize puts a ~44px door under
+  one 14px ViT patch token (imgsz 644 -> 0.45 tokens, measured max
+  confidence .32); a 1008px native tile centered on each seed puts it
+  at ~3 tokens (measured max confidence .898 on the single-image check
+  that motivated this tier).
+  Numbers cited for this tier have moved three times (P6 withdrawal,
+  P9 grid fix, P13 dedup fix) -- do not restate any of them here, they
+  go stale fast and this file has done that twice already. See
+  test/test_sam3_exemplar_gt_regression.py for the current pinned
+  numbers and the full repin history, and Sam3ExemplarDetectorConfig's
+  docstring for the incident writeup and the open real-page question
+  (C2/C6: the P13 GT win is measured at yolo_conf=0.5, is a no-op at
+  production's actual 0.75 default, and P9's tile_cols/tile_rows bump
+  that GT numbers credit was found losing real doors on real pages --
+  unresolved as of 2026-08-18).
 
 Read-only: no production code path is touched.
 """
 
 import argparse
-import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
@@ -35,15 +54,18 @@ from preprocessing_annotations.config import (
     EvalConfig,
     FloorplancadEvalConfig,
     KaggleFloorplanEvalConfig,
+    Sam3ExemplarDetectorConfig,
     VLMConfig,
     YOLO_PRETRAINED_CHECKPOINT,
     YoloObjectDetectorConfig,
     _detect_device,
 )
-from preprocessing_annotations.bbox.bbox_metrics import BBox
+from preprocessing_annotations.bbox.bbox_metrics import BBox, iou
 from preprocessing_annotations.detection.cubicasa5k_detector import CubiCasa5KDetector
 from preprocessing_annotations.detection.door_detector import DoorDetection, DoorDetector
+from preprocessing_annotations.detection.sam3_exemplar_detector import Sam3ExemplarDetector
 from floorplancad_gt import ensure_images, load_floorplancad_ground_truth
+from report_io import emit_report
 from gt_evaluator import (
     Detection,
     GTImage,
@@ -78,6 +100,7 @@ _TIER_VLM = "vlm"
 _TIER_YOLO_PRETRAINED = "yolo_pretrained"
 _TIER_YOLO_FINETUNED = "yolo_finetuned"
 _TIER_YOLO_FINETUNED_TILED = "yolo_finetuned_tiled"
+_TIER_SAM3_EXEMPLAR_TILED = "sam3_exemplar_tiled"
 DEFAULT_TIER = _TIER_CUBICASA
 
 # T-S1 baseline checkpoint (YOLO_FINETUNING_ASSESSMENT.md Phase 3): stock
@@ -318,12 +341,100 @@ def build_yolo_finetuned_tiled_predict_fn(args: argparse.Namespace) -> PredictFn
     return predict
 
 
+def build_sam3_exemplar_tiled_predict_fn(args: argparse.Namespace) -> PredictFn:
+    """Seed the PRODUCTION Sam3ExemplarDetector (detection/sam3_exemplar_
+    detector.py) with yolo_finetuned_tiled's own door detections, union-
+    merge the result back with the seeds.
+
+    P5 (audit finding A4): this tier used to carry its OWN duplicate
+    implementation -- seed-centred crops, no scale-consistency gate --
+    that diverged silently from production after the P0 (native-res
+    ceil() tiling) and P2 (scale-consistency gate, min_seed_area_ratio)
+    fixes landed in Sam3ExemplarDetector. Running that duplicate today
+    would re-measure an algorithm production no longer runs and report
+    "no change" on both fixes. Deleted; this tier now calls the same
+    class pipeline.py's _detect_object_mappings calls, so a dataset
+    score here is a score of what ships, not a fork of it.
+
+    Door only: keep_categories restricts the seed detector to door
+    (Sam3ExemplarDetector.detect_additional also filters to door
+    internally -- redundant intentionally, matches production's own
+    double-filter, not a new constraint added here).
+
+    Two distinct confidence tiers, not one -- ``--seed-conf`` (0.75)
+    ONLY gates which detections are handed to SAM3 as exemplar boxes
+    (Sam3ExemplarDetectorConfig.seed_confidence_threshold). The seed
+    detector itself runs at its own baseline threshold (unchanged
+    default, matching yolo_finetuned_tiled with no --yolo-conf override)
+    so its FULL detection set forms the union's YOLO half -- collapsing
+    both into one threshold was tried and measured wrong (P0/P1,
+    pre-dates this file's P5 rewrite): it silently reproduces "SAM3
+    seeded on the high-conf subset, unioned with only that subset"
+    instead of "seeded on the subset, unioned with every YOLO detection".
+    """
+    seed_config = YoloObjectDetectorConfig(
+        use_tiling=True, keep_categories=(_CATEGORY_DOOR,)
+    )
+    if args.yolo_checkpoint:
+        seed_config.checkpoint_path = args.yolo_checkpoint
+    # CD0 override rule (matches yolo_finetuned_tiled) -- explicit, not
+    # inherited: YoloObjectDetectorConfig.confidence_threshold's class
+    # default has since moved to 0.75 (config.py, "explicit instruction
+    # 2026-08-09"; that docstring itself measures F1 falling on both
+    # door and window at 0.75 and says to revert). The prior (now
+    # deleted) duplicate's union result was measured at 0.5 -- pin it
+    # explicitly so this tier's baseline half doesn't silently drift
+    # with that default in either direction.
+    seed_config.confidence_threshold = (
+        args.yolo_conf if args.yolo_conf is not None else 0.5
+    )
+    seed_detector = YoloObjectDetector(config=seed_config)
+
+    exemplar_config = Sam3ExemplarDetectorConfig(
+        seed_confidence_threshold=args.seed_conf,
+        sam3_confidence_threshold=args.sam3_conf,
+        tile_px=args.sam3_tile_px,
+        tile_target_px=args.sam3_tile_px,
+    )
+    exemplar_detector = Sam3ExemplarDetector(config=exemplar_config)
+
+    def _to_bbox(xyxy: Tuple[float, float, float, float]) -> BBox:
+        return BBox(*xyxy)
+
+    def predict(image_path: Path) -> List[Detection]:
+        all_doors = [
+            d
+            for d in seed_detector.detect_objects_tiled(image_path)
+            if d.metadata.get("type") == _CATEGORY_DOOR
+        ]
+        baseline_dets = [
+            Detection(
+                bbox=_to_bbox(d.bbox), category=_CATEGORY_DOOR, confidence=d.confidence
+            )
+            for d in all_doors
+        ]
+        if not all_doors:
+            return baseline_dets
+
+        additions = exemplar_detector.detect_additional(image_path, all_doors)
+        sam3_dets = [
+            Detection(
+                bbox=_to_bbox(a.bbox), category=_CATEGORY_DOOR, confidence=a.confidence
+            )
+            for a in additions
+        ]
+        return sorted(baseline_dets + sam3_dets, key=lambda d: d.confidence, reverse=True)
+
+    return predict
+
+
 TIER_BUILDERS: Dict[str, Callable[[argparse.Namespace], PredictFn]] = {
     _TIER_CUBICASA: build_cubicasa_predict_fn,
     _TIER_VLM: build_vlm_predict_fn,
     _TIER_YOLO_PRETRAINED: build_yolo_pretrained_predict_fn,
     _TIER_YOLO_FINETUNED: build_yolo_finetuned_predict_fn,
     _TIER_YOLO_FINETUNED_TILED: build_yolo_finetuned_tiled_predict_fn,
+    _TIER_SAM3_EXEMPLAR_TILED: build_sam3_exemplar_tiled_predict_fn,
 }
 
 
@@ -337,7 +448,8 @@ def _filter_report(
 
 
 def _run_source(
-    source: GtSource, predict_fn: PredictFn, with_confusion: bool = False
+    source: GtSource, predict_fn: PredictFn, with_confusion: bool = False,
+    report_categories: Tuple[str, ...] = _REPORT_CATEGORIES,
 ) -> Dict[str, Any]:
     """Score one GT source and return its door/window report.
 
@@ -349,6 +461,13 @@ def _run_source(
     confusion, so "missed" and "mislabeled" are indistinguishable there.
     Off by default -- the existing report shape is what every recorded
     baseline was measured against.
+
+    ``report_categories`` is an OUTPUT filter only -- score_against_gt_images
+    (gt_evaluator.py) scores every category present in GT/predictions
+    regardless of this argument; changing it can only reveal categories
+    already being detected/scored, never alter detection behavior. Defaults
+    to the module constant so every existing call site and recorded
+    baseline is byte-identical unless a caller opts in.
     """
     confusion: Optional[Dict[str, Dict[str, int]]] = (
         {} if with_confusion else None
@@ -360,7 +479,7 @@ def _run_source(
         "dataset": source.name,
         "images_evaluated": len(source.gt_images),
         "iou_threshold": source.iou_threshold,
-        "vs_gt": _filter_report(scores, _REPORT_CATEGORIES),
+        "vs_gt": _filter_report(scores, report_categories),
     }
     if confusion is not None:
         report["cross_category"] = confusion
@@ -372,27 +491,6 @@ def _selected_datasets(choice: str) -> List[str]:
     if choice == _ALL_DATASETS:
         return list(_GT_SOURCE_BUILDERS)
     return [choice]
-
-
-def _emit(results: List[Dict[str, Any]], output_path: Optional[Path]) -> None:
-    """Print the report, and additionally persist it when a path is given.
-
-    AF3: this CLI printed to stdout only, so every measurement it ever
-    produced survived just as long as the terminal scrollback -- two of
-    this project's recorded baselines had to be recovered from a session
-    transcript, and one config docstring drifted stale because the newer
-    numbers were never written anywhere. Persisting is opt-in: with no
-    --output the stdout text is byte-identical to before.
-
-    One serialization feeds both sinks, so a persisted file can never
-    disagree with what was printed -- including the trailing newline
-    print() adds, so the file diffs clean against captured stdout.
-    """
-    payload = json.dumps(results, indent=2) + "\n"
-    print(payload, end="")
-    if output_path is not None:
-        output_path.write_text(payload)
-        logger.info("wrote report to %s", output_path)
 
 
 def _parse_args() -> argparse.Namespace:
@@ -410,6 +508,15 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--kaggle-split", default="test")
     parser.add_argument("--sample-size", type=int, default=None)
     parser.add_argument(
+        "--categories", nargs="+", default=None,
+        help="Override which categories appear in the report (default: "
+             "door,window -- every recorded baseline). OUTPUT filter only: "
+             "score_against_gt_images already scores every category "
+             "present in GT/predictions regardless of this flag, so this "
+             "can only reveal existing scoring, never change detection. "
+             "e.g. --categories door window toilet sink",
+    )
+    parser.add_argument(
         "--yolo-checkpoint", default=None,
         help="Path to a yolo_train.py checkpoint, required for "
              "--tier yolo_finetuned",
@@ -421,6 +528,29 @@ def _parse_args() -> argparse.Namespace:
              "Ignored by the yolo_pretrained/yolo_finetuned tiers, which "
              "call the decoder without a threshold so their recorded "
              "baselines stay fixed",
+    )
+    parser.add_argument(
+        "--seed-conf", type=float, default=0.75,
+        help="Confidence floor for the YOLO seed detections fed to "
+             "--tier sam3_exemplar_tiled as exemplar boxes (default "
+             "0.75 -- the threshold the validating spike used)",
+    )
+    parser.add_argument(
+        "--sam3-conf", type=float, default=0.70,
+        help="SAM3 concept-match confidence floor for --tier "
+             "sam3_exemplar_tiled (default 0.70 -- the only threshold "
+             "measured to beat yolo_finetuned_tiled on BOTH precision "
+             "and recall on test_pcs; fit on one dataset, validate "
+             "independently on --dataset floorplancad before trusting it)",
+    )
+    parser.add_argument(
+        "--sam3-tile-px", type=int, default=1008,
+        help="Native-resolution tile size (px) centered on each seed "
+             "box for --tier sam3_exemplar_tiled -- must stay near "
+             "SAM3's own pretrain resolution (1008, ViT patch=14) or "
+             "door-sized symbols fall below one patch token and "
+             "confidence collapses (measured: .32 at imgsz 1288 full-page "
+             "vs .898 at 1008 native tile, same model/image/exemplar)",
     )
     parser.add_argument(
         "--confusion", action="store_true",
@@ -439,18 +569,24 @@ def main() -> None:
     """Score the selected detector tier against selected GT sources."""
     logging.basicConfig(level=logging.INFO)
     args = _parse_args()
-    if args.yolo_conf is not None and args.tier != _TIER_YOLO_FINETUNED_TILED:
+    if args.yolo_conf is not None and args.tier not in (
+        _TIER_YOLO_FINETUNED_TILED, _TIER_SAM3_EXEMPLAR_TILED,
+    ):
         logger.warning(
             "--yolo-conf ignored: tier %s applies no confidence floor; "
             "its numbers are NOT a measurement of that threshold",
             args.tier,
         )
+    report_categories = tuple(args.categories) if args.categories else _REPORT_CATEGORIES
     predict_fn = TIER_BUILDERS[args.tier](args)
     results = [
-        _run_source(_GT_SOURCE_BUILDERS[name](args), predict_fn, args.confusion)
+        _run_source(
+            _GT_SOURCE_BUILDERS[name](args), predict_fn, args.confusion,
+            report_categories=report_categories,
+        )
         for name in _selected_datasets(args.dataset)
     ]
-    _emit(results, args.output)
+    emit_report(results, args.output)
 
 
 if __name__ == "__main__":
