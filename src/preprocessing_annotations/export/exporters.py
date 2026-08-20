@@ -431,6 +431,48 @@ class ReviewPrioritizer:
 # COCO JSON Exporter
 # ---------------------------------------------------------------------------
 
+def _flatten_polygon(points) -> Optional[List[float]]:
+    """Flatten a [[x, y], ...] polygon to COCO's [x1, y1, x2, y2, ...] form.
+
+    Returns None when `points` is empty or not a usable polygon (< 3 vertices),
+    which is the caller's signal to fall back to a bbox rectangle.
+    """
+    if not points:
+        return None
+    try:
+        flat = [float(v) for point in points for v in point]
+    except (TypeError, ValueError):
+        return None
+    if len(flat) < 6 or len(flat) % 2 != 0:  # < 3 vertices
+        return None
+    return flat
+
+
+def _polygon_area(flat: List[float]) -> float:
+    """Shoelace area of a flat [x1, y1, x2, y2, ...] polygon.
+
+    Plain-Python on purpose: this module serializes annotations and imports
+    nothing heavier than json/pathlib. cv2.contourArea would be equivalent but
+    would pull OpenCV into the export layer for one arithmetic loop.
+    """
+    n = len(flat) // 2
+    total = 0.0
+    for i in range(n):
+        x1, y1 = flat[2 * i], flat[2 * i + 1]
+        j = (i + 1) % n
+        x2, y2 = flat[2 * j], flat[2 * j + 1]
+        total += x1 * y2 - x2 * y1
+    return abs(total) / 2.0
+
+
+def _polygon_bounds(flat: List[float]) -> List[float]:
+    """Return [x, y, w, h] of a flat polygon's axis-aligned bounding box."""
+    xs = flat[0::2]
+    ys = flat[1::2]
+    x, y = min(xs), min(ys)
+    return [x, y, max(xs) - x, max(ys) - y]
+
+
 class COCOExporter:
     """
     Export SFT-ready annotations in COCO object detection format.
@@ -651,19 +693,31 @@ class COCOExporter:
                 raw_type = room.get("type") or room.get("category") or "other"
                 cat_id = cat_id_map.get(raw_type, cat_id_map.get("other", 1))
 
-                rect_polygon = [
-                    bx,      by,
-                    bx + bw, by,
-                    bx + bw, by + bh,
-                    bx,      by + bh,
-                ]
-                area = bw * bh
+                # Prefer the real room outline when SAM produced one
+                # (room["segmentation"], written by
+                # sam_segmenter.refine_annotations as page-pixel [[x, y], ...]).
+                # Falls back to a bbox rectangle for rooms that took a guardrail
+                # path (over_segmentation / flood / collapse / error), the
+                # cc_split path, or any run with use_sam off -- so output shape
+                # is unchanged whenever no polygon exists.
+                polygon = _flatten_polygon(room.get("segmentation"))
+                if polygon is not None and _polygon_area(polygon) > 0:
+                    segmentation = [polygon]
+                    area = _polygon_area(polygon)
+                else:
+                    segmentation = [[
+                        bx,      by,
+                        bx + bw, by,
+                        bx + bw, by + bh,
+                        bx,      by + bh,
+                    ]]
+                    area = bw * bh
 
                 coco["annotations"].append({
                     "id": ann_id,
                     "image_id": img_id,
                     "category_id": cat_id,
-                    "segmentation": [rect_polygon],
+                    "segmentation": segmentation,
                     "bbox": [bx, by, bw, bh],
                     "area": area,
                     "iscrowd": 0,
@@ -716,8 +770,28 @@ class COCOExporter:
                         integrity_ok = False
                         break
 
+            # Polygon/bbox agreement: a real outline must be bounded by the
+            # bbox it ships with (same ±1px tolerance as above). Catches a
+            # stale polygon surviving next to a fresh bbox -- the exact
+            # mismatch refine_annotations now strips up front.
+            seg = coco_ann.get("segmentation") or []
+            if seg and len(seg[0]) > 8:  # 8 = the 4-vertex rect fallback
+                poly_bounds = _polygon_bounds(seg[0])
+                if not all(
+                    abs(poly_bounds[i] - coco_bbox[i]) <= 1.0 for i in range(4)
+                ):
+                    logger.error(
+                        f"Fix5 POLYGON INTEGRITY FAILURE: '{rname}' in "
+                        f"{img_file}: polygon bounds={poly_bounds} != "
+                        f"bbox={coco_bbox}"
+                    )
+                    integrity_ok = False
+
         if integrity_ok:
-            logger.info("Fix5: bbox integrity check PASSED — all bboxes match source ±1px")
+            logger.info(
+                "Fix5: bbox integrity check PASSED — all bboxes match source "
+                "±1px; all polygons bounded by their bbox ±1px"
+            )
 
         with open(output_file, "w") as f:
             json.dump(coco, f, indent=2)

@@ -23,12 +23,16 @@ try:
         get_extended_type, strip_window_suffix,
     )
     from .abbreviations import ABBREVIATION_MAP as _ABBREVIATION_MAP
+    from ..detection.window_evidence import is_window_shaped
+    from ..config import WindowEvidenceConfig
 except ImportError:
     from taxonomy import (
         MANDATORY_CLASSES, VALID_TYPES, normalize_to_mandatory,
         get_extended_type, strip_window_suffix,
     )
     from abbreviations import ABBREVIATION_MAP as _ABBREVIATION_MAP
+    from detection.window_evidence import is_window_shaped
+    from config import WindowEvidenceConfig
 
 
 class ImageResizer:
@@ -947,6 +951,16 @@ def _adopt_ocr_geometry(target: Dict, ocr_room: Dict, ocr_name: str,
     target["sam_expanded"] = ocr_room.get("sam_expanded")
     target["sam_skip_reason"] = ocr_room.get("sam_skip_reason")
     target["sam_confidence"] = ocr_room.get("sam_confidence")
+    # Same provenance rule as the sam_* fields above: the polygon is derived
+    # from ocr_room's bbox (SAM segments the OCR label, not the VLM box), so
+    # it must travel with the geometry. Missing this silently demoted every
+    # vlm_ocr_merged room to the bbox-rectangle export fallback even when SAM
+    # succeeded -- found by comparing a real pipeline run's output against an
+    # isolated refine_annotations() call on the same image (T2, 2026-08-06).
+    if "segmentation" in ocr_room:
+        target["segmentation"] = ocr_room["segmentation"]
+    else:
+        target.pop("segmentation", None)
 
 
 def _merge_vlm_and_ocr(vlm_rooms: List[Dict], ocr_rooms: List[Dict]) -> List[Dict]:
@@ -1249,6 +1263,7 @@ def prepare_sft_annotation(
     annotation: Dict,
     min_rooms_for_sft: int = 1,
     image_dir: Optional[Path] = None,
+    use_window_elongation_filter: bool = False,
 ) -> Dict:
     """
     Convert annotation to SFT-ready format.
@@ -1260,6 +1275,12 @@ def prepare_sft_annotation(
         image_dir: Directory holding the source page image (named by
             annotation["image_file"]). When provided, FIX-5 drops rooms placed
             over non-drawing regions. When None, FIX-5 is skipped.
+        use_window_elongation_filter: BA3 (2026-08-03). When True, drops
+            objectDetections tagged "window" whose bbox fails the elongation
+            predicate (window_evidence.is_window_shaped) -- catches door-swing
+            symbols mislabeled window (near-square boxes; real windows are
+            elongated, portrait or landscape). Default False: off, same
+            precedent as every other detector-behavior flag in this pipeline.
 
     CRITICAL FIXES:
     - Merges VLM-detected rooms with OCR-detected compound names
@@ -1389,6 +1410,39 @@ def prepare_sft_annotation(
             drop_attribution["bom_zone_objects"] = n_obj_excl
             logger.info(
                 f"FIX-9: dropped {n_obj_excl} objectDetection(s) in BOM/title-block zone"
+            )
+        annotation["objectDetections"] = object_detections
+
+    # Step 0-pre: FIX-9b — BA3 (2026-08-03): drop "window" objectDetections
+    # whose bbox is not elongated (window_evidence.is_window_shaped). Root
+    # cause verified this session: the YOLO detector mislabels door-swing
+    # symbols (near-square boxes) as "window" -- confirmed on 10 pixel-
+    # inspected real production boxes (10/10 correctly separated) and on
+    # test_pcs/kaggle GT (precision up on both, ≤1 real window TP lost per
+    # set). Sibling of FIX-9, not a merge: independent gate
+    # (use_window_elongation_filter), independent drop_attribution key, and
+    # runs regardless of exclusion_zones -- a page with no BOM zones at all
+    # can still carry mislabeled windows.
+    #
+    # Bbox-only predicate (no image read) -- cheap, no I/O added to this path.
+    object_detections = annotation.get("objectDetections", [])
+    if use_window_elongation_filter and object_detections:
+        window_evidence_config = WindowEvidenceConfig()
+        pre_shape = len(object_detections)
+        object_detections = [
+            d for d in object_detections
+            if d.get("category") != "window"
+            # `is not False`, not `is True`: is_window_shaped returns None for
+            # a degenerate bbox (zero width/height) -- fail open, keep it,
+            # rather than drop on a box we can't actually evaluate.
+            or is_window_shaped(d.get("bbox", []), window_evidence_config) is not False
+        ]
+        n_shape_excl = pre_shape - len(object_detections)
+        if n_shape_excl:
+            drop_attribution["window_shape_mismatch"] = n_shape_excl
+            logger.info(
+                f"FIX-9b: dropped {n_shape_excl} objectDetection(s) tagged "
+                f"window with a non-elongated (door-like) bbox"
             )
         annotation["objectDetections"] = object_detections
 

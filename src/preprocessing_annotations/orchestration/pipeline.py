@@ -26,6 +26,7 @@ from ..vlm.vlm_annotator import VLMAnnotator
 from ..vlm.semantic_reconciler import SemanticReconciler
 from ..vlm.vlm_backend import VLMFactory
 from ..detection.sam_segmenter import RoomSegmenter
+from ..detection.cubicasa5k_detector import CubiCasa5KDetector
 from ..bbox.bbox_visualizer import BboxVisualizer
 from ..export.exporters import LabelStudioExporter, ReviewPrioritizer, COCOExporter, CoverageReporter
 from ..automation import (
@@ -40,10 +41,11 @@ from ..automation.abbreviation_ocr_recovery import (
     AbbreviationOCRRecovery, ResidentialAbbreviationRecovery
 )
 from ..detection.window_detector import (
-    WindowDetector, RoomWindowMapping, apply_window_suffixes,
-    map_detections_to_rooms, merge_object_mappings,
+    WindowDetector, WindowDetection, WindowDetectionTier, RoomWindowMapping,
+    apply_window_suffixes, map_detections_to_rooms, merge_object_mappings,
 )
 from ..detection.yolo_detector import YoloObjectDetector
+from ..detection.sam3_exemplar_detector import Sam3ExemplarDetector
 from .run_lock import single_instance
 
 logger = logging.getLogger(__name__)
@@ -118,6 +120,7 @@ class AnnotationPipeline:
         self._ocr_extractor = None
         self._vlm_annotator = None
         self._sam_segmenter = None
+        self._cubicasa_room_detector = None
         self._exporter = None
         self._prioritizer = None
         self._label_normalizer = None
@@ -125,6 +128,7 @@ class AnnotationPipeline:
         self._region_extractor = None
         self._window_detector = None
         self._yolo_object_detector = None
+        self._sam3_exemplar_detector = None
         self._bbox_visualizer = None
 
         # Initialize SFT annotation builder (used for mandatory schema output)
@@ -222,6 +226,15 @@ class AnnotationPipeline:
         return self._sam_segmenter
 
     @property
+    def cubicasa_room_detector(self) -> CubiCasa5KDetector:
+        if self._cubicasa_room_detector is None:
+            cfg = self.config.cubicasa_rooms
+            self._cubicasa_room_detector = CubiCasa5KDetector(
+                model_path=Path(cfg.checkpoint_path), device=cfg.device
+            )
+        return self._cubicasa_room_detector
+
+    @property
     def exporter(self) -> LabelStudioExporter:
         if self._exporter is None:
             self._exporter = LabelStudioExporter(self.config.export)
@@ -264,6 +277,14 @@ class AnnotationPipeline:
                 config=self.config.yolo_objects
             )
         return self._yolo_object_detector
+
+    @property
+    def sam3_exemplar_detector(self) -> Sam3ExemplarDetector:
+        if self._sam3_exemplar_detector is None:
+            self._sam3_exemplar_detector = Sam3ExemplarDetector(
+                config=self.config.sam3_exemplar
+            )
+        return self._sam3_exemplar_detector
 
     @property
     def bbox_visualizer(self) -> BboxVisualizer:
@@ -664,14 +685,7 @@ class AnnotationPipeline:
                         result.rooms, ocr_list, radius_px=300
                     )
                     if self.config.use_semantic_reconciliation and ocr_list:
-                        # Convert OCR RoomCandidate objects to dicts for reconciler
-                        ocr_dicts = []
-                        for room in ocr_list:
-                            ocr_dicts.append({
-                                "text": room.room_name,
-                                "bbox": room.bbox,
-                                "confidence": room.confidence
-                            })
+                        ocr_dicts = self._ocr_candidates_to_reconciler_dicts(ocr_list)
                         result = self._apply_semantic_reconciliation(result, ocr_dicts)
                     
                     stats["images_annotated"] += 1
@@ -780,6 +794,8 @@ class AnnotationPipeline:
                     logger.error(
                         f"  {img_path.name}: Failed to save OCR annotation - {e}"
                     )
+
+        self._release_vlm_before_sam()
 
         # Step 3.5: SAM label→room expansion (optional, pre-filter).
         # Must run BEFORE Step 4 geometric filter so SAM-expanded room-boundary
@@ -891,6 +907,7 @@ class AnnotationPipeline:
                     annotation,
                     min_rooms_for_sft=self.config.min_rooms_for_sft,
                     image_dir=images_dir,
+                    use_window_elongation_filter=self.config.use_window_elongation_filter,
                 )
                 filtered_room_count = len(annotation.get("rooms", []))
                 _sft_outcome = "sft_ready" if annotation.get("sft_ready") else "filtered"
@@ -1020,6 +1037,46 @@ class AnnotationPipeline:
                         detection_model=room.get("detection_model", "pipeline"),
                     )
                     new_rr.append(self.sft_builder.to_dict(sft_room))
+
+                # G-A fix (2026-08-11): the rebuild above discards whatever
+                # door/window/fixture evidence _apply_object_attributes had
+                # already written onto the PRE-filter roomsRecognized (at
+                # coordinates.attributes -- has_door/has_toilet/has_bathtub/
+                # has_sink; the window-only fields on SFTRoom.attributes get
+                # reset to defaults too, since build_room() above is never
+                # given a window_mapping). Verified on real output
+                # (sprint1_verify46): 0/786 processed rooms carried any
+                # evidence despite 746/2593 (28.8%) carrying real evidence
+                # pre-rebuild -- total loss, not partial.
+                #
+                # Cannot reattach the OLD evidence by matching old<->new
+                # room entries: verified rooms[] and roomsRecognized[] are
+                # NEVER the same length even before this filtering step (not
+                # a positional/order-preserving correspondence at all), so
+                # no safe join key exists between them. Recomputing from the
+                # persisted objectDetections (which DOES survive filtering
+                # untouched) against the FINAL surviving room geometry is
+                # correct by construction instead of a guess -- same
+                # map_detections_to_rooms + _apply_object_attributes calls
+                # Step 3 already uses, applied fresh to the filtered set.
+                reconstructed_detections = []
+                for det in annotation.get("objectDetections", []):
+                    try:
+                        tier = WindowDetectionTier(det.get("source_tier", "none"))
+                    except ValueError:
+                        tier = WindowDetectionTier.NONE
+                    reconstructed_detections.append(WindowDetection(
+                        bbox=tuple(det["bbox"]),
+                        confidence=det.get("confidence", 1.0),
+                        source_tier=tier,
+                        metadata={"type": det.get("category")},
+                    ))
+                rooms_for_remapping = [
+                    {"id": idx, "bbox": r["coordinates"]["bbox"]}
+                    for idx, r in enumerate(new_rr)
+                ]
+                new_mappings = map_detections_to_rooms(reconstructed_detections, rooms_for_remapping)
+                new_rr = self._apply_object_attributes(new_rr, new_mappings)
                 annotation["roomsRecognized"] = new_rr
 
                 if not is_sft_ready and room_count == 0 and localization_failed:
@@ -1530,6 +1587,57 @@ class AnnotationPipeline:
             electrical_counts={}
         )
 
+    def _release_vlm_before_sam(self) -> None:
+        """Free the VLM's GPU memory before Step 3.5 (SAM) runs.
+
+        Confirmed gap (sprint1_verify47 audit, 2026-08-19): Step 3 (VLM)
+        and Step 3.5 (SAM) run back-to-back in one process with the VLM
+        never freed -- an 8B model left resident starved SAM's
+        allocations, measured as 3,093 "CUDA out of memory" failures and
+        57/57 pages logging "SAM expanded 0 of N" (SAM's expansion never
+        once succeeded in that run).
+
+        Guarded on self._vlm_annotator (the backing field), not
+        self.vlm_annotator (the lazy-create property) -- reading the
+        property here would construct a backend just to no-op release()
+        it. Safe regardless of use_windows: every VLMBackend.detect_*
+        call starts with self.initialize(), so a later stage needing the
+        VLM again reloads automatically. Both VLMAnnotator (Claude) and
+        every VLMBackend subclass implement release() (no-op for
+        VLMAnnotator, which holds no local GPU weights), so this needs
+        no type check.
+        """
+        if self.config.use_sam and self._vlm_annotator is not None:
+            self._vlm_annotator.release()
+
+    @staticmethod
+    def _ocr_candidates_to_reconciler_dicts(ocr_list: List) -> List[dict]:
+        """Convert OCR RoomCandidate objects to the dict format
+        _apply_semantic_reconciliation/SemanticReconciler expect.
+
+        RoomCandidate.bbox is [x,y,w,h] (ocr_extractor.py's own contract);
+        SemanticReconciler's OCRText.bbox is documented [x1,y1,x2,y2] and
+        OCRText.centroid() computes (x1+x2)/2 -- passing xywh through
+        unconverted put every OCR text's centroid hundreds of px off (same-
+        shaped bug as the VLM-room side of _apply_semantic_reconciliation;
+        found together auditing sprint1_verify47, 2026-08-19). Real
+        example: SOCIAL SERVICE [1574,633,78,14] -> true centroid
+        (1613,640), buggy centroid (826,324) -- centroid landed outside
+        every real room polygon, so the label matched nothing.
+
+        Extracted to its own method (previously inline in run()'s loop)
+        so this conversion is unit-testable without a full pipeline run.
+        """
+        ocr_dicts = []
+        for room in ocr_list:
+            x, y, w, h = room.bbox
+            ocr_dicts.append({
+                "text": room.room_name,
+                "bbox": [x, y, x + w, y + h],
+                "confidence": room.confidence,
+            })
+        return ocr_dicts
+
     def _apply_semantic_reconciliation(self, result, ocr_results: List[dict]):
         """Apply semantic reconciliation to VLM result if enabled."""
         if not self.config.use_semantic_reconciliation:
@@ -1540,36 +1648,53 @@ class AnnotationPipeline:
         
         try:
             reconciler = SemanticReconciler(self.config.ocr)
-            
-            # Convert VLM rooms to dict format for reconciler
+
+            # Convert VLM rooms to dict format for reconciler. SemanticReconciler.
+            # reconcile() documents its "bbox" input as [x1,y1,x2,y2] and unpacks
+            # it that way (semantic_reconciler.py's _match_room_to_ocr path) --
+            # but RoomAnnotation.bbox is [x,y,w,h] (see _qwen_dicts_to_vlm_result's
+            # own comment above). Passing it through unconverted made the
+            # reconciler read a box's WIDTH as an absolute X2 coordinate and its
+            # HEIGHT as an absolute Y2 coordinate -- confirmed corrupting every
+            # semantically-reconciled room on a real run (sprint1_verify47 audit,
+            # 2026-08-19): all 35 VLM rooms on one page came out with one
+            # dimension in the thousands-of-px range, while the untouched
+            # ocr_rooms list on the same page stayed correctly small. Convert at
+            # the boundary instead of changing the reconciler's own contract --
+            # this is SemanticReconciler's only call site (verified), but its
+            # docstring's xyxy contract may be relied on by a future caller.
             vlm_rooms_dicts = []
             for room in result.rooms:
+                x, y, w, h = room.bbox
                 vlm_rooms_dicts.append({
                     "room_id": room.room_number,
                     "room_name": room.room_name,
                     "room_type": room.category,
-                    "bbox": room.bbox,
+                    "bbox": [x, y, x + w, y + h],
                     "confidence": 1.0,
                     "polygon": None
                 })
-            
+
             # Reconcile with OCR results
             enriched = reconciler.reconcile_with_config(
                 ocr_results, vlm_rooms_dicts, self.config
             )
-            
-            # Update result.rooms with enriched data
+
+            # Update result.rooms with enriched data. Reconciler returns
+            # [x1,y1,x2,y2] (SemanticReconciler._polygon_bounds) -- convert back
+            # to RoomAnnotation's [x,y,w,h] contract (same boundary fix as above).
             from ..vlm.vlm_annotator import RoomAnnotation
             new_rooms = []
             for enriched_room in enriched:
+                ex1, ey1, ex2, ey2 = enriched_room.get("bbox", [0, 0, 100, 100])
                 room = RoomAnnotation(
                     room_number=enriched_room.get("room_number", ""),
                     room_name=enriched_room.get("room_name", "Room"),
                     category=enriched_room.get("room_type", "other"),
-                    bbox=enriched_room.get("bbox", [0, 0, 100, 100])
+                    bbox=[ex1, ey1, ex2 - ex1, ey2 - ey1]
                 )
                 new_rooms.append(room)
-            
+
             result.rooms = new_rooms
             return result
         except Exception as e:
@@ -1934,6 +2059,35 @@ class AnnotationPipeline:
             # this call site always used the full-image path regardless
             # of use_tiling's value).
             yolo_detections = self.yolo_object_detector.detect_objects_tiled(img_path)
+
+            if self.config.use_sam3_exemplar:
+                # Tech-eval plan P2/P3: net-new door detections only,
+                # seeded by yolo_detections' own high-confidence output
+                # (see Sam3ExemplarDetectorConfig for the validated
+                # numbers). Additive to the same list that already
+                # flows through map_detections_to_rooms below -- no new
+                # merge path. P3: log seed/addition counts per page --
+                # the validating spike found some pages produce zero
+                # seeds (>=seed_confidence_threshold), which would
+                # otherwise no-op silently and look like coverage.
+                additional = self.sam3_exemplar_detector.detect_additional(
+                    img_path, yolo_detections
+                )
+                n_seeds = sum(
+                    1
+                    for d in yolo_detections
+                    if (d.metadata or {}).get("type") == "door"
+                    and d.confidence >= self.config.sam3_exemplar.seed_confidence_threshold
+                )
+                logger.info(
+                    "SAM3 exemplar: %d door seeds (conf>=%.2f) -> %d additional doors for %s",
+                    n_seeds,
+                    self.config.sam3_exemplar.seed_confidence_threshold,
+                    len(additional),
+                    img_path.name,
+                )
+                yolo_detections = yolo_detections + additional
+
             for detection in yolo_detections:
                 # Q3: full detection list (bbox+confidence) now persisted
                 # via _collect_object_detections/data["objectDetections"];
@@ -1979,6 +2133,33 @@ class AnnotationPipeline:
         return detections
 
     @staticmethod
+    def _evidence_bbox_area_frac(
+        room_bbox: Optional[List[float]],
+        intersecting_windows: List[WindowDetection],
+    ) -> Optional[float]:
+        """Bounding-box area of a room's own intersecting object
+        detections, as a fraction of the room's own bbox area.
+
+        G-B (tech-eval plan): a raw MEASUREMENT, not a flag or veto -- no
+        threshold for "too small" (implying an over-expanded/flooded
+        room) has been validated against anything yet. Ships as an
+        observable field on coordinates.attributes; using it to change a
+        room's bbox or confidence is a separate, gated decision pending
+        that validation. Returns None when the room has no evidence at
+        all (nothing to compute a fraction against) or no bbox.
+        """
+        if not intersecting_windows or not room_bbox or len(room_bbox) != 4:
+            return None
+        xs1 = [wd.bbox[0] for wd in intersecting_windows]
+        ys1 = [wd.bbox[1] for wd in intersecting_windows]
+        xs2 = [wd.bbox[2] for wd in intersecting_windows]
+        ys2 = [wd.bbox[3] for wd in intersecting_windows]
+        evidence_area = max(0.0, max(xs2) - min(xs1)) * max(0.0, max(ys2) - min(ys1))
+        rx1, ry1, rx2, ry2 = room_bbox
+        room_area = max(1.0, (rx2 - rx1) * (ry2 - ry1))
+        return evidence_area / room_area
+
+    @staticmethod
     def _apply_object_attributes(
         sft_rooms: List[Dict[str, Any]],
         mappings: List[RoomWindowMapping],
@@ -1988,6 +2169,14 @@ class AnnotationPipeline:
         into sft_rooms. Tag-only: every room is returned regardless of
         match, never accept/reject (T-I design decision, unchanged from
         the pre-T-I use_windows-only behavior).
+
+        G-B additions (tech-eval plan, confidence-boost + boundary signal):
+        evidence_count/evidence_score are a plain, unweighted tally of the
+        5 existing flags -- NOT blended into the room's own `confidence`
+        field. evidence_bbox_area_frac is the boundary-consistency
+        measurement (see _evidence_bbox_area_frac). Both are additive,
+        tag-only, same as every other field this method already writes --
+        no existing behavior changes, nothing here is read anywhere yet.
         """
         mapping_by_id = {m.room_id: m for m in mappings}
         updated = []
@@ -1996,6 +2185,11 @@ class AnnotationPipeline:
             if mapping:
                 coords = sft_room.get("coordinates", {})
                 attrs = coords.get("attributes", {}) if coords else {}
+                evidence_flags = (
+                    mapping.has_door, mapping.has_windows, mapping.has_toilet,
+                    mapping.has_bathtub, mapping.has_sink,
+                )
+                evidence_count = sum(1 for f in evidence_flags if f)
                 attrs.update({
                     "has_windows": mapping.has_windows,
                     "has_skylights": mapping.has_skylights,
@@ -2005,6 +2199,12 @@ class AnnotationPipeline:
                     "has_bathtub": mapping.has_bathtub,
                     "has_sink": mapping.has_sink,
                     "window_count": mapping.window_count,
+                    "evidence_count": evidence_count,
+                    "evidence_score": evidence_count / len(evidence_flags),
+                    "evidence_bbox_area_frac": AnnotationPipeline._evidence_bbox_area_frac(
+                        coords.get("bbox") if coords else None,
+                        mapping.intersecting_windows,
+                    ),
                 })
                 if coords:
                     coords["attributes"] = attrs
@@ -2037,6 +2237,7 @@ class AnnotationPipeline:
                 "use_sam": self.config.use_sam,
                 "use_windows": self.config.use_windows,
                 "use_yolo_objects": self.config.use_yolo_objects,
+                "use_sam3_exemplar": self.config.use_sam3_exemplar,
                 "use_semantic_reconciliation": self.config.use_semantic_reconciliation,
                 "min_rooms_for_sft": self.config.min_rooms_for_sft,
                 "use_tiling": self.config.use_tiling,
@@ -2228,6 +2429,18 @@ def verify_logging_handlers() -> bool:
     return False
 
 
+def _warn_if_sam3_exemplar_orphaned(config: PipelineConfig) -> None:
+    """use_sam3_exemplar has no seed source without use_yolo_objects --
+    warn rather than silently no-op (found while building this feature's
+    test coverage: the flag combination compiles and runs, produces zero
+    additions on every page, and looks like coverage without being any)."""
+    if config.use_sam3_exemplar and not config.use_yolo_objects:
+        logger.warning(
+            "--use-sam3-exemplar has no effect without --use-yolo-objects "
+            "(no seed source) -- this run will silently no-op the SAM3 stage"
+        )
+
+
 def main():
     """CLI entry point for the annotation pipeline."""
     parser = argparse.ArgumentParser(
@@ -2317,6 +2530,20 @@ Examples:
              "YoloObjectDetectorConfig.checkpoint_path. Default: off.",
     )
     parser.add_argument(
+        "--use-sam3-exemplar",
+        action="store_true",
+        help="Enable the tiled SAM3 box-exemplar door detector, seeded by "
+             "--use-yolo-objects' own high-confidence detections (no "
+             "effect unless --use-yolo-objects is also set). GT-measured "
+             "win over YOLO-alone (Sam3ExemplarDetectorConfig docstring) "
+             "holds at YOLO conf=0.5, NOT this codebase's actual default "
+             "(0.75) -- at 0.75 the fix behind that win is a no-op. Real "
+             "project pages (not GT) have also shown this feature losing "
+             "real doors under its current tile grid -- see that "
+             "docstring's CONTESTED note before enabling in production. "
+             "Tag-only, same as --use-yolo-objects. Default: off.",
+    )
+    parser.add_argument(
         "--high-detail",
         action="store_true",
         help="Use high-detail settings (300 DPI, more scales)",
@@ -2373,6 +2600,8 @@ Examples:
     config.use_sam = args.use_sam
     config.use_windows = args.use_windows
     config.use_yolo_objects = args.use_yolo_objects
+    config.use_sam3_exemplar = args.use_sam3_exemplar
+    _warn_if_sam3_exemplar_orphaned(config)
     config.min_rooms_for_sft = args.min_rooms
     if args.no_tiling:
         config.use_tiling = False

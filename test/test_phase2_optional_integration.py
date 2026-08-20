@@ -14,11 +14,11 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-# Add project root to path
-sys.path.insert(0, str(Path(__file__).parent))
+# Add the package dir (parent of test/) so `preprocessing_annotations` resolves.
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from window_detector import WindowDetector, RoomWindowMapping
-from cubicasa5k_detector import CubiCasa5KDetector
+from preprocessing_annotations.detection.window_detector import WindowDetector, RoomWindowMapping
+from preprocessing_annotations.detection.cubicasa5k_detector import CubiCasa5KDetector
 
 
 def test_cubicasa5k_model_loading():

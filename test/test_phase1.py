@@ -8,11 +8,11 @@ This demonstrates how to use the new PaddleOCR backend.
 import sys
 from pathlib import Path
 
-# Add project root to path
-sys.path.insert(0, str(Path(__file__).parent))
+# Add the package dir (parent of test/) so `preprocessing_annotations` resolves.
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from config import PipelineConfig, OCRConfig
-from ocr_extractor import MEPTextExtractor
+from preprocessing_annotations.config import PipelineConfig, OCRConfig
+from preprocessing_annotations.ingestion.ocr_extractor import MEPTextExtractor
 
 def main():
     """Test Phase 1 implementation."""

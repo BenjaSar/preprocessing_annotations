@@ -38,6 +38,7 @@ class WindowDetectionTier(Enum):
     CUBICASA5K = "cubicasa5k"
     VLM_PROMPT = "vlm_prompt"
     YOLO = "yolo"
+    SAM3_EXEMPLAR = "sam3_exemplar"
     NONE = "none"
 
 

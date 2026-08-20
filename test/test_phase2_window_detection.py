@@ -14,10 +14,10 @@ import sys
 from pathlib import Path
 import numpy as np
 
-# Add project root to path
-sys.path.insert(0, str(Path(__file__).parent))
+# Add the package dir (parent of test/) so `preprocessing_annotations` resolves.
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from window_detector import (
+from preprocessing_annotations.detection.window_detector import (
     WindowDetector,
     WindowDetection,
     RoomWindowMapping,
@@ -150,7 +150,7 @@ def test_window_suffix_application():
     print("TEST 5: Window Suffix Application")
     print("=" * 70)
 
-    from automation.taxonomy import add_window_suffix
+    from preprocessing_annotations.automation.taxonomy import add_window_suffix
 
     # Test cases validate two things:
     #   (a) Eligible types receive the correct suffix when detection flags are True.
