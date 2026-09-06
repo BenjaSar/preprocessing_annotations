@@ -19,6 +19,11 @@ try:
 except ImportError:
     from config import PDFConfig
 
+try:
+    from .ocr_extractor import TextDetection, _normalized_bbox_to_quad
+except ImportError:
+    from ocr_extractor import TextDetection, _normalized_bbox_to_quad
+
 logger = logging.getLogger(__name__)
 
 
@@ -44,6 +49,11 @@ class PDFExtractor:
     # PDF user-space is defined at 72 points per inch.
     _PDF_POINTS_PER_INCH = 72.0
 
+    # extract_text_layer: PDF text has no OCR recognition score. Fixed,
+    # named placeholder -- NOT a real confidence, so downstream
+    # length-aware confidence thresholds see a value, not None/garbage.
+    PDF_TEXT_LAYER_CONFIDENCE = 1.0
+
     def __init__(self, config: Optional[PDFConfig] = None):
         self.config = config or PDFConfig()
 
@@ -64,6 +74,62 @@ class PDFExtractor:
             return base_scale
         cap_scale = self.config.min_longest_edge_px / longest_edge_pts
         return min(base_scale, cap_scale)
+
+    def extract_text_layer(
+        self, pdf_path: str | Path, page_index: int
+    ) -> List[TextDetection]:
+        """PDF text-layer extraction (Prototype, 2026-08-20 audit): recover
+        room labels present in a PDF's embedded text but missed by OCR on
+        the rasterized page -- confirmed real on Lake Shore Electrical
+        p002 ('JANITOR' exists in the PDF text layer, OCR found nothing at
+        the same location).
+
+        NOT a fix for every source: 4 of 13 project PDFs carry substantial
+        room-label text (the Electrical-series PDFs); the "...FLAT" PDFs
+        and some others have zero extractable words (text outlined to
+        curves) -- this method returns [] there, which is the correct,
+        harmless answer, not a failure.
+
+        Uses self._page_scale(page) -- the SAME scale that produced the
+        raster this detection's coordinates must align with. Recomputing
+        scale independently here would silently misalign every returned
+        bbox; reusing the existing method is the point, not a style choice.
+
+        Confidence is a fixed placeholder (PDF text has no OCR score) --
+        callers that threshold on confidence must treat this value as
+        "not OCR-comparable", not as a real recognition score.
+        """
+        pdf_path = Path(pdf_path)
+        detections: List[TextDetection] = []
+        try:
+            doc = fitz.open(pdf_path)
+        except Exception as e:
+            logger.warning(f"extract_text_layer: could not open {pdf_path}: {e}")
+            return detections
+
+        try:
+            if page_index < 0 or page_index >= len(doc):
+                return detections
+            page = doc[page_index]
+            scale = self._page_scale(page)
+            for x0, y0, x1, y1, text, *_ in page.get_text("words"):
+                detections.append(
+                    TextDetection(
+                        bbox=_normalized_bbox_to_quad(
+                            (x0 * scale, y0 * scale, x1 * scale, y1 * scale)
+                        ),
+                        text=text,
+                        confidence=self.PDF_TEXT_LAYER_CONFIDENCE,
+                    )
+                )
+        except Exception as e:
+            logger.warning(
+                f"extract_text_layer: failed on {pdf_path} page {page_index}: {e}"
+            )
+        finally:
+            doc.close()
+
+        return detections
 
     def extract(
         self, pdf_path: str | Path

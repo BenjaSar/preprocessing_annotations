@@ -23,6 +23,7 @@ setup(
         "segment-anything>=1.0",
         "torch>=2.0.0",
         "torchvision>=0.15.0",
+        "mlflow>=2.0.0",
     ],
     extras_require={
         "easyocr": ["easyocr>=1.6.0"],  # Optional: legacy OCR backend

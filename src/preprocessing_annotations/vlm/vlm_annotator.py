@@ -318,29 +318,32 @@ class VLMAnnotator:
 
         # Call API with retries
         last_error = None
+        from ..orchestration.mlflow_tracking import traced
+
         for attempt in range(self.config.max_retries):
             try:
-                response = self.client.messages.create(
-                    model=self.config.model,
-                    max_tokens=self.config.max_tokens,
-                    temperature=0.0,  # Deterministic output for reproducible annotations
-                    messages=[
-                        {
-                            "role": "user",
-                            "content": [
-                                {
-                                    "type": "image",
-                                    "source": {
-                                        "type": "base64",
-                                        "media_type": media_type,
-                                        "data": image_data,
+                with traced(f"vlm.annotator.annotate_retry{attempt}", "LLM"):
+                    response = self.client.messages.create(
+                        model=self.config.model,
+                        max_tokens=self.config.max_tokens,
+                        temperature=0.0,  # Deterministic output for reproducible annotations
+                        messages=[
+                            {
+                                "role": "user",
+                                "content": [
+                                    {
+                                        "type": "image",
+                                        "source": {
+                                            "type": "base64",
+                                            "media_type": media_type,
+                                            "data": image_data,
+                                        },
                                     },
-                                },
-                                {"type": "text", "text": prompt},
-                            ],
-                        }
-                    ],
-                )
+                                    {"type": "text", "text": prompt},
+                                ],
+                            }
+                        ],
+                    )
 
                 response_text = response.content[0].text
                 data = self._parse_response(response_text)

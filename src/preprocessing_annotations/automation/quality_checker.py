@@ -58,7 +58,8 @@ class QualityChecker:
         self.MIN_BBOX_AREA = min_bbox_area
         self.allow_overlaps = allow_overlaps
 
-    def check_annotation(self, annotation: Dict, image_path: Optional[str] = None) -> List[ValidationIssue]:
+    def check_annotation(self, annotation: Dict, image_path: Optional[str] = None,
+                          ocr_rooms: Optional[List[Dict]] = None) -> List[ValidationIssue]:
         issues: List[ValidationIssue] = []
         image_size = annotation.get("image_size", {})
         width = image_size.get("width")
@@ -79,6 +80,28 @@ class QualityChecker:
         if not self.allow_overlaps:
             issues.extend(self._check_overlaps(rooms))
 
+        if ocr_rooms:
+            issues.extend(self._check_ocr_name_empty(ocr_rooms))
+
+        return issues
+
+    def _check_ocr_name_empty(self, ocr_rooms: List[Dict]) -> List[ValidationIssue]:
+        """Flag OCR candidates that got a bbox but no resolved room name.
+
+        A common cause is text sitting on colored/hatched fill regions where
+        pixel-based OCR degrades even though the string exists cleanly in a
+        vector-source PDF's text layer (see room-detection recall investigation).
+        """
+        issues: List[ValidationIssue] = []
+        for i, cand in enumerate(ocr_rooms):
+            if cand.get("bbox") and not (cand.get("room_name") or "").strip():
+                bbox = cand["bbox"]
+                issues.append(ValidationIssue(
+                    "warning", "OCR_NAME_EMPTY",
+                    f"OCR candidate at bbox {bbox} has no resolved room name "
+                    f"(room_number={cand.get('room_number')!r})",
+                    room_index=i,
+                ))
         return issues
 
     def _check_room(self, room: Dict, index: int, img_width: int, img_height: int) -> List[ValidationIssue]:

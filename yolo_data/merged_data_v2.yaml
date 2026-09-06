@@ -1,0 +1,9 @@
+train:
+  - /home/ubuntu/.cache/kagglehub/datasets/umairinayat/floor-plans-500-annotated-object-detection/versions/1/train/images
+  - /home/ubuntu/floorplan_classifier/VLM/preprocessing_annotations/yolo_data/commercial_oversampled/images
+  - /home/ubuntu/floorplan_classifier/VLM/preprocessing_annotations/yolo_data/electrical_negatives/images
+val:
+  - /home/ubuntu/.cache/kagglehub/datasets/umairinayat/floor-plans-500-annotated-object-detection/versions/1/valid/images
+
+nc: 4
+names: ['door', 'window', 'zone', 'double_door']

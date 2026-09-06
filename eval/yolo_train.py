@@ -60,7 +60,15 @@ def _parse_args() -> argparse.Namespace:
         "--model", default=None,
         help="Bare Ultralytics checkpoint filename (e.g. yolo26s.pt) to "
              "fine-tune from instead of KaggleFloorplanTrainingConfig's "
-             "default (yolo26n.pt) -- resolved under YOLO_CHECKPOINT_ROOT",
+             "default (yolo26n.pt) -- resolved under YOLO_CHECKPOINT_ROOT. "
+             "Accepts a nested relative path too (e.g. "
+             "runs/kaggle_door_window-6/weights/best.pt) to continue "
+             "training from an existing fine-tune.",
+    )
+    parser.add_argument(
+        "--data", default=None,
+        help="Override KaggleFloorplanTrainingConfig.data_yaml_path -- "
+             "e.g. a merged data.yaml adding classes beyond Kaggle's own.",
     )
     return parser.parse_args()
 
@@ -75,6 +83,8 @@ def main() -> None:
         config.mosaic = args.mosaic
     if args.model is not None:
         config.base_checkpoint = yolo_checkpoint_path(args.model)
+    if args.data is not None:
+        config.data_yaml_path = args.data
     best_checkpoint = train(config)
     print(best_checkpoint)
 

@@ -30,11 +30,15 @@ lower-confidence YOLO doors survived). Current: test_pcs P.423/R.242
 vs baseline P.420/R.223; FloorPlanCAD P.506/R.580 vs P.489/R.500.
 Read that docstring's caveat list before quoting these -- test_pcs GT
 is known incomplete and the threshold is unswept. ONE MORE: those
-numbers are at yolo_conf=0.5. P13's fix is a no-op at production's
-actual default (YoloObjectDetectorConfig.confidence_threshold=0.75 ==
-this class's seed_confidence_threshold) -- the two door lists P13
-split apart collapse back into one when YOLO never emits below the
-exemplar floor. Do not cite these numbers as production's behavior.
+numbers are at yolo_conf=0.5. P13's fix was a no-op when production's
+default (YoloObjectDetectorConfig.confidence_threshold) equalled this
+class's seed_confidence_threshold (both 0.75) -- the two door lists
+P13 split apart collapsed back into one when YOLO never emitted below
+the exemplar floor. STALE as of I-2 (2026-09-01): that default is now
+0.25 < seed_confidence_threshold (0.75), so P13's fix is live in
+production, not a no-op -- and these P13 numbers (measured at
+yolo_conf=0.5, still above 0.25) describe neither regime exactly. Do
+not cite these numbers as production's current behavior.
 
 UPDATE (2026-08-12): the tile grid is now SYSTEMATIC (TileSplitter, same
 shape as YoloObjectDetector.detect_objects_tiled), not seed-centred
@@ -118,6 +122,7 @@ class Sam3ExemplarDetector:
                     "conf": self.config.sam3_confidence_threshold,
                     "model": resolve_sam3_checkpoint(),
                     "imgsz": self.config.tile_px,
+                    "save": False,
                 }
             )
         return self._predictor
@@ -218,14 +223,15 @@ class Sam3ExemplarDetector:
           13 marginal false positives were duplicates of doors YOLO had
           already reported, at IoU 0.67-0.95 vs the YOLO box -- all
           well above seed_overlap_iou, i.e. all should have been
-          dropped and none were. NO-OP whenever the caller's own doors
-          never fall in the 0.5-0.75 band -- e.g. production's actual
-          default has YoloObjectDetectorConfig.confidence_threshold ==
-          seed_confidence_threshold (both 0.75), so door_boxes and
-          seed_boxes are then the same list and this split changes
-          nothing. Only matters when the seed detector runs below this
-          class's exemplar floor, as the GT eval harness does
-          (yolo_conf=0.5).
+          dropped and none were. NO-OP only when the caller's own doors
+          never fall below seed_confidence_threshold -- true when
+          YoloObjectDetectorConfig.confidence_threshold ==
+          seed_confidence_threshold (both were 0.75 until I-2,
+          2026-09-01). Production's default is now 0.25 <
+          seed_confidence_threshold (0.75), so door_boxes and
+          seed_boxes are NOT the same list in production anymore -- this
+          split is live there, not just in the GT eval harness
+          (yolo_conf=0.5, where it always mattered).
 
         Systematic grid (TileSplitter), same shape as
         YoloObjectDetector.detect_objects_tiled: every tile with >=1

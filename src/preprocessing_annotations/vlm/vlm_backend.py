@@ -366,31 +366,33 @@ class ClaudeBackend(VLMBackend):
         
         # Call Claude API
         try:
-            message = self.client.messages.create(
-                model=self.config.model,
-                max_tokens=self.config.max_tokens,
-                temperature=0.0,  # Deterministic output for reproducible annotations
-                messages=[
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "image",
-                                "source": {
-                                    "type": "base64",
-                                    "media_type": media_type,
-                                    "data": image_data,
+            from ..orchestration.mlflow_tracking import traced
+            with traced("vlm.claude.detect_rooms", "LLM"):
+                message = self.client.messages.create(
+                    model=self.config.model,
+                    max_tokens=self.config.max_tokens,
+                    temperature=0.0,  # Deterministic output for reproducible annotations
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "image",
+                                    "source": {
+                                        "type": "base64",
+                                        "media_type": media_type,
+                                        "data": image_data,
+                                    },
                                 },
-                            },
-                            {
-                                "type": "text",
-                                "text": prompt
-                            }
-                        ],
-                    }
-                ]
-            )
-            
+                                {
+                                    "type": "text",
+                                    "text": prompt
+                                }
+                            ],
+                        }
+                    ]
+                )
+
             # Parse response — pass image dimensions for percentage→pixel conversion.
             from PIL import Image as _PIL_Image
             with _PIL_Image.open(image_path) as _img:

@@ -100,6 +100,7 @@ class TwoPassOCRExtractor:
     def find_rooms_pass1(
         self,
         image_path: Union[str, Path],
+        extra_detections: Optional[List[TextDetection]] = None,
     ) -> Tuple[List[RoomCandidate], List[TextDetection]]:
         """Pass 1 only: PaddleOCR extraction (no VLM).
 
@@ -109,6 +110,12 @@ class TwoPassOCRExtractor:
 
         Args:
             image_path: Path to floor plan image
+            extra_detections: Passed straight through to
+                MEPTextExtractor.extract_and_find_rooms -- see that
+                method's docstring for the merge contract (candidate
+                classification only; the returned raw_detections stays
+                OCR-only). Default None -- byte-identical to prior
+                behavior.
 
         Returns:
             Tuple of (pass1_room_candidates, raw_text_detections)
@@ -119,7 +126,9 @@ class TwoPassOCRExtractor:
         image_path = Path(image_path)
         logger.info(f"Pass 1 (PaddleOCR): Extracting rooms from {image_path.name}")
         try:
-            pass1_rooms, raw_detections = self.ocr_extractor.extract_and_find_rooms(image_path)
+            pass1_rooms, raw_detections = self.ocr_extractor.extract_and_find_rooms(
+                image_path, extra_detections=extra_detections
+            )
         except Exception as e:
             logger.error(f"Pass 1 (PaddleOCR) failed: {e}")
             raise

@@ -103,6 +103,13 @@ def _dashed_rectangle(draw: ImageDraw.ImageDraw, box, color, width: int = 1, das
             ], fill=color, width=width)
 
 
+def _rects_overlap(a: tuple, b: tuple) -> bool:
+    """AABB overlap test for (x1, y1, x2, y2) rects."""
+    ax1, ay1, ax2, ay2 = a
+    bx1, by1, bx2, by2 = b
+    return ax1 < bx2 and bx1 < ax2 and ay1 < by2 and by1 < ay2
+
+
 def _load_font(image_width: int):
     """Load a scaled font based on image dimensions."""
     # Target: ~0.4% of image width, clamped to 14-48px
@@ -242,6 +249,34 @@ def draw_annotations(image_path: Path, annotation: dict, output_path: Path,
     # filter (these boxes are inherently small, that filter is room-only)
     # and no enlarged-visibility marker (that's the room-specific T-5 fix
     # for rare tiny label-scale rooms, not applicable here).
+    #
+    # T4: adjacent/stacked doors (e.g. a double-door drawn as 2 abutting
+    # single-leaf detections) previously got labels placed independently,
+    # so both "door" banners land on the same pixels and blend into one
+    # smear -- a reviewer scanning the overview reads that as "one leaf
+    # missing" even though both were detected (confirmed on a real page:
+    # 326 ROCKAWAY page004, BR132/BR118 double doors). Track placed label
+    # rects and stack straight down on collision so every label stays
+    # individually readable.
+    placed_label_rects: list = []
+
+    def _place_label_y(x1: int, y1: int, w: int, h: int, img_h: int) -> int:
+        y = y1 - h - pad * 2
+        if y < 0:
+            y = y1 + pad
+        while True:
+            cand = (x1, y, x1 + w, y + h)
+            collision = next(
+                (r for r in placed_label_rects if _rects_overlap(cand, r)), None
+            )
+            if collision is None:
+                break
+            y = collision[3]  # stack below the label it collided with
+            if y + h > img_h:
+                break
+        placed_label_rects.append((x1, y, x1 + w, y + h))
+        return y
+
     for det in annotation.get("objectDetections", []):
         bbox = det.get("bbox")
         if not bbox or len(bbox) != 4:
@@ -267,9 +302,7 @@ def draw_annotations(image_path: Path, annotation: dict, output_path: Path,
         tw = text_bbox[2] - text_bbox[0]
         th = text_bbox[3] - text_bbox[1]
         pad = 3
-        label_y = dy1 - th - pad * 2
-        if label_y < 0:
-            label_y = dy1 + pad
+        label_y = _place_label_y(dx1, dy1, tw + pad * 2, th + pad * 2, base.height)
         draw_stroke.rectangle(
             [dx1, label_y, dx1 + tw + pad * 2, label_y + th + pad * 2],
             fill=(*color, 255),
