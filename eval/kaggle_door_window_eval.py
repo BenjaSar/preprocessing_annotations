@@ -4,6 +4,15 @@ score_against_gt_images bridge from gt_evaluator.
 
 GT sources (--dataset, one registry entry each):
 * test_pcs         -- commercial door/window, COCO (EvalConfig).
+* test_pcs_commercial -- 2nd commercial door/window GT, COCO (H-2/I-1,
+  2026-09-01): 11 img, 664 door + 252 window, disjoint source docs from
+  test_pcs (no eval contamination). Window boxes are short-axis-dilated
+  to the wall-opening convention at load time (I-4/I-6, user-confirmed):
+  as labeled this set is glazing-line only (H-3) and scores ~0 TP
+  against any threshold; dilated, it recovered TP 6->130 at conf 0.25,
+  same detector/weights (see COMMERCIAL_WINDOW_SHORT_AXIS_DILATION).
+  Still 2 source documents -- report per-dataset, do not pool with
+  test_pcs's own numbers as if 21 images were one independent sample.
 * kaggle_floorplans500 -- residential-styled door/window, YOLO.
 * floorplancad     -- residential+commercial door/window/wall, FiftyOne
   (CC BY-NC: EVAL-ONLY, never route into shipped SFT data).
@@ -52,6 +61,8 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from preprocessing_annotations.config import (
     EvalConfig,
+    commercial_coco_eval_config,
+    COMMERCIAL_WINDOW_SHORT_AXIS_DILATION,
     FloorplancadEvalConfig,
     KaggleFloorplanEvalConfig,
     Sam3ExemplarDetectorConfig,
@@ -71,6 +82,7 @@ from gt_evaluator import (
     GTImage,
     PredictFn,
     cubicasa_predict,
+    dilate_category_short_axis,
     load_ground_truth,
     score_against_gt_images,
 )
@@ -91,6 +103,7 @@ _REPORT_CATEGORIES: Tuple[str, ...] = (_CATEGORY_DOOR, _CATEGORY_WINDOW)
 # backend choice used throughout this project's eval work.
 _VLM_TIER_BACKEND = "unsloth"
 _DATASET_TEST_PCS = "test_pcs"
+_DATASET_TEST_PCS_COMMERCIAL = "test_pcs_commercial"
 _DATASET_KAGGLE = "kaggle_floorplans500"
 _DATASET_FLOORPLANCAD = "floorplancad"
 _ALL_DATASETS = "all"
@@ -146,6 +159,27 @@ def _build_test_pcs(args: argparse.Namespace) -> GtSource:
     )
 
 
+def _build_test_pcs_commercial(args: argparse.Namespace) -> GtSource:
+    """Build the 2nd commercial door/window (COCO) source. H-2/I-1.
+
+    Window boxes are short-axis-dilated to the wall-opening convention
+    (I-4/I-6, user-confirmed 2026-09-01) -- this set's raw labels are
+    glazing-line only and score ~0 TP against any threshold otherwise.
+    Door passes through unchanged; both conventions already agree there.
+    """
+    config = commercial_coco_eval_config()
+    images = load_ground_truth(
+        config.gt_coco_path, config.gt_images_dir, config.gt_category_merge
+    )
+    images = dilate_category_short_axis(
+        images, _CATEGORY_WINDOW, COMMERCIAL_WINDOW_SHORT_AXIS_DILATION
+    )
+    return GtSource(
+        _DATASET_TEST_PCS_COMMERCIAL, _cap(images, args.sample_size),
+        config.gt_iou_threshold,
+    )
+
+
 def _build_kaggle(args: argparse.Namespace) -> GtSource:
     """Build the Kaggle floor-plans-500 (YOLO) source."""
     config = KaggleFloorplanEvalConfig(split=args.kaggle_split)
@@ -168,6 +202,7 @@ def _build_floorplancad(args: argparse.Namespace) -> GtSource:
 
 _GT_SOURCE_BUILDERS: Dict[str, Callable[[argparse.Namespace], GtSource]] = {
     _DATASET_TEST_PCS: _build_test_pcs,
+    _DATASET_TEST_PCS_COMMERCIAL: _build_test_pcs_commercial,
     _DATASET_KAGGLE: _build_kaggle,
     _DATASET_FLOORPLANCAD: _build_floorplancad,
 }

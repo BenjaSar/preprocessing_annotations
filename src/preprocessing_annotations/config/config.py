@@ -654,6 +654,61 @@ class EvalConfig:
             self.device = _detect_device()
 
 
+# H-2 / I-1 (2026-09-01): second commercial GT source. 11 images, 664 door +
+# 252 window instances, label-studio COCO export, disjoint source documents
+# from EvalConfig's default set (no eval contamination). Precision measured
+# against this set is .822 vs .652 on the old fixture (same detector/config)
+# -- corrects the KNOWN INCOMPLETE precision-understatement documented on
+# EvalConfig above. Window instances are NOT comparable across the two sets:
+# this set's window box excludes wall thickness (short axis 3x thinner) --
+# see plan/commercial-dataset-g12-assessment-2026-09-01.md H-3. Do not pool
+# window GT from this source with EvalConfig's until that is resolved.
+COMMERCIAL_COCO_CATEGORY_MERGE: Dict[str, str] = {
+    "door": "door",
+    "double_door": "door",
+    "bifold_door": "door",
+    "bypass_sliding_door": "door",  # declared category, 0 instances
+    "window": "window",
+    "sliding_window": "window",  # declared category, 0 instances
+    "toilet": "toilet",
+    "sink1": "sink",
+    "sink2": "sink",
+}
+
+# I-4/I-6 (2026-09-01, user-confirmed): this set's "window" labels only
+# the glazing line -- short axis 1.08 permille of page diagonal, vs
+# EvalConfig's old fixture at 3.22 permille (wall-opening, includes
+# wall thickness). The pipeline's canonical window convention is
+# wall-opening (matches the old fixture AND what the shipped YOLO
+# checkpoint was trained to predict, on kaggle-500's convention).
+# Dilating this set's window boxes on their short axis by this ratio at
+# load time (gt_evaluator.dilate_category_short_axis) recovered window
+# TP 6->130, recall .024->.516, precision .017->.365 at conf 0.25 --
+# same detector/weights, GT-side fix only, no re-labeling. Do not
+# recompute this constant from a smaller/different sample without
+# re-running that experiment.
+COMMERCIAL_WINDOW_SHORT_AXIS_DILATION: float = 3.22 / 1.08
+
+
+def commercial_coco_eval_config() -> EvalConfig:
+    """EvalConfig pointed at the 2026-08-31 commercial set (11 img, 664
+    door / 252 window, test_pcs/commercial/commercial_building_obj_detection_coco_w_images).
+    Same COCO reader as the default EvalConfig -- only paths and the
+    category merge map differ, so this is a factory, not a second dataclass.
+    """
+    root = (
+        _PROJECT_ROOT
+        / "test_pcs"
+        / "commercial"
+        / "commercial_building_obj_detection_coco_w_images"
+    )
+    return EvalConfig(
+        gt_coco_path=root / "result.json",
+        gt_images_dir=root / "images",
+        gt_category_merge=dict(COMMERCIAL_COCO_CATEGORY_MERGE),
+    )
+
+
 @dataclass
 class WindowEvidenceConfig:
     """Option B (2026-08-03): local wall-context discriminator for
@@ -1028,12 +1083,48 @@ class YoloObjectDetectorConfig:
     WindowDetector's existing behavior, zero new regression surface.
     """
 
-    # T-S2's clean-pass checkpoint (YOLO26s, kaggle test split: door
-    # P.86/R.88, window P.62/R.70 -- both clear their recorded bars).
-    # Constructor-overridable, e.g. to point at a later retrain.
+    # Promoted 2026-09-05 (6 -> 7): fine-tuned from -6 with the 11-image
+    # commercial GT (test_pcs/commercial/commercial_building_obj_detection_
+    # coco_w_images) blended in (9 images oversampled 5x, 2 held out for
+    # an honest check), 40 epochs. Verified no regression: Kaggle test
+    # door P.86/R.88->P.84/R.87, window P.62/R.70->P.58/R.69 (within
+    # noise); test_pcs door P.31/R.31->P.35/R.35, window P.20/R.44->
+    # P.36/R.40 (both improved). Held-out (2 images, never trained on):
+    # door recall improved R.51->R.61.
+    #
+    # This retrain ALSO added a 4th class, "double_door" (144 real GT
+    # instances, previously merged into "door" for eval, never trained --
+    # see plan/room-object-fp-fn-fix-plan-2026-09-05.md SS1c/2b). That part
+    # is a NEGATIVE RESULT, not shipped: 0/13 double_door GT recognized on
+    # the held-out check, both before and after this retrain -- 45
+    # oversampled examples in 40 epochs was not enough signal for a new
+    # visual class. Do NOT add "double_door" to keep_categories below --
+    # window_detector.py's map_detections_to_rooms (~line 146-160) does
+    # strict string-equality type dispatch with an `else: has_windows =
+    # True` fallback; an unhandled category silently miscounts as a
+    # window, not a door. keep_categories stays ("door", "window") only
+    # until that dispatch is updated AND double_door is actually learned.
+    # Promoted 2026-09-05 (7 -> 9): E4 electrical-arc-FP mitigation. -8 (an
+    # intermediate attempt, not shipped) fine-tuned -7 with 414 hard-negative
+    # crops -- one per detection on the 8 pages this session's human QA
+    # marked "all detections in category X are FP" (arc-line-vs-electrical-
+    # symbol confusion) -- and DID cut the FP count on those pages 301->89
+    # (-70%) but caused real collateral regression elsewhere: test_pcs door
+    # P.35/R.35->P.26/R.22, held-out door recall R.61->R.43. Root cause:
+    # 414 negatives with no fresh positive counterexamples from equally
+    # cluttered layouts biased the model toward suppressing real doors in
+    # dense drawings generally, not just electrical-arc shapes.
+    #
+    # -9 retried with the SAME 8 pages' negatives subsampled 414->96
+    # (~12/page, same order of magnitude as the 45 commercial-oversample
+    # examples already in the training mix). Result: no regression anywhere
+    # (test_pcs door P.35/R.35->P.38/R.37, actually improved; held-out door
+    # recall R.61->R.59, flat; Kaggle test flat) AND a real 18% further FP
+    # drop on the 8 target pages (301->247; -40% from the original -6
+    # baseline of 414). Clean win, no tradeoff -- promoted.
     checkpoint_path: str = field(
         default_factory=lambda: str(
-            YOLO_CHECKPOINT_ROOT / "runs" / "kaggle_door_window-6"
+            YOLO_CHECKPOINT_ROOT / "runs" / "kaggle_door_window-9"
             / "weights" / "best.pt"
         )
     )
@@ -1106,10 +1197,53 @@ class YoloObjectDetectorConfig:
     # precision for a large recall loss, and window is hit hardest:
     #   door    conf .50: P.394 R.242 F1.300  ->  conf .75: P.621 R.131 F1.216
     #   window  conf .50: P.320 R.346 F1.333  ->  conf .75: P.562 R.044 F1.081
-    # Window recall collapses to 9 TP of 205 GT. F1 falls on BOTH classes;
-    # measured F1 optimum is conf~0.25 for door (.308) and ~0.5 for window
-    # (.333). Revert to 0.5 to restore the prior recorded baselines.
-    confidence_threshold: float = 0.75
+    # Window recall collapses to 9 TP of 205 GT. F1 falls on BOTH classes.
+    #
+    # LOWERED 0.75 -> 0.25 (I-2, 2026-09-01, user-confirmed after full
+    # sweep). Prior note above only compared .50 vs .75; the full sweep
+    # (--yolo-conf in {.25,.35,.50,.65,.75}, 3 datasets: kaggle_floorplans500
+    # residential 43 img, test_pcs commercial 10 img, test_pcs_commercial
+    # commercial 11 img, categories door+window, all tiled) found 0.75 is
+    # DOMINATED by every lower value tested -- F1 is worse at 0.75 than at
+    # 0.25 in every (dataset, category) cell measured, not a trade:
+    #   kaggle   door   conf .25: P.8599 R.8817 F1.8707 -> .75: P.9397 R.7465 F1.8320
+    #   kaggle   window conf .25: P.6242 R.6975 F1.6588 -> .75: P.8889 R.1423 F1.2454
+    #   test_pcs door   conf .25: P.3071 R.3113 F1.3092 -> .75: P.6515 R.1185 F1.2005
+    #   test_pcs window conf .25: P.1982 R.4390 F1.2731 -> .75: P.5625 R.0439 F1.0814
+    #   test_pcs_commercial door   conf .25: F1.4618 -> .75: F1.1628
+    #   test_pcs_commercial window conf .25: F1.0197 -> .75: F1.0000
+    # (test_pcs_commercial window is near-zero at every threshold here
+    # because its GT used a different box convention -- see I-4/H-3 below
+    # and commercial_coco_eval_config's dilation; not a confidence effect.)
+    # 0.25 is not universally the single best cell (e.g. test_pcs window
+    # peaks at conf .50, F1.3326) but it is never far off and never worse
+    # than .75 anywhere measured. Raw sweep JSON: sweep/*_conf*.json
+    # (eval/kaggle_door_window_eval.py --yolo-conf). Revisit if a
+    # precision-sensitive consumer starts reading these detections
+    # directly -- today they are decorative (no ConfidenceComputer term
+    # consumes them, tracked separately as H-7 / the 08-28 plan's G-1),
+    # so the wider FP set this lets through has ~no blast radius yet.
+    confidence_threshold: float = 0.25
+
+    # D1 (2026-09-05, human QA on sprint1_verify49): degenerate-box floor
+    # for door/window detections. NARROWER than originally attempted -- an
+    # aspect-ratio cap was tried first and REJECTED after measuring real
+    # per-category distributions on this same run: windows are structurally
+    # elongated (aspect p05=2.00, median=3.29, up to 7.12 -- a wall window
+    # is drawn as a thin rectangle, not a square), so a shared aspect cap
+    # dropped 97% of real windows. Doors have their own long tail (p95=2.41,
+    # max=5.99) that also overlaps the one confirmed punctuation-glyph FP
+    # (a ")" character misread as a door swing, 697px^2, aspect 2.4) closely
+    # enough that shape alone cannot cleanly separate it from real doors --
+    # that FP is NOT resolved by this floor; catching it needs cross-
+    # checking against OCR text-token bboxes (not yet wired, see
+    # yolo_detector.py's _passes_shape_floor docstring), not a size/aspect
+    # threshold. What remains here only guards against literally-degenerate
+    # (near-zero-area) boxes, same convention as ROOM_MIN_AREA_PX/
+    # min_expansion_area_px elsewhere -- door p05=756px^2, window p05=310px^2
+    # on the measured run, so 150 is a floor well below any real detection,
+    # not a precision lever.
+    min_area_px: int = 150
 
 
 # facebook/sam3 is a gated HF repo; weights are downloaded once and cached
@@ -1207,14 +1341,14 @@ class Sam3ExemplarDetectorConfig:
     the seed detector's own confidence_threshold >= this class's
     seed_confidence_threshold (0.75) -- the two door lists P13 split
     apart (all doors vs >=0.75 doors) are then identical, so there is
-    nothing for the wider dedup to catch. PipelineConfig's default
-    YoloObjectDetectorConfig.confidence_threshold IS 0.75 (see that
-    field's own docstring -- raised by explicit instruction 2026-08-09).
-    At that production default, P13 is inert and these numbers do NOT
-    describe production's current configuration; they describe the
-    yolo_conf=0.5 regime the GT harness measures. Whether production
-    should run YOLO at 0.5 is that field's own open question, not
-    decided or touched here.
+    nothing for the wider dedup to catch. STALE (2026-09-01, I-2):
+    PipelineConfig's default YoloObjectDetectorConfig.confidence_threshold
+    was 0.75 when this was written; it is now 0.25 (see that field's own
+    docstring). At 0.25 < seed_confidence_threshold (0.75), P13's dedup
+    fix is NOT a no-op in production anymore -- it is live. These numbers
+    still describe the yolo_conf=0.5 regime the GT harness measures, not
+    whatever production now does at 0.25; that gap has not been
+    re-measured under this class specifically.
 
     Original (now-superseded) claim, for the record: "two-dataset
     validation (test_pcs commercial, FloorPlanCAD residential+
@@ -1338,6 +1472,61 @@ class Sam3ExemplarDetectorConfig:
 
 
 @dataclass
+class ConfidenceWeightsConfig:
+    """T-1 (technology-evaluation-2026-08-28.md, G-1): weights for
+    ConfidenceComputer.compute(). detection/classification/ocr replace
+    the formula's previous inline literals (0.3/0.4/0.3) -- same values,
+    now config-driven instead of hardcoded, per that plan's own
+    integration note ("weights must become config-driven, not literals").
+
+    corroboration_weight is NOT a fourth share of the same 1.0 pie: the
+    detection/classification/ocr weights are still combined as their own
+    weighted average (unchanged arithmetic when corroboration_weight=0),
+    and corroboration_weight scales an ADDITIVE bonus on top, capped so
+    the total never exceeds 1.0. This is deliberate, not an oversight --
+    T-1's own risk table requires the term to be asymmetric ("absence of
+    evidence never penalizes a room -- no door found != no door"). A
+    room with zero object-detection evidence gets corroboration_score=0,
+    contributing nothing, so its confidence is identical with the term
+    on or off. Reducing detection/classification/ocr's weights to make
+    room for a classic 4-way weighted average would instead lower every
+    room's floor the moment the term is enabled, penalizing exactly the
+    rooms (no nearby door/window) this design must not touch.
+
+    Default 0.0: byte-identical to pre-T-1 behavior until deliberately
+    enabled -- same off-by-default precedent as every other object-
+    detection feature in this config (use_yolo_objects, use_sam3_exemplar).
+    T-1's own verdict is Prototype First, not Adopt: the commercial
+    detector is weak (G-4, door R~.22-.41 depending on threshold) so
+    corroboration signal may be sparse on real commercial pages -- measure
+    confidence-distribution spread and sft_recommended rate before raising
+    this above 0.0 (T-1 spike task), do not assume a nonzero value helps.
+    """
+
+    detection: float = 0.3
+    classification: float = 0.4
+    ocr: float = 0.3
+    corroboration: float = 0.0
+
+
+def _get_mlflow_tracking_uri() -> str:
+    return os.getenv("MLFLOW_TRACKING_URI", "http://127.0.0.1:5000")
+
+
+@dataclass
+class MlflowConfig:
+    """Self-hosted MLflow run tracking. Diagnostic layer only -- disabled
+    by default, and every call site that consumes this config must no-op
+    (never raise) if mlflow isn't installed or the tracking server is
+    unreachable. See orchestration/mlflow_tracking.py for the guard.
+    """
+
+    enabled: bool = False
+    tracking_uri: str = field(default_factory=_get_mlflow_tracking_uri)
+    experiment_name: str = "floorplan-annotation-pipeline"
+
+
+@dataclass
 class PipelineConfig:
     """Master configuration for the full annotation pipeline.
 
@@ -1363,6 +1552,17 @@ class PipelineConfig:
     cubicasa_rooms: CubicasaRoomDetectorConfig = field(
         default_factory=CubicasaRoomDetectorConfig
     )
+    confidence_weights: ConfidenceWeightsConfig = field(
+        default_factory=ConfidenceWeightsConfig
+    )
+    mlflow: MlflowConfig = field(default_factory=MlflowConfig)
+
+    # Optional: ground-truth annotations dir (same format as this pipeline's
+    # own annotations/ output). If set, run() calls bbox_metrics.evaluate_dataset
+    # after the run completes and logs precision/recall/IoU-family metrics.
+    # Not the same as `eval` above (EvalConfig is test_pcs-specific and has no
+    # live callers today) -- this is a general-purpose, opt-in GT comparison.
+    eval_gt_dir: Optional[str] = None
 
     # Pipeline options
     # NOTE: use_vlm defaults to False. Use OCR results unless explicitly enabled.
@@ -1399,6 +1599,75 @@ class PipelineConfig:
     # the plan's P3 guarded-rollout step.
     use_sam3_exemplar: bool = False
 
+    # Prototype (2026-08-20 audit): recover room labels from a PDF's
+    # embedded text layer, additive-only against OCR's own detections
+    # (OCR wins every overlap -- see pipeline.py's merge site). Confirmed
+    # real on Lake Shore Electrical p002 ('JANITOR' in the PDF text layer,
+    # OCR found nothing at the same image location) but NOT a general fix:
+    # 4 of 13 project source PDFs carry substantial room-label text (the
+    # Electrical-series PDFs); "...FLAT" PDFs and others have zero
+    # extractable words (text outlined to curves) -- inert there, not
+    # broken.
+    #
+    # DOWNSTREAM NOISE: MEASURED, SEVERE, NOT JUST THEORETICAL (same day).
+    # Merging the PDF text layer into raw_detections on Lake Shore
+    # Electrical p002 took that list from 133 to 828 entries (+695) and
+    # compute_exclusion_zones's output from 3 zones to 16. Visually
+    # verified the 13 new zones: they cover CLASSROOM 142/143/144/146/147,
+    # SCIENCE CLASSROOM 128/129/130, PREP ROOM/CLASSROOM 145/COMPUTER LAB,
+    # and CLASSROOM 119 -- i.e. most of the real rooms on the page, not
+    # BOM tables. sft_validator.py drops any room whose centroid falls in
+    # an exclusion zone -- flipping this flag on AS CURRENTLY BUILT would
+    # delete legitimate rooms, not just add noise. Root cause: PDF text
+    # layers carry small MEP/circuit/dimension tags scattered densely
+    # THROUGHOUT room interiors that OCR never surfaced (too small/faint,
+    # or below confidence_threshold) but that still match
+    # compute_exclusion_zones's excluded-token regexes (dates, equipment
+    # codes, generic instruction words) -- the clustering has no way to
+    # tell "dense MEP tags inside a real room" from "a real title block".
+    #
+    # ROUTING FIXED (Y1, same day): the exclusion-zone hazard above was
+    # caused by the ORIGINAL merge point (into raw_detections, which
+    # feeds compute_exclusion_zones). Corrected: pipeline.py's
+    # _pdf_text_layer_detections now only FETCHES PDF detections;
+    # MEPTextExtractor.extract_and_find_rooms(extra_detections=...) merges
+    # them ONLY into find_room_candidates's input, and its own
+    # raw_detections return value stays OCR-only. Verified end-to-end on
+    # the real page: exclusion zones stayed at 3 (not 16).
+    #
+    # BUT TWO NEW, MEASURED PROBLEMS SURFACED FIXING THAT ONE -- still
+    # NOT ready to enable:
+    #
+    # (1) The motivating case (JANITOR) is STILL not recovered, for a
+    # DIFFERENT reason than the routing bug. OCR did not miss that
+    # region -- it produced a garbled low-confidence read of the same
+    # text ('iiAANTTI ii', conf 0.513, centroid 3px from the PDF
+    # detection's). The "OCR wins every collision regardless of text
+    # content" rule (matching _dedupe_detections's own established
+    # convention) treats that garbled read as "OCR already found
+    # something here" and correctly-by-design, but wrongly-in-outcome,
+    # blocks the accurate PDF text. Not fixed; flagged, not guessed at --
+    # any fix here needs its own evidence (e.g. comparing OCR confidence
+    # or text plausibility) before implementing.
+    #
+    # (2) Candidate-quality collapse. On the same page, extra_detections
+    # took find_room_candidates's output from 14 to 201 entries -- 185
+    # new, but only 6 DISTINCT names among them ('K', 'LV', 'OFF', 'k',
+    # 'of', and exactly ONE real room: 'PREP C114'). The other ~184 are
+    # repeated MEP circuit/wire-gauge tags the PDF's raw text layer
+    # carries at high density; find_room_candidates was built against
+    # OCR's naturally sparser output and has no filter tuned for this
+    # input's character. One real recovery per ~185 junk entries is not
+    # a usable ratio.
+    #
+    # Default off, same precedent as use_windows/use_yolo_objects/
+    # use_sam3_exemplar. Do NOT flip this on. The routing bug is fixed;
+    # the feature is further from ready than it looked before that fix,
+    # not closer -- promoting past Prototype now needs a real
+    # room-name-plausibility filter for PDF-sourced text specifically,
+    # evidenced on more than one page, not a threshold guess.
+    use_pdf_text_layer: bool = False
+
     # CubicasaRoomDetectorConfig above. Currently READ BY NOTHING in
     # pipeline.py -- its one caller (Step 4d.5, CNN room corroboration) was
     # removed after evidence found no discriminative value (see that
@@ -1414,9 +1683,41 @@ class PipelineConfig:
     # mislabels window (near-square boxes; real windows, portrait or
     # landscape, are elongated). Verified on 10 pixel-confirmed real
     # ROCKAWAY boxes (10/10) + test_pcs/kaggle GT (both precision up, at
-    # most 1 TP lost per set, zero on ROCKAWAY). Default False -- same
-    # off-by-default precedent as use_windows/use_yolo_objects.
-    use_window_elongation_filter: bool = False
+    # most 1 TP lost per set, zero on ROCKAWAY).
+    #
+    # Re-measured 2026-08-30 (T-0 spike, sprint1_verify45's full
+    # low-confidence <0.75 "window" population, 85 boxes across 18
+    # files/6 drawing sets, manually pixel-classified): catches 25/40
+    # confirmed door/other false "window"s (62%), wrongly drops 2/40 real
+    # windows (5% -- both on 326 ROCKAWAY, same recurring x2230-2250/
+    # y777-798 sliver next to an already-kept wider window box on that
+    # wall run, not an independently-lost opening). Clears the >=50%
+    # FP-recovery / <5%-ish TP-cost bar this flag was gated on. Residual
+    # 38% of FPs are concentrated off the ROCKAWAY drawing family
+    # (Kennedy/Violet Elementary Electrical Pages, Bradley Fair) where
+    # door-swing bboxes are themselves elongated (2.0-4.1) -- this
+    # predicate does not generalize to that CD style; still net-positive
+    # everywhere measured, never worse than the prior always-keep
+    # behavior. Default promoted to True on this evidence -- same
+    # promotion precedent as YoloObjectDetectorConfig.use_tiling.
+    use_window_elongation_filter: bool = True
+
+    # A1 (2026-08-21, Prototype First): exempt sam_expanded rooms from
+    # FIX-5's ink-density filter (INK_MIN_FRAC=0.09). Measured on 3 pages /
+    # 7 visually-verified sam_expanded boxes: ink density has NO
+    # discriminative power for this population -- verified-correct boxes
+    # measured 0.0053-0.31, verified-wrong boxes measured 0.0869-0.12, and
+    # the wrong ones sit inside the correct range. FIX-5 was tuned for
+    # label-scale boxes (near-solid glyph ink); a room-scale box over open
+    # floor space is mostly white by definition, so the same 0.09 cut
+    # conflates "correctly room-scale" with "wrongly placed." Non-expanded
+    # rooms are FIX-5's real, measured-effective use (11/15 low-ink drops
+    # on ROCKAWAY p001 were genuinely blank boxes, mostly ink=0.000) and
+    # are untouched by this flag either way. Default False pending the
+    # validation run (re-check room-scale shipped-box counts + visually
+    # verify every newly-admitted box across the same 3 pages) before any
+    # promotion past Prototype.
+    exempt_sam_expanded_from_ink_filter: bool = False
 
     # Minimum rooms required to mark an image sft_ready=True.
     # Default 1: any image with ≥1 valid room is included.

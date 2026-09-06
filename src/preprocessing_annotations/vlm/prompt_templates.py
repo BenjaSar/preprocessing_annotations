@@ -271,3 +271,29 @@ Output ONLY valid JSON with this exact structure:
     {{"room_number": "113", "room_name": "MECHANICAL ROOM", "category": "mechanical", "bbox": [0.42, 0.18, 0.12, 0.08]}}
   ]
 }}"""
+
+
+# Prompt versioning (observability, G-04): a stable hash per builder function,
+# computed once at import time, so a run can be attributed to the prompt text
+# that produced it. Static-template builders hash their constant string;
+# true f-string builders (runtime image dims) hash their function *source*
+# instead, since a resolved per-call string would vary by image size and
+# defeat the point of a stable version tag.
+import hashlib as _hashlib
+import inspect as _inspect
+
+
+def _hash(text: str) -> str:
+    return _hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
+
+
+PROMPT_VERSIONS = {
+    "build_json_array_system_prompt": _hash(_JSON_ARRAY_SYSTEM_PROMPT),
+    "build_room_prompt_claude": _hash(_CLAUDE_ROOM_PROMPT),
+    "build_room_prompt_qwen": _hash(_QWEN_ROOM_PROMPT),
+    "build_window_prompt": _hash(_WINDOW_PROMPT),
+    "build_window_prompt_unsloth": _hash(_UNSLOTH_WINDOW_PROMPT),
+    "build_room_prompt_unsloth": _hash(_inspect.getsource(build_room_prompt_unsloth)),
+    "build_door_prompt_unsloth": _hash(_inspect.getsource(build_door_prompt_unsloth)),
+    "build_room_prompt_mep": _hash(_inspect.getsource(build_room_prompt_mep)),
+}

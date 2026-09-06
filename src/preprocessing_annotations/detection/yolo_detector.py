@@ -36,6 +36,25 @@ from .yolo_infer import load_model
 logger = logging.getLogger(__name__)
 
 
+def _passes_shape_floor(bbox, min_area_px: int) -> bool:
+    """D1 (2026-09-05): reject literally-degenerate (near-zero-area) boxes.
+    NOT a precision filter -- an aspect-ratio cap was tried and rejected
+    (see YoloObjectDetectorConfig.min_area_px docstring: windows are
+    structurally elongated, a shared aspect cap dropped 97% of real
+    windows on the measured run). The one confirmed punctuation-glyph FP
+    this was originally meant to catch is NOT resolved by this floor --
+    its shape overlaps real doors' own distribution too closely. bbox is
+    (x1, y1, x2, y2) in full-image pixel space (post tile-rescale).
+    """
+    if not bbox or len(bbox) != 4:
+        return True
+    w = bbox[2] - bbox[0]
+    h = bbox[3] - bbox[1]
+    if w <= 0 or h <= 0:
+        return True
+    return (w * h) >= min_area_px
+
+
 class YoloObjectDetector:
     """Fine-tuned YOLO door/window detector, config-driven, lazy-loaded."""
 
@@ -62,13 +81,23 @@ class YoloObjectDetector:
             return []
 
         try:
-            boxes = _yolo_infer_detect(
-                model, img_path, self.config.keep_categories,
-                self.config.confidence_threshold,
-            )
+            from ..orchestration.mlflow_tracking import traced
+            with traced("yolo.detect_objects", "TOOL"):
+                boxes = _yolo_infer_detect(
+                    model, img_path, self.config.keep_categories,
+                    self.config.confidence_threshold,
+                )
         except Exception as e:
             logger.warning(f"YOLO object detector: inference failed for {img_path}: {e}")
             return []
+
+        _n_pre = len(boxes)
+        boxes = [
+            (class_name, bbox, confidence) for class_name, bbox, confidence in boxes
+            if _passes_shape_floor(bbox, self.config.min_area_px)
+        ]
+        if len(boxes) < _n_pre:
+            logger.info(f"D1 shape floor: dropped {_n_pre - len(boxes)} of {_n_pre} boxes for {img_path}")
 
         return [
             WindowDetection(
@@ -115,31 +144,43 @@ class YoloObjectDetector:
             cols=cols, rows=rows, overlap_pct=self.config.tile_overlap_pct
         )
 
-        all_dicts: List[Dict[str, Any]] = []
-        for tile_img, meta in splitter.split(image):
-            try:
-                boxes = _yolo_infer_detect(
-                    model, tile_img, self.config.keep_categories,
-                    self.config.confidence_threshold,
-                )
-            except Exception as e:
-                logger.warning(
-                    f"YOLO tiled detector: tile ({meta.col},{meta.row}) "
-                    f"inference failed: {e}"
-                )
-                continue
-            tile_dicts = [
-                {"category": category, "bbox": list(bbox), "confidence": confidence}
-                for category, bbox, confidence in boxes
-            ]
-            all_dicts.extend(splitter.rescale_rooms(tile_dicts, meta))
+        from ..orchestration.mlflow_tracking import log_stage_metric, traced
+        log_stage_metric("yolo_tiled", "tile_count", cols * rows)
 
-        merged = _merge_per_category(
-            splitter,
-            all_dicts,
-            self.config.tile_merge_iou,
-            self.config.tile_max_detections_per_category,
-        )
+        all_dicts: List[Dict[str, Any]] = []
+        with traced("yolo.detect_objects_tiled", "TOOL"):
+            for tile_img, meta in splitter.split(image):
+                try:
+                    boxes = _yolo_infer_detect(
+                        model, tile_img, self.config.keep_categories,
+                        self.config.confidence_threshold,
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"YOLO tiled detector: tile ({meta.col},{meta.row}) "
+                        f"inference failed: {e}"
+                    )
+                    continue
+                tile_dicts = [
+                    {"category": category, "bbox": list(bbox), "confidence": confidence}
+                    for category, bbox, confidence in boxes
+                ]
+                all_dicts.extend(splitter.rescale_rooms(tile_dicts, meta))
+
+            merged = _merge_per_category(
+                splitter,
+                all_dicts,
+                self.config.tile_merge_iou,
+                self.config.tile_max_detections_per_category,
+            )
+
+        _n_pre = len(merged)
+        merged = [
+            d for d in merged
+            if _passes_shape_floor(d["bbox"], self.config.min_area_px)
+        ]
+        if len(merged) < _n_pre:
+            logger.info(f"D1 shape floor: dropped {_n_pre - len(merged)} of {_n_pre} tiled boxes for {img_path}")
 
         return [
             WindowDetection(

@@ -25,6 +25,7 @@ from ..ingestion.two_pass_ocr_extractor import TwoPassOCRExtractor
 from ..vlm.vlm_annotator import VLMAnnotator
 from ..vlm.semantic_reconciler import SemanticReconciler
 from ..vlm.vlm_backend import VLMFactory
+from ..vlm import prompt_templates
 from ..detection.sam_segmenter import RoomSegmenter
 from ..detection.cubicasa5k_detector import CubiCasa5KDetector
 from ..bbox.bbox_visualizer import BboxVisualizer
@@ -33,7 +34,7 @@ from ..automation import (
     LabelNormalizer, QualityChecker, RegionExtractor,
     ImageResizer, SemanticRoomValidator, TaxonomyNormalizer,
     filter_by_confidence, validate_for_sft, prepare_sft_annotation,
-    SFTAnnotationBuilder, build_annotation_json
+    SFTAnnotationBuilder, build_annotation_json, ConfidenceComputer
 )
 from ..automation.sft_validator import _merge_vlm_and_ocr
 from ..automation.taxonomy import normalize_to_mandatory, get_extended_type
@@ -186,6 +187,45 @@ class AnnotationPipeline:
             self._pdf_extractor = PDFExtractor(self.config.pdf)
         return self._pdf_extractor
 
+    def _pdf_text_layer_detections(self, img_path: Path) -> Optional[List[TextDetection]]:
+        """Y1 (2026-08-20 audit): fetch PDF text-layer detections for
+        img_path, for the caller to pass as find_rooms_pass1's
+        extra_detections -- candidate classification ONLY.
+
+        Corrects the original prototype's integration point: that design
+        merged PDF detections into raw_detections itself, which also
+        feeds compute_exclusion_zones and is CONFIRMED unsafe there
+        (measured on Lake Shore Electrical p002: 133->828 detections,
+        3->16 exclusion zones, the 13 new zones covering real classrooms,
+        not BOM tables -- see PipelineConfig.use_pdf_text_layer's
+        docstring for the full incident). This method does no merging at
+        all -- it returns PDF-only detections; MEPTextExtractor.
+        extract_and_find_rooms does the OCR-wins collision filtering,
+        because that is the first point OCR's own raw_detections exists
+        to filter against.
+
+        Returns None (not []) when the flag is off, the source PDF can't
+        be located, or the filename has no parseable page index --
+        find_rooms_pass1's extra_detections=None is its own documented
+        byte-identical-to-before path; returning None here keeps that
+        contract explicit rather than relying on an empty list behaving
+        the same way.
+        """
+        if not self.config.use_pdf_text_layer:
+            return None
+
+        pdf_path = self._source_pdf_for(img_path)
+        if pdf_path is None:
+            return None
+
+        import re
+        match = re.search(r"_page(\d+)$", img_path.stem)
+        if not match:
+            return None
+        page_index = int(match.group(1))
+
+        return self.pdf_extractor.extract_text_layer(pdf_path, page_index) or None
+
     @property
     def ocr_extractor(self) -> TwoPassOCRExtractor:
         """
@@ -333,6 +373,19 @@ class AnnotationPipeline:
         _run_timestamp = _run_start_utc.strftime("%Y-%m-%d_%H%M%S")
         _run_pid = os.getpid()
 
+        from .mlflow_tracking import start_run, log_params, log_tags
+        _mlflow_run_id = start_run(self.config.mlflow)
+        if _mlflow_run_id:
+            log_params(self._build_config_dict())
+            log_tags({"experiment_name": self.config.mlflow.experiment_name})
+
+        # Per-run accumulator for object-detection corroboration signal
+        # (_apply_object_attributes below); logged as an MLflow metric at
+        # run-end regardless of whether corroboration_weight is nonzero,
+        # so it's visible per run whether the object-evidence path found
+        # anything even while inert (weight=0.0 default).
+        self._corroboration_totals = {"evidence_count": 0, "evidence_score_sum": 0.0}
+
         input_path = Path(input_dir)
         output_dir = Path(output_dir)
 
@@ -370,6 +423,9 @@ class AnnotationPipeline:
             }
             _metrics_fh.write(json.dumps(record) + "\n")
             _metrics_fh.flush()
+            from .mlflow_tracking import log_stage_metric
+            log_stage_metric(stage, f"{stage}_duration_ms", record["duration_ms"])
+            log_stage_metric(stage, f"{stage}_outcome_{outcome}", 1)
 
         # Accumulate per-step drop counts across all pages for run summary.
         run_drop_attribution: Dict[str, int] = {}
@@ -573,7 +629,14 @@ class AnnotationPipeline:
                 # are deferred to the assembly step below, after the OCR native heap
                 # is released, so PaddleOCR and the VLM model are never co-resident
                 # (which would exceed host RAM). Order (refine → abbrev) is preserved.
-                pass1_rooms, raw_detections = self.ocr_extractor.find_rooms_pass1(img_path)
+                pdf_text_dets = self._pdf_text_layer_detections(img_path)
+                pass1_rooms, raw_detections = self.ocr_extractor.find_rooms_pass1(
+                    img_path, extra_detections=pdf_text_dets
+                )
+                # raw_detections stays OCR-only here -- pdf_text_dets only
+                # reached find_room_candidates (inside find_rooms_pass1),
+                # never compute_exclusion_zones below. See
+                # _pdf_text_layer_detections's docstring for why.
 
                 # FIX-4: Compute exclusion zones from excluded-token clusters.
                 try:
@@ -902,12 +965,16 @@ class AnnotationPipeline:
 
                 # Step 4a: SFT-grade filtering and semantic validation
                 original_room_count = len(annotation.get("rooms", []) or annotation.get("ocr_rooms", []))
+                # Captured before prepare_sft_annotation pops "ocr_rooms" — needed
+                # downstream by the quality checker's OCR_NAME_EMPTY check.
+                raw_ocr_rooms = annotation.get("ocr_rooms", [])
                 _t0_sft = time.time()
                 annotation = prepare_sft_annotation(
                     annotation,
                     min_rooms_for_sft=self.config.min_rooms_for_sft,
                     image_dir=images_dir,
                     use_window_elongation_filter=self.config.use_window_elongation_filter,
+                    exempt_sam_expanded_from_ink_filter=self.config.exempt_sam_expanded_from_ink_filter,
                 )
                 filtered_room_count = len(annotation.get("rooms", []))
                 _sft_outcome = "sft_ready" if annotation.get("sft_ready") else "filtered"
@@ -946,7 +1013,7 @@ class AnnotationPipeline:
                     logger.debug(f"    {ann_path.name}: '{raw_type}' → '{canonical}'")
 
                 # Step 4c: Check annotation quality
-                issues = self.quality_checker.check_annotation(annotation)
+                issues = self.quality_checker.check_annotation(annotation, ocr_rooms=raw_ocr_rooms)
                 if issues:
                     quality_summary["annotations_with_issues"] += 1
                     quality_summary["total_issues"] += len(issues)
@@ -1076,7 +1143,9 @@ class AnnotationPipeline:
                     for idx, r in enumerate(new_rr)
                 ]
                 new_mappings = map_detections_to_rooms(reconstructed_detections, rooms_for_remapping)
-                new_rr = self._apply_object_attributes(new_rr, new_mappings)
+                new_rr = self._apply_object_attributes(
+                    new_rr, new_mappings, **self._confidence_weight_kwargs()
+                )
                 annotation["roomsRecognized"] = new_rr
 
                 if not is_sft_ready and room_count == 0 and localization_failed:
@@ -1277,11 +1346,52 @@ class AnnotationPipeline:
             "end_utc": datetime.now(timezone.utc).isoformat(),
             "config": self._build_config_dict(),
             "image_status": image_status,
+            "mlflow_run_id": _mlflow_run_id,
+            "mlflow_experiment_name": (
+                self.config.mlflow.experiment_name if _mlflow_run_id else None
+            ),
         }
         manifest_path = output_dir / f"run_manifest_{_run_timestamp}.json"
         with open(manifest_path, "w") as f:
             json.dump(manifest, f, indent=2)
         logger.info(f"Run manifest written: {manifest_path}")
+
+        # Optional GT-scored quality metrics (opt-in via --eval-gt-dir).
+        # Wired here, not made mandatory: most production runs have no GT.
+        if self.config.eval_gt_dir is not None:
+            from ..bbox.bbox_metrics import evaluate_dataset
+            from .mlflow_tracking import log_params as _log_eval_params
+            try:
+                eval_results = evaluate_dataset(
+                    annotations_dir, Path(self.config.eval_gt_dir), output_dir=output_dir
+                )
+                _n = len(eval_results) or 1
+                _agg = {
+                    "mean_iou": sum(r.mean_iou for r in eval_results.values()) / _n,
+                    "mean_giou": sum(r.mean_giou for r in eval_results.values()) / _n,
+                    "mean_diou": sum(r.mean_diou for r in eval_results.values()) / _n,
+                    "mean_ciou": sum(r.mean_ciou for r in eval_results.values()) / _n,
+                    "map_50": sum(r.map_50 for r in eval_results.values()) / _n,
+                    "accuracy_50": sum(r.accuracy_50 for r in eval_results.values()) / _n,
+                }
+                eval_metrics_path = output_dir / "eval_metrics.json"
+                with open(eval_metrics_path, "w") as f:
+                    json.dump(_agg, f, indent=2)
+                logger.info(f"GT eval metrics written: {eval_metrics_path} -> {_agg}")
+                if _mlflow_run_id:
+                    _log_eval_params({"gt_eval": _agg})
+            except Exception as e:
+                logger.warning(f"GT evaluation failed (non-fatal): {e}")
+
+        from .mlflow_tracking import log_stage_metric as _log_corrob_metric, end_run
+        _corrob = self._corroboration_totals
+        _log_corrob_metric("corroboration", "total_evidence_count", _corrob["evidence_count"])
+        if _corrob["evidence_count"] > 0:
+            _log_corrob_metric(
+                "corroboration", "mean_evidence_score",
+                _corrob["evidence_score_sum"] / _corrob["evidence_count"],
+            )
+        end_run()
 
         logger.info("Pipeline run() complete — all steps finished.")
         return stats
@@ -1862,7 +1972,8 @@ class AnnotationPipeline:
                 object_detections = self._collect_object_detections(mappings)
                 data["objectDetections"] = object_detections
                 data["roomsRecognized"] = self._apply_object_attributes(
-                    data["roomsRecognized"], mappings
+                    data["roomsRecognized"], mappings,
+                    **self._confidence_weight_kwargs()
                 )
 
             except Exception as e:
@@ -1974,7 +2085,8 @@ class AnnotationPipeline:
                 )
                 data["objectDetections"] = self._collect_object_detections(mappings)
                 data["roomsRecognized"] = self._apply_object_attributes(
-                    data["roomsRecognized"], mappings
+                    data["roomsRecognized"], mappings,
+                    **self._confidence_weight_kwargs()
                 )
 
             except Exception as e:
@@ -2159,10 +2271,27 @@ class AnnotationPipeline:
         room_area = max(1.0, (rx2 - rx1) * (ry2 - ry1))
         return evidence_area / room_area
 
+    def _confidence_weight_kwargs(self) -> Dict[str, Any]:
+        """T-1: unpack PipelineConfig.confidence_weights into
+        _apply_object_attributes' kwarg names, once, for its 3 call sites."""
+        weights = self.config.confidence_weights
+        return {
+            "w_detection": weights.detection,
+            "w_classification": weights.classification,
+            "w_ocr": weights.ocr,
+            "w_corroboration": weights.corroboration,
+            "corroboration_totals": self._corroboration_totals,
+        }
+
     @staticmethod
     def _apply_object_attributes(
         sft_rooms: List[Dict[str, Any]],
         mappings: List[RoomWindowMapping],
+        w_detection: float = 0.3,
+        w_classification: float = 0.4,
+        w_ocr: float = 0.3,
+        w_corroboration: float = 0.0,
+        corroboration_totals: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
         """Tag each sft_room's coordinates.attributes with object-
         detection flags (has_door/has_windows/etc), keyed by its index
@@ -2172,11 +2301,18 @@ class AnnotationPipeline:
 
         G-B additions (tech-eval plan, confidence-boost + boundary signal):
         evidence_count/evidence_score are a plain, unweighted tally of the
-        5 existing flags -- NOT blended into the room's own `confidence`
-        field. evidence_bbox_area_frac is the boundary-consistency
-        measurement (see _evidence_bbox_area_frac). Both are additive,
-        tag-only, same as every other field this method already writes --
-        no existing behavior changes, nothing here is read anywhere yet.
+        5 existing flags. evidence_bbox_area_frac is the boundary-
+        consistency measurement (see _evidence_bbox_area_frac).
+
+        T-1 (G-1, 2026-09-03): evidence_score now ALSO feeds
+        ConfidenceComputer.apply_corroboration as this method's
+        corroboration_score -- the wire G-B's own comment said didn't
+        exist yet. w_corroboration defaults to 0.0 (ConfidenceWeightsConfig's
+        default), so with no caller override this recomputes each room's
+        `confidence` from its own already-stored 3-factor components and
+        reproduces the same value -- a no-op until a caller passes a
+        nonzero weight. Rooms with no mapping match are untouched, same
+        as always: no evidence pass, no confidence change, no penalty.
         """
         mapping_by_id = {m.room_id: m for m in mappings}
         updated = []
@@ -2190,6 +2326,10 @@ class AnnotationPipeline:
                     mapping.has_bathtub, mapping.has_sink,
                 )
                 evidence_count = sum(1 for f in evidence_flags if f)
+                evidence_score = evidence_count / len(evidence_flags)
+                if corroboration_totals is not None:
+                    corroboration_totals["evidence_count"] += evidence_count
+                    corroboration_totals["evidence_score_sum"] += evidence_score
                 attrs.update({
                     "has_windows": mapping.has_windows,
                     "has_skylights": mapping.has_skylights,
@@ -2200,7 +2340,7 @@ class AnnotationPipeline:
                     "has_sink": mapping.has_sink,
                     "window_count": mapping.window_count,
                     "evidence_count": evidence_count,
-                    "evidence_score": evidence_count / len(evidence_flags),
+                    "evidence_score": evidence_score,
                     "evidence_bbox_area_frac": AnnotationPipeline._evidence_bbox_area_frac(
                         coords.get("bbox") if coords else None,
                         mapping.intersecting_windows,
@@ -2208,6 +2348,11 @@ class AnnotationPipeline:
                 })
                 if coords:
                     coords["attributes"] = attrs
+                ConfidenceComputer.apply_corroboration(
+                    sft_room, evidence_score,
+                    w_detection=w_detection, w_classification=w_classification,
+                    w_ocr=w_ocr, w_corroboration=w_corroboration,
+                )
             updated.append(sft_room)
         return updated
 
@@ -2246,6 +2391,13 @@ class AnnotationPipeline:
                 "tile_overlap_pct": self.config.tile_overlap_pct,
                 "tile_trigger_px": self.config.tile_trigger_px,
             },
+            "confidence_weights": {
+                "detection": self.config.confidence_weights.detection,
+                "classification": self.config.confidence_weights.classification,
+                "ocr": self.config.confidence_weights.ocr,
+                "corroboration": self.config.confidence_weights.corroboration,
+            },
+            "prompt_versions": dict(prompt_templates.PROMPT_VERSIONS),
         }
 
     def _save_config(self, config_path: Path) -> None:
@@ -2441,6 +2593,35 @@ def _warn_if_sam3_exemplar_orphaned(config: PipelineConfig) -> None:
         )
 
 
+def _warn_if_yolo_objects_ocr_only(config: PipelineConfig) -> None:
+    """use_yolo_objects tags rooms via geometric bbox intersection
+    (map_detections_to_rooms) against whatever room boxes exist at that
+    point in the run. In OCR-only mode (use_vlm=False) those boxes are
+    the OCR text label's own bbox (e.g. 71x14px -- where "SUITE 301" is
+    printed), not the room's spatial extent, so a door/window detection
+    elsewhere in the room almost never geometrically intersects it.
+    SAM boundary expansion (use_sam) cannot rescue this either: it runs
+    in STEP 3.5, strictly after object detection -> room mapping is
+    already computed and persisted earlier in the same per-image pass.
+
+    Confirmed on a real page (P-1, 2026-09-03): 26 real OCR rooms + 44
+    real YOLO detections -> 0 attached (objectDetections empty). All 14
+    real runs on disk instead used use_vlm=True, where room boxes come
+    from the VLM (real spatial extent) and this problem does not occur
+    -- but the flag combination itself still silently burns a full
+    tiled-detector pass with ~zero attached signal if anyone runs it
+    OCR-only, so warn rather than let that go unnoticed."""
+    if config.use_yolo_objects and not config.use_vlm:
+        logger.warning(
+            "--use-yolo-objects with no --use-vlm: room boxes in OCR-only "
+            "mode are text-label bboxes, not room extents, so object "
+            "detections will almost never attach to any room (objectDetections "
+            "will likely be empty). --use-sam does not fix this (SAM expansion "
+            "runs after object mapping is already computed). See memory "
+            "use-yolo-objects-ocr-only-nearly-noop for detail."
+        )
+
+
 def main():
     """CLI entry point for the annotation pipeline."""
     parser = argparse.ArgumentParser(
@@ -2536,12 +2717,57 @@ Examples:
              "--use-yolo-objects' own high-confidence detections (no "
              "effect unless --use-yolo-objects is also set). GT-measured "
              "win over YOLO-alone (Sam3ExemplarDetectorConfig docstring) "
-             "holds at YOLO conf=0.5, NOT this codebase's actual default "
-             "(0.75) -- at 0.75 the fix behind that win is a no-op. Real "
-             "project pages (not GT) have also shown this feature losing "
-             "real doors under its current tile grid -- see that "
+             "was originally measured at YOLO conf=0.5; this codebase's "
+             "default confidence_threshold changed 0.75->0.25 (I-2, "
+             "2026-09-01) and the win was re-measured there too -- small "
+             "but consistent F1 gain on all 3 GT datasets, recall-favoring "
+             "(see memory n3-sam3-union-remeasured-conf025-2026-09-01). "
+             "Real project pages (not GT) have also shown this feature "
+             "losing real doors under its current tile grid -- see that "
              "docstring's CONTESTED note before enabling in production. "
              "Tag-only, same as --use-yolo-objects. Default: off.",
+    )
+    parser.add_argument(
+        "--corroboration-weight",
+        type=float,
+        default=None,
+        help="T-1 (G-1): weight for an ADDITIVE object-detection "
+             "corroboration bonus on top of room confidence (default: "
+             "ConfidenceWeightsConfig.corroboration, 0.0 -- inert). Has "
+             "no effect unless --use-yolo-objects or --use-windows is "
+             "also set (no object mapping to corroborate with "
+             "otherwise). Boost-only: a room with no nearby door/window "
+             "evidence is unaffected, never penalized. Not validated at "
+             "any nonzero value yet -- T-1's own spike task (confidence "
+             "distribution spread, sft_recommended rate vs baseline) has "
+             "not been run; do not ship a nonzero default without it.",
+    )
+    parser.add_argument(
+        "--enable-mlflow",
+        action="store_true",
+        help="Enable MLflow run tracking for this run (default: off). "
+             "Requires an MLflow tracking server reachable at "
+             "--mlflow-tracking-uri (default: http://127.0.0.1:5000 or "
+             "$MLFLOW_TRACKING_URI). If mlflow is not installed or the "
+             "server is unreachable, the run continues unaffected and a "
+             "warning is logged.",
+    )
+    parser.add_argument(
+        "--mlflow-tracking-uri",
+        type=str,
+        default=None,
+        help="Override MlflowConfig.tracking_uri for this run.",
+    )
+    parser.add_argument(
+        "--eval-gt-dir",
+        type=str,
+        default=None,
+        help="Optional path to a ground-truth annotations directory (same "
+             "format as this pipeline's own annotations/ output). If set, "
+             "runs bbox_metrics.evaluate_dataset against this run's "
+             "predictions after run() completes and logs precision/recall/"
+             "IoU-family metrics to MLflow (if enabled) and to "
+             "eval_metrics.json in output_dir.",
     )
     parser.add_argument(
         "--high-detail",
@@ -2602,6 +2828,14 @@ Examples:
     config.use_yolo_objects = args.use_yolo_objects
     config.use_sam3_exemplar = args.use_sam3_exemplar
     _warn_if_sam3_exemplar_orphaned(config)
+    _warn_if_yolo_objects_ocr_only(config)
+    if args.corroboration_weight is not None:
+        config.confidence_weights.corroboration = args.corroboration_weight
+    config.mlflow.enabled = args.enable_mlflow
+    if args.mlflow_tracking_uri is not None:
+        config.mlflow.tracking_uri = args.mlflow_tracking_uri
+    if args.eval_gt_dir is not None:
+        config.eval_gt_dir = args.eval_gt_dir
     config.min_rooms_for_sft = args.min_rooms
     if args.no_tiling:
         config.use_tiling = False

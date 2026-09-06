@@ -73,6 +73,11 @@ class ConfidenceDetail:
     detection: float = 0.5  # Is there a room here? (0-1)
     classification: float = 0.5  # Is the type correct? (0-1)
     ocr: float = 0.5  # Was the text recognized? (0-1)
+    # T-1 (2026-09-03): additive corroboration bonus from object-detection
+    # evidence (has_door/has_windows/etc, see pipeline.py's
+    # _apply_object_attributes). 0.0 = no evidence pass has run yet, or
+    # none found nearby -- identical to pre-T-1 behavior either way.
+    corroboration: float = 0.0
 
 
 @dataclass
@@ -182,10 +187,19 @@ class NameUniquifier:
 
 class ConfidenceComputer:
     """
-    Unified confidence computation: composite score from three factors.
+    Unified confidence computation: composite score from three factors,
+    plus an optional additive corroboration bonus (T-1, G-1).
 
     Formula:
-        confidence = 0.3 * C_detection + 0.4 * C_classification + 0.3 * C_ocr
+        confidence = w_det * C_detection + w_cls * C_classification
+                     + w_ocr * C_ocr + w_corrob * C_corroboration
+
+    w_corrob is NOT drawn from the same 1.0 pie as the other three --
+    see ConfidenceWeightsConfig's docstring (config/config.py) for why
+    this must be additive, not a reallocated weighted average. Every
+    weight defaults to its pre-T-1 literal value (0.3/0.4/0.3/0.0), so
+    calling this with no weight overrides reproduces the original
+    3-factor formula exactly.
     """
 
     @staticmethod
@@ -193,9 +207,15 @@ class ConfidenceComputer:
         detection_score: float = 0.9,
         classification_score: float = 0.9,
         ocr_score: float = 0.7,
+        corroboration_score: float = 0.0,
+        w_detection: float = 0.3,
+        w_classification: float = 0.4,
+        w_ocr: float = 0.3,
+        w_corroboration: float = 0.0,
     ) -> tuple[float, ConfidenceDetail]:
         """
-        Compute combined confidence from three factors.
+        Compute combined confidence from three factors plus an optional
+        additive corroboration bonus.
 
         Args:
             detection_score: Probability that a room exists here (0-1).
@@ -204,6 +224,15 @@ class ConfidenceComputer:
                 Depends on match quality: exact=1.0, substring=0.8, fuzzy=0.7, fallback=0.3.
             ocr_score: Text recognition confidence (0-1).
                 From PaddleOCR confidence, or 1.0 if VLM-generated.
+            corroboration_score: Object-detection evidence strength (0-1),
+                e.g. the evidence_score fraction from
+                pipeline.py's _apply_object_attributes. 0.0 (default) =
+                no evidence pass has run, or none found nearby.
+            w_detection, w_classification, w_ocr: Weights for the base
+                3-factor average. Default to the original literals.
+            w_corroboration: Weight for the additive corroboration bonus.
+                Default 0.0 -- inert until a caller explicitly enables it
+                (ConfidenceWeightsConfig.corroboration).
 
         Returns:
             Tuple of (combined_confidence, detail_breakdown).
@@ -212,18 +241,68 @@ class ConfidenceComputer:
         det = max(0.0, min(1.0, detection_score))
         cls = max(0.0, min(1.0, classification_score))
         ocr = max(0.0, min(1.0, ocr_score))
+        corrob = max(0.0, min(1.0, corroboration_score))
 
-        # Weighted combination (40% classification, 30% each for detection/OCR)
-        combined = 0.3 * det + 0.4 * cls + 0.3 * ocr
-        combined = max(0.0, min(1.0, combined))
+        base = w_detection * det + w_classification * cls + w_ocr * ocr
+        # Additive bonus, not folded into the weighted average above --
+        # corrob=0 (no evidence) leaves `base` untouched, satisfying the
+        # "absence of evidence never penalizes" requirement (T-1 risk table).
+        combined = max(0.0, min(1.0, base + w_corroboration * corrob))
 
         detail = ConfidenceDetail(
             detection=round(det, 4),
             classification=round(cls, 4),
             ocr=round(ocr, 4),
+            corroboration=round(corrob, 4),
         )
 
         return round(combined, 4), detail
+
+    @staticmethod
+    def apply_corroboration(
+        room_dict: Dict[str, Any],
+        corroboration_score: float,
+        w_detection: float = 0.3,
+        w_classification: float = 0.4,
+        w_ocr: float = 0.3,
+        w_corroboration: float = 0.0,
+    ) -> Dict[str, Any]:
+        """T-1 (G-1): recompute an already-serialized room dict's
+        `confidence`/`confidence_detail` with a corroboration bonus.
+
+        Object-detection evidence (has_door/has_windows/etc) is only
+        known AFTER `build_room()` has already produced and serialized
+        the room (pipeline.py's per-image flow runs room-building before
+        object-detection mapping in the same pass) -- so this re-derives
+        the combined score from the room's own already-clamped
+        `confidence_detail` components rather than requiring the raw
+        pre-clamp inputs to be threaded through a second call path.
+
+        Mutates and returns `room_dict` in place, matching
+        `_apply_object_attributes`'s own mutate-and-return style. With
+        `w_corroboration=0.0` (default) this is a no-op: recomputing
+        from the same three stored components with the same three base
+        weights reproduces the existing `confidence` value exactly.
+        """
+        detail = room_dict.get("confidence_detail", {})
+        combined, new_detail = ConfidenceComputer.compute(
+            detection_score=detail.get("detection", 0.9),
+            classification_score=detail.get("classification", 0.9),
+            ocr_score=detail.get("ocr", 0.7),
+            corroboration_score=corroboration_score,
+            w_detection=w_detection,
+            w_classification=w_classification,
+            w_ocr=w_ocr,
+            w_corroboration=w_corroboration,
+        )
+        room_dict["confidence"] = combined
+        room_dict["confidence_detail"] = {
+            "detection": new_detail.detection,
+            "classification": new_detail.classification,
+            "ocr": new_detail.ocr,
+            "corroboration": new_detail.corroboration,
+        }
+        return room_dict
 
     @staticmethod
     def classification_score_for_match(match_type: str) -> float:
@@ -450,6 +529,7 @@ class SFTAnnotationBuilder:
             "detection": room.confidence_detail.detection,
             "classification": room.confidence_detail.classification,
             "ocr": room.confidence_detail.ocr,
+            "corroboration": room.confidence_detail.corroboration,
         }
 
         return result

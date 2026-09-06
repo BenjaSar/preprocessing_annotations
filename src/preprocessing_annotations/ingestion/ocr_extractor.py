@@ -472,7 +472,9 @@ class MEPTextExtractor:
         pixel coordinates. Shared by the single-pass and tiled paths.
         """
         try:
-            raw_detections = self.ocr_backend.extract_text(image)
+            from ..orchestration.mlflow_tracking import traced
+            with traced("ocr.extract_text", "TOOL"):
+                raw_detections = self.ocr_backend.extract_text(image)
         except Exception as e:
             raise OCRError(f"OCR failed on {label}: {e}") from e
 
@@ -1057,7 +1059,18 @@ class MEPTextExtractor:
     # (separately configured), giving full in-plan label recall at 4500px input.
     _OCR_MAX_DIM_PX: int = 4500
 
-    def extract_and_find_rooms(self, image_path: str | Path):
+    # Y1 (2026-08-20 audit, corrects a wrong integration point from the
+    # same-day PDF-text-layer prototype): "OCR already found something
+    # HERE" tolerance for merging extra_detections into candidate
+    # classification. Same centroid-proximity convention as
+    # _dedupe_detections's own center_tol=20 default -- not a new value.
+    _EXTRA_DETECTIONS_MERGE_TOL_PX: int = 20
+
+    def extract_and_find_rooms(
+        self,
+        image_path: str | Path,
+        extra_detections: Optional[List["TextDetection"]] = None,
+    ):
         """
         Extract text and find room candidates, returning BOTH results.
 
@@ -1068,6 +1081,32 @@ class MEPTextExtractor:
 
         Args:
             image_path: Path to the image file.
+            extra_detections: Optional additional TextDetections (currently:
+                PDF text-layer recovery, pipeline.py's
+                _pdf_text_layer_detections) to consider for room candidates,
+                on top of what OCR itself found. Default None -- byte-
+                identical to pre-Y1 behavior.
+
+                CRITICAL, this is the fix Y1 exists for: extra_detections
+                is merged ONLY into the list passed to
+                find_room_candidates(). The returned raw_detections stays
+                OCR-only, unchanged. raw_detections also feeds
+                compute_exclusion_zones downstream (pipeline.py), which
+                is CONFIRMED unsafe with PDF-sourced input -- measured on
+                Lake Shore Electrical p002: merging there took exclusion
+                zones from 3 to 16, the 13 new zones covering real
+                classrooms, not BOM tables (see
+                PipelineConfig.use_pdf_text_layer's docstring for the
+                full incident). The original prototype merged into the
+                wrong list; this signature exists so that mistake cannot
+                be reintroduced by a future caller doing the obvious
+                thing with the return value.
+
+                OCR wins every collision: an extra_detections item is
+                dropped, not added, when its centroid is within
+                _EXTRA_DETECTIONS_MERGE_TOL_PX of anything OCR already
+                found -- checked here, not by the caller, because this is
+                the first point raw_detections actually exists.
 
         Returns:
             Tuple of (List[RoomCandidate], List[TextDetection]).
@@ -1107,7 +1146,28 @@ class MEPTextExtractor:
                 except OSError:
                     pass
 
-        candidates = self.find_room_candidates(raw_detections)
+        candidate_input = raw_detections
+        if extra_detections:
+            existing_centroids = [_centroid(d.bbox) for d in raw_detections]
+            tol = self._EXTRA_DETECTIONS_MERGE_TOL_PX
+            non_colliding = []
+            for det in extra_detections:
+                cx, cy = _centroid(det.bbox)
+                if any(
+                    abs(cx - ex) <= tol and abs(cy - ey) <= tol
+                    for ex, ey in existing_centroids
+                ):
+                    continue
+                non_colliding.append(det)
+            if non_colliding:
+                logger.info(
+                    f"  {image_path.name}: extra_detections contributed "
+                    f"{len(non_colliding)} candidate-eligible detection(s) "
+                    f"OCR missed (of {len(extra_detections)} offered)"
+                )
+                candidate_input = raw_detections + non_colliding
+
+        candidates = self.find_room_candidates(candidate_input)
         return candidates, raw_detections
 
     def compute_exclusion_zones(

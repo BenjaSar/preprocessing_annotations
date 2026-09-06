@@ -192,6 +192,58 @@ def load_ground_truth(
     return [gt_image for gt_image in built if gt_image is not None]
 
 
+def _dilate_short_axis(bbox: BBox, factor: float) -> BBox:
+    """Stretch only `bbox`'s shorter axis by `factor`, centered in place."""
+    width, height = bbox.width, bbox.height
+    cx, cy = (bbox.x1 + bbox.x2) / 2, (bbox.y1 + bbox.y2) / 2
+    if width <= height:
+        new_half = (width * factor) / 2
+        return BBox(x1=cx - new_half, y1=bbox.y1, x2=cx + new_half, y2=bbox.y2)
+    new_half = (height * factor) / 2
+    return BBox(x1=bbox.x1, y1=cy - new_half, x2=bbox.x2, y2=cy + new_half)
+
+
+def dilate_category_short_axis(
+    gt_images: List[GTImage], category: str, factor: float
+) -> List[GTImage]:
+    """Return new GTImages with only `category` boxes short-axis-dilated.
+
+    I-4/I-6 (2026-09-01): GT-side convention fix, not a detector or
+    scoring-code change. Some GT sources label a box convention that
+    excludes wall thickness on the short axis (e.g. a window's glazing
+    line only); this pipeline's canonical convention (user-confirmed,
+    matches what the shipped YOLO checkpoint was trained to predict) is
+    wall-opening, i.e. including wall thickness. Dilating in memory at
+    load time, rather than re-labeling, recovered window TP 6->130 on
+    the commercial GT set (test_pcs_commercial) at conf 0.25 -- see
+    commercial-dataset-g12-assessment-2026-09-01.md Sec 2.1 for the
+    measured short-axis ratio this factor is derived from.
+
+    Other categories/images pass through with the same BBox instance,
+    not a copy -- this only replaces boxes for `category`.
+    """
+    dilated: List[GTImage] = []
+    for image in gt_images:
+        new_annotations = [
+            GTAnnotation(
+                bbox=_dilate_short_axis(annotation.bbox, factor)
+                if annotation.category == category
+                else annotation.bbox,
+                category=annotation.category,
+            )
+            for annotation in image.annotations
+        ]
+        dilated.append(
+            GTImage(
+                image_path=image.image_path,
+                width=image.width,
+                height=image.height,
+                annotations=new_annotations,
+            )
+        )
+    return dilated
+
+
 def report_unscored_categories(
     coco_path: Path, category_merge: Dict[str, str]
 ) -> Dict[str, int]:

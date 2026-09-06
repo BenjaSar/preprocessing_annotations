@@ -7,7 +7,7 @@ Filters non-spatial text, validates taxonomy, enforces confidence thresholds.
 
 import re
 from pathlib import Path
-from typing import Dict, List, Tuple, Optional
+from typing import Any, Dict, List, Tuple, Optional
 from PIL import Image
 import io
 import logging
@@ -951,6 +951,14 @@ def _adopt_ocr_geometry(target: Dict, ocr_room: Dict, ocr_name: str,
     target["sam_expanded"] = ocr_room.get("sam_expanded")
     target["sam_skip_reason"] = ocr_room.get("sam_skip_reason")
     target["sam_confidence"] = ocr_room.get("sam_confidence")
+    # B1 (2026-08-21 audit): content_density is attached per-room by SAM
+    # BEFORE this merge (pipeline.py runs refine_annotations separately on
+    # vlm_rooms and ocr_rooms), so target's own value describes the VLM
+    # box being discarded above, not ocr_room's box now becoming the
+    # geometry. Measured 16/16 (100%) of vlm_ocr_merged rooms on a real
+    # 3-page run carried a stale density (max drift 0.2848) before this
+    # fix -- same provenance-follows-geometry rule as sam_* below.
+    target["content_density"] = ocr_room.get("content_density")
     # Same provenance rule as the sam_* fields above: the polygon is derived
     # from ocr_room's bbox (SAM segments the OCR label, not the VLM box), so
     # it must travel with the geometry. Missing this silently demoted every
@@ -1120,16 +1128,29 @@ def _bbox_ink_fraction(gray: Image.Image, bbox: List, binarise_max: int) -> Opti
 
 
 def _filter_low_ink_rooms(
-    rooms: List[Dict], gray: Image.Image, min_frac: float, binarise_max: int
+    rooms: List[Dict],
+    gray: Image.Image,
+    min_frac: float,
+    binarise_max: int,
+    exempt_sam_expanded: bool = False,
 ) -> Tuple[List[Dict], int]:
     """Drop rooms whose box lies over a non-drawing region (ink below min_frac).
 
     Boxes that cannot be measured (malformed bbox, out of image) are kept — this
     filter only removes positively-confirmed low-ink placements.
+
+    exempt_sam_expanded (A1, 2026-08-21): when True, rooms with
+    room["sam_expanded"] truthy skip this check entirely -- measured to have
+    no discriminative power for that population (see
+    PipelineConfig.exempt_sam_expanded_from_ink_filter for the numbers).
+    Non-expanded rooms are unaffected either way.
     """
     kept: List[Dict] = []
     dropped = 0
     for room in rooms:
+        if exempt_sam_expanded and room.get("sam_expanded"):
+            kept.append(room)
+            continue
         frac = _bbox_ink_fraction(gray, room.get("bbox", []), binarise_max)
         if frac is not None and frac < min_frac:
             rn = room.get("room_name") or room.get("name", "?")
@@ -1264,6 +1285,7 @@ def prepare_sft_annotation(
     min_rooms_for_sft: int = 1,
     image_dir: Optional[Path] = None,
     use_window_elongation_filter: bool = False,
+    exempt_sam_expanded_from_ink_filter: bool = False,
 ) -> Dict:
     """
     Convert annotation to SFT-ready format.
@@ -1281,6 +1303,11 @@ def prepare_sft_annotation(
             symbols mislabeled window (near-square boxes; real windows are
             elongated, portrait or landscape). Default False: off, same
             precedent as every other detector-behavior flag in this pipeline.
+        exempt_sam_expanded_from_ink_filter: A1 (2026-08-21). When True,
+            FIX-5's ink-density check (_filter_low_ink_rooms) skips rooms
+            with sam_expanded truthy -- measured to have no discriminative
+            power for that population (see PipelineConfig's docstring for
+            the numbers). Default False pending validation.
 
     CRITICAL FIXES:
     - Merges VLM-detected rooms with OCR-detected compound names
@@ -1300,6 +1327,10 @@ def prepare_sft_annotation(
 
     # Per-step rejection counter — attached to annotation for run-level aggregation.
     drop_attribution: Dict[str, int] = {}
+    # Diagnostic-only, additive: per-room detail for the dominant drop reasons,
+    # so a run can be audited for false-negative risk (a real room dropped as
+    # noise) without needing to re-run with different thresholds first.
+    drop_detail: Dict[str, List[Dict[str, Any]]] = {}
 
     # CRITICAL FIX #2: Merge VLM and OCR results instead of OR logic
     vlm_rooms = annotation.get("rooms", [])
@@ -1314,11 +1345,28 @@ def prepare_sft_annotation(
     # /mislocated giants — logo/margin hallucinations and on-drawing swallowers;
     # zero legit vlm_only found). Dropping them removes exactly that class; the
     # VLM's real value (refining an OCR box → vlm_ocr_merged) is untouched.
+    _img_w0 = annotation.get("image_size", {}).get("width", 0)
+    _img_h0 = annotation.get("image_size", {}).get("height", 0)
+    _img_area0 = _img_w0 * _img_h0 if _img_w0 and _img_h0 else 0
     pre_vlm = len(rooms)
+    _dropped_vlm_only = [r for r in rooms if r.get("source") == "vlm_only"]
     rooms = [r for r in rooms if r.get("source") != "vlm_only"]
     n_vlm = pre_vlm - len(rooms)
     if n_vlm:
         drop_attribution["vlm_uncorroborated"] = n_vlm
+        _detail = []
+        for r in _dropped_vlm_only:
+            bbox = r.get("bbox")
+            area_frac = None
+            if bbox and len(bbox) == 4 and _img_area0:
+                area_frac = round((bbox[2] * bbox[3]) / _img_area0, 4)
+            _detail.append({
+                "room_name": r.get("room_name") or r.get("name"),
+                "room_type": r.get("room_type") or r.get("type"),
+                "bbox": bbox,
+                "area_frac": area_frac,
+            })
+        drop_detail["vlm_uncorroborated"] = _detail
         logger.info(f"FIX-7: dropped {n_vlm} uncorroborated vlm_only room(s)")
 
     # Step 0-pre: FIX-4 — drop rooms whose centroid falls inside a BOM/title-block exclusion zone.
@@ -1458,7 +1506,11 @@ def prepare_sft_annotation(
                 with Image.open(img_path) as im:
                     gray = im.convert("L")
                 rooms, n_ink = _filter_low_ink_rooms(
-                    rooms, gray, INK_MIN_FRAC, INK_BINARISE_MAX
+                    rooms,
+                    gray,
+                    INK_MIN_FRAC,
+                    INK_BINARISE_MAX,
+                    exempt_sam_expanded=exempt_sam_expanded_from_ink_filter,
                 )
                 if n_ink:
                     drop_attribution["low_ink"] = n_ink
@@ -1897,6 +1949,8 @@ def prepare_sft_annotation(
 
     # Attach per-step drop counts (omit zero-valued entries for readability).
     annotation["drop_attribution"] = {k: v for k, v in drop_attribution.items() if v}
+    if drop_detail:
+        annotation["drop_detail"] = drop_detail
 
     logger.info(
         f"SFT preparation complete: {len(sft_ready)} rooms, sft_ready={annotation['sft_ready']}"
