@@ -1,0 +1,16 @@
+{
+  "_meta": {
+    "source_image": "test_pcs/commercial/commercial_building_obj_detection_coco_w_images/images/aceb87d1-326_ROCKAWAY_-_AVI-ON_LAYOUT_page001.png",
+    "method": "manual visual inspection with pixel-coordinate grid overlay, by AI agent, 2026-09-04",
+    "precision": "approximate, +/-50-100px typical, NOT surveyed/pixel-perfect",
+    "n": 5,
+    "note": "small sample, real effort constraint, not the originally-proposed 20-30/page"
+  },
+  "rooms": {
+    "TYPE-A9 OBR": [1550, 1955, 310, 340],
+    "LOBBY":       [1600, 700, 320, 330],
+    "TYPE-B1":     [1170, 2075, 620, 215],
+    "VESTIBULE":   [1580, 2640, 150, 150],
+    "RECREATION":  [100, 1400, 900, 730]
+  }
+}

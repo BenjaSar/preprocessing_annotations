@@ -1,0 +1,13 @@
+fitz>=0.0.1
+Pillow>=9.0.0
+opencv-python>=4.6.0
+numpy>=1.21.0
+paddlepaddle-gpu<3.0,>=2.6.0
+paddleocr<3.0,>=2.7.0
+anthropic>=0.7.0
+segment-anything>=1.0
+torch>=2.0.0
+torchvision>=0.15.0
+
+[easyocr]
+easyocr>=1.6.0
