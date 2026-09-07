@@ -9,12 +9,12 @@ This file allows the pipeline to be run directly from the project root:
 import sys
 from pathlib import Path
 
-# Add current directory to path so absolute imports work
+# Add src/ to path so the package is importable without an editable install
 project_root = Path(__file__).parent
-sys.path.insert(0, str(project_root))
+sys.path.insert(0, str(project_root / "src"))
 
 # Now import and run the pipeline
 if __name__ == "__main__":
     # Import here to ensure path is set
-    from pipeline import main
+    from preprocessing_annotations.orchestration.pipeline import main
     main()
