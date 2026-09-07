@@ -1,7 +1,7 @@
 """Single-instance guard. Serialize pipeline runs to protect host RAM.
 
 VLM + SAM each load multi-GB models. Two concurrent runs exhaust 15 GiB
-RAM + swap and freeze the machine. This lock enforces one run at a  time.
+RAM + swap and freeze the machine. This lock enforces one run at a time.
 """
 import fcntl
 import logging
