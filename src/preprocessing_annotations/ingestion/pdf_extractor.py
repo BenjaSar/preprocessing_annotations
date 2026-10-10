@@ -58,22 +58,35 @@ class PDFExtractor:
         self.config = config or PDFConfig()
 
     def _page_scale(self, page: "fitz.Page") -> float:
-        """Rasterization scale: the configured flat dpi, capped so the longest
-        edge never exceeds `config.min_longest_edge_px`.
+        """Rasterization scale: the configured flat dpi, adjusted toward
+        `config.min_longest_edge_px` depending on `config.enforce_min_edge_floor`.
 
-        This reproduces the established baseline output sizes — large sheets are
-        capped to the cap value, physically small sheets keep their dpi-driven
-        size (they are NOT up-scaled). Up-scaling small sheets was tried to
-        recover otherwise-unreadable small-format pages, but on a CPU-only OCR
-        host it drove those pages' detection memory past the RAM ceiling; the cap
-        keeps memory bounded and matches the known-good baseline.
+        `min_longest_edge_px` is documented (see its own comment) as a FLOOR —
+        every page should rasterize to at least that many pixels on its longest
+        edge, raising dpi for small physical sheets whose glyphs would otherwise
+        be too small for OCR/VLM. That floor was never actually implemented here:
+        this method used to only ever cap large sheets DOWN to that value,
+        contradicting the field's own contract, because up-scaling small sheets
+        was tried previously and, on a CPU-only OCR host, drove those pages'
+        detection memory past the RAM ceiling.
+
+        `enforce_min_edge_floor=False` (default) preserves that legacy cap-only
+        behavior exactly, pending a memory measurement. Once validated, flipping
+        it to True makes this raise dpi for small sheets as the field always
+        claimed — downstream stages (OCR's own resize, the VLM pre-resize, the
+        bbox validators) already independently cap back down to the same
+        ceiling regardless of how a page got up there, so this should land
+        small sheets in the same already-proven-safe 4500px territory large
+        sheets run in today, not beyond it — an inference, not yet measured.
         """
         base_scale = self.config.dpi / self._PDF_POINTS_PER_INCH
         longest_edge_pts = max(page.rect.width, page.rect.height)
         if longest_edge_pts <= 0:
             return base_scale
-        cap_scale = self.config.min_longest_edge_px / longest_edge_pts
-        return min(base_scale, cap_scale)
+        floor_scale = self.config.min_longest_edge_px / longest_edge_pts
+        if self.config.enforce_min_edge_floor:
+            return max(base_scale, floor_scale)
+        return min(base_scale, floor_scale)
 
     def extract_text_layer(
         self, pdf_path: str | Path, page_index: int
@@ -303,6 +316,48 @@ class PageTypeClassifier:
     # Above this threshold the page is considered "text-heavy" (notes/schedule).
     TEXT_AREA_THRESHOLD: float = 0.12
 
+    # Manufacturer product cut-sheets (lighting fixture spec sheets, etc.)
+    # embed the spec tables/photos as raster images with almost no
+    # extractable text layer -- just a thin title-block boilerplate.
+    # Measured against corpus_batch2 (75 confirmed real floor-plan pages,
+    # 6 confirmed cut-sheet pages from one PDF): cut-sheet pages topped out
+    # at 621 chars of embedded text; the shortest genuine floor plan (after
+    # excluding the same two cut-sheet pages that separately false-positive
+    # via FLOOR_PLAN_PATTERNS, a pre-existing and separate issue) was 1195
+    # chars. 1000 sits in that gap with margin on both sides.
+    SPARSE_TEXT_THRESHOLD_CHARS: int = 1000
+
+    # Keywords that appear on cut-sheet/catalog pages but are otherwise too
+    # common in general-notes boilerplate ("refer to specifications...") to
+    # use standalone -- 17/75 confirmed real floor-plan pages in this corpus
+    # contain "SPECIFICATION" somewhere. Only safe when combined with the
+    # sparse-text-length gate above.
+    _SPARSE_PAGE_PATTERNS = re.compile(r"SPECIFICATION", re.IGNORECASE)
+
+    # Master sheet-index / drawing-index pages list OTHER sheets' titles in a
+    # table (e.g. a row reading "SITE LIGHTING PLANS"), so FLOOR_PLAN_PATTERNS
+    # (checked first, below) matches on a REFERENCED title instead of the
+    # page's own content -- confirmed real case: a page titled "SHEET INDEX &
+    # GENERAL NOTES" was misclassified "floor_plan" because its own index
+    # table listed a sheet called "SITE LIGHTING PLANS", matching
+    # LIGHTING\s+(PLAN|LAYOUT). This override runs BEFORE FLOOR_PLAN_PATTERNS
+    # to fix that.
+    #
+    # Deliberately excludes "TITLE SHEET" (present in NOTES_PATTERNS below,
+    # which runs after FLOOR_PLAN_PATTERNS and is not affected by this): a
+    # corpus-wide check found "TITLE\nSHEET" false-matching on every page of
+    # an unrelated real floor-plan PDF (220301_Elect_plans_05.pdf, all 8
+    # pages) -- PyMuPDF's text extraction scrambles the title-block field
+    # label "SHEET TITLE:" (present on every drawing sheet) into
+    # "...TITLE\nSHEET NO..." across a line break, which a bare
+    # `TITLE\s+SHEET` pattern matches regardless of intent. "SHEET INDEX" and
+    # "DRAWING INDEX" do not have this failure mode (checked corpus-wide,
+    # zero false collisions) because there is no equally common title-block
+    # field pair that reorders into either phrase.
+    _INDEX_PAGE_OVERRIDE_PATTERN = re.compile(
+        r"(SHEET\s+INDEX|DRAWING\s+INDEX)", re.IGNORECASE
+    )
+
     # Patterns that strongly indicate this is NOT a floor plan page.
     #
     # IMPORTANT: Only include patterns that are EXCLUSIVELY found on
@@ -393,6 +448,14 @@ class PageTypeClassifier:
 
         text_upper = text.upper()
 
+        # Sheet/drawing-index override: must run BEFORE FLOOR_PLAN_PATTERNS.
+        # An index page lists other sheets' titles in a table, which can
+        # match FLOOR_PLAN_PATTERNS on a referenced title rather than the
+        # page's own content (see field comment above).
+        index_match = self._INDEX_PAGE_OVERRIDE_PATTERN.search(text_upper)
+        if index_match:
+            return "notes_page", f"sheet/drawing index page: '{index_match.group()}'"
+
         # Check explicit floor-plan indicators first (high confidence)
         if self.FLOOR_PLAN_PATTERNS.search(text_upper):
             return "floor_plan", "floor plan keyword found"
@@ -401,6 +464,18 @@ class PageTypeClassifier:
         match = self.NOTES_PATTERNS.search(text_upper)
         if match:
             return "notes_page", f"notes/schedule keyword: '{match.group()}'"
+
+        # Manufacturer cut-sheet / product-spec pages: almost no extractable
+        # text (spec tables/photos are raster images) AND a specification
+        # keyword. Neither signal is safe alone (see field comments above);
+        # the combination is empirically clean on this corpus.
+        if len(text) < self.SPARSE_TEXT_THRESHOLD_CHARS:
+            spec_match = self._SPARSE_PAGE_PATTERNS.search(text_upper)
+            if spec_match:
+                return "notes_page", (
+                    f"sparse page ({len(text)} chars) with cut-sheet keyword: "
+                    f"'{spec_match.group()}'"
+                )
 
         # Text-area heuristic: dense text pages are documentation.
         # Title block boilerplate is used as secondary evidence to lower

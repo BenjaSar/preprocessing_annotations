@@ -109,6 +109,18 @@ class PDFConfig:
     # by their own down-resize.
     min_longest_edge_px: int = 4500
 
+    # Whether PDFExtractor._page_scale actually enforces min_longest_edge_px as
+    # the floor described above. Confirmed 2026-09-16: it did not — the code
+    # only ever capped small sheets down, never raised them, contradicting this
+    # field's own contract (see _page_scale's docstring for the prior CPU-host
+    # memory incident that caused that). Off by default until validated —
+    # measure peak OCR memory on a batch of small-sheet pages with this on
+    # before flipping the default, same bar as use_windows/use_yolo_objects in
+    # PipelineConfig. Landing at the same 4500px ceiling the rest of the corpus
+    # already runs at daily (not beyond it) is why this is expected to be safe,
+    # but that's an inference, not yet a measurement.
+    enforce_min_edge_floor: bool = False
+
     # Output image format
     output_format: str = "PNG"
 
@@ -175,7 +187,7 @@ class OCRConfig:
     room_name_patterns: List[str] = field(
         default_factory=lambda: [
             # --- Commercial / office spaces ---
-            r"^(SUITE|OFFICE|CONFERENCE(\s+ROOM)?|MEETING(\s+ROOM)?)\s*\d*$",
+            r"^(SUITE|OFFICE|CONFERENCE(\s+ROOM)?|MEETING(\s+ROOM)?)[\s-]*\d*$",
             # --- Utility / MEP rooms (require ROOM suffix or exact standalone) ---
             r"^MECHANICAL(\s+ROOM)?$",
             r"^ELECTRICAL(\s+ROOM)?$",
@@ -241,7 +253,7 @@ class OCRConfig:
             r"^(MEN|WOMEN)('?S)?\s+TOILET$",
             # Verified real omitted room labels (user-confirmed present on
             # school floor plans; each currently discarded at the OCR gate).
-            r"^(TEACHER\s+)?WORK\s+(RM|ROOM)$",
+            r"^(TEACHER\s+)?WORK\s*(RM|ROOM)$",
             r"^MAIL\s+(RM|ROOM)$",
             r"^JAN\s+CLOSET$",
             r"^LOUNGE$",
@@ -302,6 +314,35 @@ class OCRConfig:
             r"^PDR$",                                 # powder room
             r"^(CONF|STE|RECP|WC|TLT|RM)$",         # commercial
             r"^(MECH|BSMT|UTL|LNDRY)$",             # building services
+            # --- Automotive-dealership / clinic vocabulary gap (confirmed
+            # 2026-09-15 via real OCR: room text reads correctly but was
+            # dropped here for lacking a matching pattern, leaving the
+            # adjacent room-number tag an orphan with no name to link to —
+            # e.g. "Upper Showroom" verified at conf=0.974 on McDonald
+            # Hyundai page006, still discarded pre-fix) ---
+            r"^(UPPER\s+|LOWER\s+)?SHOWROOM$",
+            r"^ZOOM\s*\d*$",
+            r"^CAFE$",
+            r"^(DETAIL\s+)?BAYS?$",
+            r"^CAR\s+WASH$",
+            r"^EQUIPMENT\s+ROOM$",
+            r"^TRIAGE\s*\d*$",
+            r"^LAB$",
+            r"^DRAW\s*\d*$",
+            r"^NURSE\s+STATION$",
+            r"^EXAM\s+RM\s*\d*$",
+            r"^PROCEDURE\s*\d*$",
+            r"^INTAKE$",
+            r"^CASHIER$",
+            r"^RESIDENTIAL\s+UNIT$",
+            # --- Bank/credit-union branch vocabulary gap (confirmed
+            # 2026-09-16 via real OCR on Rally Palmhurst Credit Union: all
+            # read cleanly, conf 0.92-0.99, but none had a matching pattern) ---
+            r"^CUSTOMER\s*R\.?\s*R\.?$",   # "CUSTOMER R.R.", OCR-merged "CUSTOMERRR"
+            r"^TELLER\s+LINE$",
+            r"^MECH\s*/?\s*ELEC$",         # "MECH/ELEC", "MECH /ELEC"
+            r"^MOTHER('?S)?\s+ROOM$",
+            r"^NIGHT\s+DROP\s*/?\s*ITM$",
         ]
     )
 
@@ -437,6 +478,12 @@ class VLMConfig:
     door_max_new_tokens: int = 4096
     window_max_new_tokens: int = 4096
 
+    # AV-6 (2026-09-23): page-type triage's own budget -- a short JSON
+    # object ({"page_type": ..., "rationale": ...}), not reusing the
+    # room/door/window budgets (those are sized for numerous bbox
+    # instances; this task emits exactly one small object).
+    page_type_max_new_tokens: int = 128
+
     # Room token budget for Thinking-variant Unsloth checkpoints only.
     # Verified 2026-07-24 (t7_stochastic run, qwen3-vl-8b-thinking): the
     # reasoning preamble alone exhausted the 1024-token default with zero
@@ -567,6 +614,48 @@ class ExportConfig:
 
     # Percentage of lowest-confidence images to flag for review
     review_threshold: float = 0.25
+
+    # AV-1 (2026-09-23): also export objectDetections (door/window
+    # geometry) to a standalone COCO file (export/object_exporter.py),
+    # alongside the existing room-geometry coco/ export. Default False:
+    # adding this field changes no existing export's output; STEP 7 only
+    # calls ObjectDetectionCOCOExporter when this is explicitly enabled.
+    export_object_detections: bool = False
+
+    # Forwarded to ObjectDetectionCOCOExporter.export's min_confidence.
+    # Default 0.0 keeps every persisted detection -- no filtering beyond
+    # what the detector/pipeline already applied before persisting
+    # objectDetections.
+    object_detection_min_confidence: float = 0.0
+
+
+@dataclass
+class AttachmentConfig:
+    """AV-3 (2026-09-23): which AttachmentPolicy resolves object
+    detections (door/window/fixture) to rooms.
+
+    Default "intersection" -> IntersectionAttachmentPolicy, a thin
+    wrapper around the pre-AV-3 map_detections_to_rooms call -- adding
+    this dataclass and its two pipeline.py call sites changes no
+    behavior until policy is set to something else.
+
+    "nearest_with_cutoff" -> NearestWithCutoffAttachmentPolicy. Status:
+    Prototype First / Insufficient Evidence, not validated against this
+    corpus -- see that class's own docstring. Requires
+    nearest_cutoff_px to be set explicitly; there is no default cutoff,
+    because guessing one was the exact failure mode of the already-
+    rejected plain-nearest-room spike (memory
+    nearest-room-attachment-spike-2026-09-03).
+    """
+
+    policy: str = "intersection"
+    nearest_cutoff_px: Optional[float] = None
+
+    # AV-2: forwarded to map_detections_to_rooms's strict_type_dispatch.
+    # Default False reproduces the pre-AV-2 dispatch chain (unregistered
+    # object class folds into has_windows). See
+    # detection/object_types.py::ObjectTypeRegistry.flag_for.
+    strict_type_dispatch: bool = False
 
 
 @dataclass
@@ -1121,10 +1210,74 @@ class YoloObjectDetectorConfig:
     # (test_pcs door P.35/R.35->P.38/R.37, actually improved; held-out door
     # recall R.61->R.59, flat; Kaggle test flat) AND a real 18% further FP
     # drop on the 8 target pages (301->247; -40% from the original -6
-    # baseline of 414). Clean win, no tradeoff -- promoted.
+    # baseline of 414). Clean win on eval-harness benchmarks -- BUT see the
+    # 9->10 note below: a full-production-scale check (all 48 project
+    # files, not just eval fixtures) later found -9 had a severe,
+    # eval-harness-invisible window regression.
+    #
+    # Promoted 2026-09-07 (9 -> 10): two real bugs found via human QA on a
+    # fresh full-pipeline run (sprint1_verify50), NOT caught by the
+    # eval-harness checks above:
+    #
+    # (a) "Expanded door" bboxes -- root-caused to a genuine NMS gap, not
+    # a training issue: TileSplitter.merge's IoU-based dedup only drops a
+    # candidate whose overlap with an already-kept box exceeds
+    # iou_threshold. A wide box that CONTAINS several small real
+    # detections has LOW IoU with each individually (union dominated by
+    # the big box's own area), so nothing fires and all boxes survive
+    # side by side -- renders as one "expanded" door. Confirmed on a real
+    # case (Kennedy AVI-ON FLAT p002): a 559x333px box matched the
+    # bounding union of 3 separately-kept ~100-300px door boxes to within
+    # a few px. Fixed by `_drop_containment_unions()` in yolo_detector.py
+    # (D2) -- inference-time NMS post-processing, applies to any
+    # checkpoint, not a training fix. Validated directly against the
+    # confirmed case (drops the union box, keeps the 4 real doors).
+    #
+    # (b) Window suppression -- on the identical 48 production files,
+    # -7->-9 dropped window count 67->15 (-78%), invisible to the Kaggle/
+    # test_pcs/held-out checks above (which only showed a 4pt recall dip
+    # -- none of those benchmarks test at this project's actual file-set
+    # scale). Root cause: of -9's 414 E4 hard negatives, 33 were
+    # window-category; windows only had ~67 positive training instances
+    # (vs doors' 515+) so even a small negative count collapsed recall.
+    # Fixed by rebuilding negatives door-only (381 boxes -> 96 after the
+    # same per-page cap as -9), zero window negatives, retrained from -7.
+    # Kaggle-valid window P.73/R.71 post-retrain (healthy, no collapse).
+    #
+    # CAVEAT that turned out to be load-bearing: a full production-scale
+    # recount for -10 was attempted and abandoned (3 inconsistent
+    # reconstructions). -10 was promoted on Kaggle-valid health only.
+    #
+    # REVERTED 2026-09-07 (10 -> 7), same day: D2/D3 (yolo_detector.py)
+    # are GLOBAL code changes, not checkpoint-specific -- they apply to
+    # EVERY checkpoint, including ones measured before D2/D3 existed.
+    # This made every "-9 clean win" / "-10 fixes window" claim above
+    # an apples-to-oranges comparison (old checkpoint measured pre-D2/D3
+    # vs new checkpoint measured post-D2/D3). Re-scored -7, -9, -10 all
+    # under IDENTICAL current code (D2+D3 active) against test_pcs_
+    # commercial GT (11 images, the only real door/window GT this
+    # project has):
+    #
+    #   ckpt   door P/R/F1/IoU              window P/R/F1/IoU           avg F1
+    #   -7     .589/.526/.556/.718          .686/.433/.531/.701          .543
+    #   -9     .644/.492/.558/.737          .796/.341/.477/.704          .518
+    #   -10    .666/.432/.524/.746          .430/.194/.267/.694          .396
+    #
+    # Monotonic decline, -7 to -10, on BOTH categories' F1 and on window
+    # recall specifically (.433->.341->.194). Each retrain aimed at
+    # cutting door FPs traded away recall on both categories -- window
+    # took the largest hit each time (smaller positive training base).
+    # -7 is the best composite checkpoint under current code. -9 and -10
+    # are NOT improvements once scored fairly; they were only "wins"
+    # against a stale, incomparable pre-D2/D3 baseline for -7.
+    #
+    # D2/D3 (containment-union + area-outlier NMS fixes) remain shipped
+    # and validated on their own -- this revert is about CHECKPOINT
+    # CHOICE only, not those fixes. Do not re-promote -9/-10 without a
+    # fresh under-current-code GT comparison, not a raw production count.
     checkpoint_path: str = field(
         default_factory=lambda: str(
-            YOLO_CHECKPOINT_ROOT / "runs" / "kaggle_door_window-9"
+            YOLO_CHECKPOINT_ROOT / "runs" / "kaggle_door_window-7"
             / "weights" / "best.pt"
         )
     )
@@ -1556,6 +1709,7 @@ class PipelineConfig:
         default_factory=ConfidenceWeightsConfig
     )
     mlflow: MlflowConfig = field(default_factory=MlflowConfig)
+    attachment: AttachmentConfig = field(default_factory=AttachmentConfig)
 
     # Optional: ground-truth annotations dir (same format as this pipeline's
     # own annotations/ output). If set, run() calls bbox_metrics.evaluate_dataset
@@ -1598,6 +1752,45 @@ class PipelineConfig:
     # img) -- ship default-off, flip only on an explicit go-ahead per
     # the plan's P3 guarded-rollout step.
     use_sam3_exemplar: bool = False
+
+    # AV-6 (2026-09-23): page-type triage (floor_plan /
+    # non_architectural_document / other), one extra single-shot
+    # generate call per image inside STEP 3's existing per-image loop,
+    # while the VLM is already resident (no extra model load/unload
+    # cycle -- see _release_vlm_before_sam's docstring for why that
+    # matters on this stack). Advisory only: the result is persisted as
+    # an observable field on the annotation, never used to drop or
+    # accept a room. Requires use_vlm=True (no effect otherwise -- no
+    # model to classify with). Only the "unsloth" VLM backend has a
+    # PageClassifier adapter today (see vlm/classify/); with any other
+    # backend this flag is a no-op with a logged warning, not a crash.
+    # Default False: adding this flag changes no existing run's output.
+    #
+    # Status (2026-09-23): smoke-tested end-to-end once against a real
+    # page (qwen3-vl-8b, T4, model load 27.6s, classification 79.4s,
+    # correct floor_plan verdict with a coherent rationale on
+    # "ANIMAL CLINIC - AVI-ON LAYOUT_page000"). NOT accuracy-validated:
+    # no human-labeled sample has been scored for agreement rate yet --
+    # that is this flag's own stated precondition before raising its
+    # priority past Prototype First. Do not cite this as a measured
+    # triage accuracy.
+    use_page_type: bool = False
+
+    # E2 (2026-09-09): block single-letter abbreviation expansion ("K" ->
+    # KITCHEN, "P" -> PANTRY, "G" -> GARAGE in ABBREVIATION_MAP) in the
+    # room-candidate gating path (SemanticRoomValidator.filter_rooms,
+    # TaxonomyNormalizer.normalize). Default True -- unlike every other flag
+    # in this block, True is the SAFE default here, not the conservative
+    # off-state: measured on corpus_batch2 (88 pages), 30/30 bare "K" room
+    # candidates were false positives on visual inspection (fixture-type
+    # tags on a wire, structural grid-line labels, schedule-table
+    # column-header letters), zero were a real kitchen. "K"'s expansion is
+    # the only reason a bare single letter passes the room-keyword gate at
+    # all -- a bare "A"/"B"/etc. matches nothing and is dropped harmlessly.
+    # Set False only for a corpus confirmed to use bare single-letter room
+    # labels genuinely (see plan/single-letter-label-gate-plan-2026-09-09.md
+    # -- multi-character abbreviations like BR/WC/1BR are never affected).
+    block_single_letter_abbreviations: bool = True
 
     # Prototype (2026-08-20 audit): recover room labels from a PDF's
     # embedded text layer, additive-only against OCR's own detections

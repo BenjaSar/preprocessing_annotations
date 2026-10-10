@@ -119,6 +119,23 @@ _IP_STATEMENT_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+# Electrical panel schedule boilerplate fields (verified present via OCR on a
+# real sheet: "PANEL P3A" table containing "MOUNTING", "NEMA 3R", "DOUBLE LUG",
+# "FEED THRU", "200% NEUTRAL", "I/G BUS", "VOLTS", "PHASE", "WIRE", "MAIN",
+# "MLO", "A.I.C."). None of this table's own row/column-header text (numeric
+# circuit loads, single-letter column abbreviations like the "K"/"I"/"T" stack
+# in a "LTG/CONV/KIT/RECP/MISC" header row) was previously classified as an
+# excluded token, so compute_exclusion_zones() never formed a zone over the
+# table at all (needs >= min_cluster_tokens=3 excluded tokens in proximity) --
+# a room label mislocalized onto the table (e.g. "K" -> CAFETERIA, sitting on
+# the "KIT" column header) survived undetected. These phrases are corpus-wide
+# rare (2-5 of 147 pages checked) and specific to panel-schedule templates --
+# no collision risk with room names or general architectural notes.
+_ELECTRICAL_SCHEDULE_FIELD_PATTERN = re.compile(
+    r"(\bNEMA\b|DOUBLE\s+LUG|FEED\s+THRU|I\s*/\s*G\s+BUS|200\s*%\s*NEUTRAL|\bMLO\b)",
+    re.IGNORECASE,
+)
+
 
 def _is_excluded_token(text: str) -> bool:
     """Return True if the raw OCR text should never become a room candidate."""
@@ -132,6 +149,7 @@ def _is_excluded_token(text: str) -> bool:
         or _TITLE_BLOCK_PATTERN.search(text)
         or _STREET_PATTERN.search(text)
         or _IP_STATEMENT_PATTERN.search(text)
+        or _ELECTRICAL_SCHEDULE_FIELD_PATTERN.search(text)
     )
 
 
@@ -155,13 +173,61 @@ def _centroid(bbox_points: List[List[int]]) -> Tuple[float, float]:
     return sum(xs) / len(xs), sum(ys) / len(ys)
 
 
+def _rect_gap(a: Tuple[int, int, int, int], b: Tuple[int, int, int, int]) -> Tuple[float, float]:
+    """(dx, dy) gap between two rects along each axis; 0 if they overlap on that axis."""
+    dx = max(a[0] - b[2], b[0] - a[2], 0)
+    dy = max(a[1] - b[3], b[1] - a[3], 0)
+    return dx, dy
+
+
+def _group_titleblock_zones(
+    titleblock_zones: List[Tuple[int, int, int, int]],
+    radius: float,
+) -> List[List[Tuple[int, int, int, int]]]:
+    """R3 (2026-09-14): group title-block-pattern zones by physical proximity
+    before unioning them, instead of unioning every title-block match on the
+    page unconditionally.
+
+    Verified defect (220301_Elect_plans_05_page001, full-res visual + code
+    read): the page's real title block is a narrow column on the RIGHT edge,
+    but a second, unrelated title-block-pattern match elsewhere on the page
+    (e.g. a footer stamp) got unioned into the same bbox before extension,
+    making the union's width span nearly the full page -- which
+    `_extend_titleblock_zone` then extended from x=0, producing a zone
+    `[0, 363, 4500, 3046]` that swallowed the entire floor plan (40 raw rooms,
+    all real, all lost). Confirmed systemic, not a one-page fluke: 8/141
+    pages corpus-wide have an exclusion zone covering >30% of page area.
+
+    Reuses the same proximity radius as the token-level clustering above it
+    (`CLUSTER_RADIUS`) so "close enough to be one title strip" means the same
+    thing at both stages. Greedy single-link grouping, same structure as the
+    token clustering: a zone joins a group if it is within `radius` of ANY
+    existing member on both axes.
+    """
+    groups: List[List[Tuple[int, int, int, int]]] = []
+    for zone in titleblock_zones:
+        placed = False
+        for group in groups:
+            for member in group:
+                dx, dy = _rect_gap(zone, member)
+                if dx <= radius and dy <= radius:
+                    group.append(zone)
+                    placed = True
+                    break
+            if placed:
+                break
+        if not placed:
+            groups.append([zone])
+    return groups
+
+
 def _extend_titleblock_zone(
     titleblock_zones: List[Tuple[int, int, int, int]],
     image_width: int,
     image_height: int,
 ) -> Tuple[int, int, int, int]:
-    """Extend the union of title-block field zones to the page edge along the
-    title strip's long axis.
+    """Extend the union of ONE title-block strip's field zones to the page
+    edge along the strip's long axis.
 
     A firm's logo graphic sits inside/adjacent to the title-block field cluster
     (see _TITLE_BLOCK_PATTERN) but carries no OCR text, so proximity clustering
@@ -175,6 +241,13 @@ def _extend_titleblock_zone(
     vertical strip (side-column title block) across the full page height. The
     short axis stays at the detected field extent, so floor-plan content beyond
     the margin strip is never covered.
+
+    Callers MUST pass zones from a single spatially-coherent title-block strip
+    (see `_group_titleblock_zones`) -- unioning disjoint, unrelated title-block
+    matches from opposite sides of the page before calling this produces a
+    union wide/tall enough to make the wrong axis "win", extending a narrow
+    real title strip's zone across the entire page (verified defect, see
+    `_group_titleblock_zones`'s docstring).
     """
     x1 = min(z[0] for z in titleblock_zones)
     y1 = min(z[1] for z in titleblock_zones)
@@ -1210,6 +1283,17 @@ class MEPTextExtractor:
         # Simple greedy clustering by proximity (300px radius)
         CLUSTER_RADIUS = 300
         ZONE_PAD = 50
+        # Panel schedules place their boilerplate fields (NEMA/DOUBLE LUG/etc.)
+        # one text-line above their column-header row -- measured on 2 real,
+        # independently-sourced sheets (E-3.3 UNIT P3A, E-3.1 UNIT P2A): the
+        # gap between the boilerplate cluster's bbox and the header row is
+        # 55-59px, just past the default 50px pad, so a bare single-letter
+        # header cell ("K" in a stacked "LTG/CONV/KIT/RECP/MISC" header) was
+        # surviving as an unexcluded room candidate. A larger, gated pad
+        # (applies ONLY to clusters matched via
+        # _ELECTRICAL_SCHEDULE_FIELD_PATTERN, not BOM/title-block/street/IP
+        # zones) comfortably clears the measured gap with margin.
+        SCHEDULE_ZONE_PAD = 150
         clusters: list = []   # each entry = list of TextDetection
 
         for det in excluded_dets:
@@ -1246,13 +1330,17 @@ class MEPTextExtractor:
             )
             if len(cluster) < min_cluster_tokens and not has_strong_marker:
                 continue
+            is_schedule_cluster = any(
+                _ELECTRICAL_SCHEDULE_FIELD_PATTERN.search(d.text) for d in cluster
+            )
+            pad = SCHEDULE_ZONE_PAD if is_schedule_cluster else ZONE_PAD
             xs = [p[0] for d in cluster for p in d.bbox]
             ys = [p[1] for d in cluster for p in d.bbox]
             zone = (
-                max(0, min(xs) - ZONE_PAD),
-                max(0, min(ys) - ZONE_PAD),
-                max(xs) + ZONE_PAD,
-                max(ys) + ZONE_PAD,
+                max(0, min(xs) - pad),
+                max(0, min(ys) - pad),
+                max(xs) + pad,
+                max(ys) + pad,
             )
             # Title-block field clusters are collected separately: their union is
             # extended to the page edge below so the untexted logo corner abutting
@@ -1267,10 +1355,12 @@ class MEPTextExtractor:
                 f"[{zone[0]},{zone[1]},{zone[2]},{zone[3]}]"
             )
 
-        if titleblock_zones:
-            zones.append(
-                _extend_titleblock_zone(titleblock_zones, image_width, image_height)
-            )
+        # R3 (2026-09-14): group before extending -- see _group_titleblock_zones
+        # docstring. Each spatially-coherent group is one real title-block
+        # strip and gets extended independently; disjoint groups no longer
+        # union into one page-spanning zone.
+        for group in _group_titleblock_zones(titleblock_zones, CLUSTER_RADIUS):
+            zones.append(_extend_titleblock_zone(group, image_width, image_height))
 
         return zones
 

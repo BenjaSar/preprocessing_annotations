@@ -187,6 +187,37 @@ Rules:
 - Return ONLY valid JSON array. No markdown. No code fences. No text outside the JSON array."""
 
 
+# AV-6 (2026-09-23): page-type triage categories and prompt. Confirmed
+# gap: the zero-room-output population mixes genuine floor plans with
+# non-architectural document pages (schedules, compliance certificates,
+# site/location plans spanning multiple buildings) -- root cause
+# identified in the retracted room-extent spike (see
+# plan/technology-evaluation-2026-09-10.md Item 8, audited 2026-09-11:
+# 2/4 large-fraction verification samples were non-floorplan document
+# pages, not architecture). Nothing in the pipeline separates the two
+# today. This prompt/category set is deliberately the minimum needed to
+# make that separation observable -- a 3-way triage, not a full
+# document-type taxonomy (YAGNI).
+PAGE_TYPE_CATEGORIES = ("floor_plan", "non_architectural_document", "other")
+
+_PAGE_TYPE_PROMPT_UNSLOTH = """You are a floor plan annotation expert. Classify this single drawing sheet.
+
+Respond with ONLY one JSON object, no markdown:
+{"page_type": "<floor_plan|non_architectural_document|other>", "rationale": "<one short sentence>"}
+
+Definitions:
+- floor_plan: a real building's floor plan, or an MEP/electrical/lighting plan showing rooms or spaces of ONE building, even if sparsely labeled.
+- non_architectural_document: a schedule, compliance certificate, cover sheet, legend, or a site/location plan spanning MULTIPLE buildings -- not a single building's room layout.
+- other: cannot tell from this image alone.
+
+CRITICAL -- output ONLY the JSON object. No markdown. No code fences. No text before or after."""
+
+
+def build_page_type_prompt_unsloth() -> str:
+    """Page-type triage prompt for the Unsloth Qwen backend (AV-6)."""
+    return _PAGE_TYPE_PROMPT_UNSLOTH
+
+
 def build_window_prompt() -> str:
     """Window-detection prompt shared by the Claude and Qwen2.5-VL backends."""
     return _WINDOW_PROMPT
@@ -238,11 +269,34 @@ Rules:
 - bbox must have positive width and height (x2 > x1, y2 > y1)."""
 
 
-def build_room_prompt_mep(categories: str, img_width: int, img_height: int) -> str:
-    """Room-detection prompt for the MEP/electrical annotator (fractional xywh bbox)."""
+def build_room_prompt_mep(categories: str, img_width: int, img_height: int,
+                           exclusion_zones: "list[tuple[int, int, int, int]] | None" = None) -> str:
+    """Room-detection prompt for the MEP/electrical annotator (fractional xywh bbox).
+
+    exclusion_zones: optional (x1, y1, x2, y2) pixel rectangles, in this
+    prompt's own image-pixel space (already rescaled by the caller if the
+    image sent to the model differs in size from the one the zones were
+    computed on). These are OCR-derived BOM/title-block/schedule-table
+    regions (FIX-4, ocr_extractor.compute_exclusion_zones) — real cases have
+    shown the EXCLUDE instructions below alone are not enough to stop a
+    label from landing inside one (e.g. a room label landing on a "PANEL
+    P3A" schedule table printed elsewhere on the same sheet). Listing the
+    actual pixel boxes gives the model a concrete region to avoid instead of
+    only a category name.
+    """
+    exclusion_block = ""
+    if exclusion_zones:
+        zones_str = "\n".join(
+            f"  - x:[{x1}-{x2}], y:[{y1}-{y2}]" for x1, y1, x2, y2 in exclusion_zones
+        )
+        exclusion_block = f"""
+
+KNOWN NON-ROOM REGIONS (schedule tables / BOM / title-block text detected in this image) —
+do NOT place a room bbox with its center inside any of these pixel regions:
+{zones_str}"""
     return f"""You are a floor plan annotation expert. Analyze this MEP/Electrical floor plan image and extract every labeled physical room or functional space.
 
-IMAGE DIMENSIONS: {img_width} x {img_height} pixels
+IMAGE DIMENSIONS: {img_width} x {img_height} pixels{exclusion_block}
 
 INCLUDE — physical rooms and functional spaces only:
   Offices, conference rooms, restrooms, kitchens, break rooms, lobbies, hallways, corridors,
@@ -296,4 +350,5 @@ PROMPT_VERSIONS = {
     "build_room_prompt_unsloth": _hash(_inspect.getsource(build_room_prompt_unsloth)),
     "build_door_prompt_unsloth": _hash(_inspect.getsource(build_door_prompt_unsloth)),
     "build_room_prompt_mep": _hash(_inspect.getsource(build_room_prompt_mep)),
+    "build_page_type_prompt_unsloth": _hash(_PAGE_TYPE_PROMPT_UNSLOTH),
 }

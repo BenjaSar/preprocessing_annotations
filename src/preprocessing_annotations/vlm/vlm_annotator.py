@@ -137,7 +137,8 @@ class VLMAnnotator:
         with Image.open(image_path) as img:
             return img.size
 
-    def _build_prompt(self, img_width: int, img_height: int) -> str:
+    def _build_prompt(self, img_width: int, img_height: int,
+                       exclusion_zones: "list[tuple[int, int, int, int]] | None" = None) -> str:
         """
         Build the annotation prompt with image dimensions.
 
@@ -152,6 +153,9 @@ class VLMAnnotator:
           large images is unreliable; fractional coords [0..1] are rescaled
           back to pixels after parsing, which improves bbox accuracy ~30%.
         - Explicit negative examples added to reduce equipment/text leakage.
+
+        exclusion_zones: (x1,y1,x2,y2) pixel rectangles already in this
+        prompt's img_width/img_height coordinate space (caller rescales).
         """
         # Use canonical taxonomy categories so VLM output needs no translation
         try:
@@ -159,7 +163,9 @@ class VLMAnnotator:
         except Exception:
             categories = ", ".join(self.config.room_categories)
 
-        return prompt_templates.build_room_prompt_mep(categories, img_width, img_height)
+        return prompt_templates.build_room_prompt_mep(
+            categories, img_width, img_height, exclusion_zones=exclusion_zones
+        )
 
     def _parse_response(self, response_text: str) -> Dict[str, Any]:
         """
@@ -280,12 +286,20 @@ class VLMAnnotator:
         base64_data = base64.standard_b64encode(buf.getvalue()).decode("utf-8")
         return base64_data, sent_w, sent_h
 
-    def annotate(self, image_path: str | Path) -> VLMAnnotationResult:
+    def annotate(self, image_path: str | Path,
+                 exclusion_zones: "list[tuple[int, int, int, int]] | None" = None) -> VLMAnnotationResult:
         """
         Generate annotations for a floor plan image.
 
         Args:
             image_path: Path to the image file.
+            exclusion_zones: Optional (x1,y1,x2,y2) pixel rectangles in the
+                ORIGINAL image's coordinate space (e.g. from
+                ocr_extractor.compute_exclusion_zones) — schedule tables,
+                BOM blocks, title-block text that room labels have been
+                observed landing on despite the prompt's EXCLUDE list.
+                Rescaled internally to the sent-image's coordinate space
+                before being included in the prompt.
 
         Returns:
             VLMAnnotationResult with detected rooms, panels, and counts.
@@ -312,9 +326,22 @@ class VLMAnnotator:
         # Determine media type (always PNG after in-memory encode)
         media_type = "image/png"
 
+        # exclusion_zones were computed against the ORIGINAL image; rescale
+        # to the SENT image's coordinate space (same direction/ratio as the
+        # bbox rescale-back below, inverted) so the prompt's pixel regions
+        # match what the model actually sees.
+        sent_exclusion_zones = None
+        if exclusion_zones:
+            zx = sent_width / orig_width if orig_width else 1.0
+            zy = sent_height / orig_height if orig_height else 1.0
+            sent_exclusion_zones = [
+                (int(x1 * zx), int(y1 * zy), int(x2 * zx), int(y2 * zy))
+                for x1, y1, x2, y2 in exclusion_zones
+            ]
+
         # Build prompt using SENT dimensions so fractional bbox rescaling is
         # consistent with what the model actually sees.
-        prompt = self._build_prompt(sent_width, sent_height)
+        prompt = self._build_prompt(sent_width, sent_height, exclusion_zones=sent_exclusion_zones)
 
         # Call API with retries
         last_error = None

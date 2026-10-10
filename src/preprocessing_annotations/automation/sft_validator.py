@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 try:
     from .taxonomy import (
         MANDATORY_CLASSES, VALID_TYPES, normalize_to_mandatory,
-        get_extended_type, strip_window_suffix,
+        get_extended_type, strip_window_suffix, resolve_exact_short_variant,
     )
     from .abbreviations import ABBREVIATION_MAP as _ABBREVIATION_MAP
     from ..detection.window_evidence import is_window_shaped
@@ -28,7 +28,7 @@ try:
 except ImportError:
     from taxonomy import (
         MANDATORY_CLASSES, VALID_TYPES, normalize_to_mandatory,
-        get_extended_type, strip_window_suffix,
+        get_extended_type, strip_window_suffix, resolve_exact_short_variant,
     )
     from abbreviations import ABBREVIATION_MAP as _ABBREVIATION_MAP
     from detection.window_evidence import is_window_shaped
@@ -300,6 +300,78 @@ class SemanticRoomValidator:
         "SOCIAL SERVICE", "SOCIAL SERVICES",  # → MULTIPURPOSE ROOM
         "RECREATION",                          # → MULTIPURPOSE ROOM
         "PLAY ROOM",                           # "CHILDREN'S PLAY ROOM" → MULTIPURPOSE ROOM
+        # R3 (2026-09-14): bare "STAIR" / "STAIR #N" reached this gate and was
+        # filtered even though taxonomy.py's STAIRWELL synonym list already
+        # includes "STAIR" (line ~169) — this stage was simply missing the
+        # word the pipeline's own downstream normalizer already recognizes.
+        # Verified on 4 real-gap pages (220301_Elect_plans_05 pages 3/5/6/7):
+        # "STAIR #3", "STAIR #1", bare "STAIR" — all real stairwell labels.
+        "STAIR",                               # → STAIRWELL
+        # R3 continued (2026-09-14): short abbreviations on the same
+        # 220301_Elect_plans_05 sheet set, each paired with a taxonomy.py
+        # variant-list addition (see that file) so they resolve to the
+        # correct type, not just pass this gate. Corpus-scanned for false
+        # positives first: REST/ELEV/UTIL hits are ~all on this one document
+        # family, each followed by a room number or "#N" (ELEV #1, UTIL 301,
+        # REST 4-2) — real MEP-labeled rooms, not stray abbreviation noise.
+        "REST",         # "REST 4-2" → RESTROOM
+        "ELEV",         # "ELEV #1" → CORRIDOR (elevator shaft, per existing convention)
+        "UTIL",         # "UTIL 301" → RESIDENTIAL UNIT (per existing UTILITY→laundry mapping)
+        # Track 2 pilot (2026-09-15): first cannabis-cultivation-facility
+        # drawings seen in this corpus ("Crooked Creek Bloom/Veg Room" PDFs).
+        # "BLOOM ROOM"/"VEG ROOM" are standard grow-facility room types
+        # (flowering room / vegetative room), same shape as any other
+        # too-generic-alone compound (cf. "PLAY ROOM"). "BLOOM RM" is the
+        # abbreviated form seen on the same page -- _expand_abbreviation only
+        # expands from the START of a string, so "BLOOM RM 1" never reaches
+        # "BLOOM ROOM" and needs its own entry.
+        "BLOOM ROOM", "BLOOM RM",   # → OTHER (grow-facility flowering room)
+        "VEG ROOM",                 # → OTHER (grow-facility vegetative room)
+        # R3 side-finding, resolved (2026-09-14): "R.R." abbreviation for
+        # restroom ("Men's R.R.", "224 R.R.", "STAFF RR", "RR 204") was
+        # falling through taxonomy's least-intrusive default to STORAGE ROOM
+        # (or, for the bare-"RR" forms below, failing this gate outright).
+        # Corpus-scanned exhaustively (every "R.R"/"RR" occurrence in all 141
+        # pages, not just the drop population): 42 hits, 100% restroom
+        # context (gendered/staff/patient/unisex/room-number/vestibule
+        # prefix) — zero railroad/rural-route/address ambiguity anywhere in
+        # this corpus. Dotted "R.R." handled by a VALID_ROOM_REGEXES entry
+        # below (bare "RR" as a keyword hits a word-boundary regex dead end
+        # on trailing punctuation — verified before shipping, not assumed).
+        "RR",           # "MEN RR" / "STAFF RR" / "RR 204" → RESTROOM
+        # Second-gate sync (2026-09-17): this keyword set gates BOTH OCR- and
+        # VLM-sourced room candidates (VLM proposes names directly, bypassing
+        # config.py's room_name_patterns entirely), so it's the more
+        # consequential of the two vocabulary gates. Confirmed via real pilot
+        # run (track2_pilot_output_v2): "CAR WASH"/"DETAIL AREA"/
+        # "TRASH ENCLOSURE" (VLM-sourced, E-10.0 REFLECTED CEILING PLANS - CAR
+        # WASH & DETAIL AREA) all reached this gate and were dropped, taking
+        # the whole page down to 0 rooms and misclassifying it
+        # sft_ready=false "non-floorplan page" even though it's a real
+        # floorplan. Same session's earlier config.py room_name_patterns
+        # additions (bank/dealership/clinic vocabulary — see
+        # showroom-triage-vocabulary-gap and Rally Palmhurst bank-vocabulary
+        # fixes) never synced here; CAFE/LAB/RESIDENTIAL happened to already
+        # be present, the rest below were not.
+        "SHOWROOM",
+        "ZOOM",
+        "CAR WASH",
+        "TRASH ENCLOSURE",
+        "DETAIL AREA",
+        "EQUIPMENT ROOM",   # bare "EQUIPMENT" stays banned via NON_ROOM_PATTERNS;
+                            # confirmed "EQUIPMENT ROOM" itself matches none of those
+        "TRIAGE",
+        "DRAW",
+        "NURSE STATION",
+        "EXAM RM",
+        "PROCEDURE",
+        "INTAKE",
+        "CASHIER",
+        "WORKROOM",         # bare "WORK" (line 287) doesn't cover this: \bWORK\b
+                            # needs a boundary after K, absent in "WORKROOM"
+        "TELLER LINE",
+        "MOTHER'S ROOM",
+        "NIGHT DROP/ITM",
     }
 
     # Generalized label forms a fixed keyword cannot express because they carry
@@ -314,6 +386,34 @@ class SemanticRoomValidator:
     # "SEE ROOM 2 SCHEDULE" (verified).
     VALID_ROOM_REGEXES = (
         r"^ROOM\s*\d+$",
+        # R3 (2026-09-14): apartment unit-type-code + unit-number labels
+        # ("1.1R 229", "2.1R 227", "1.1 217", "2.1 214") — the box literally
+        # stacks a unit-type code over a unit number on the source drawing
+        # (verified visually, 220301_Elect_plans_05_page003, corridor of
+        # repeating residential units with bathroom fixtures). Corpus-scanned:
+        # all 72 matches confined to this one document's 5 pages, all paired
+        # with a plausible 2-4 digit room number; zero matches anywhere else
+        # in the 141-page corpus (structural grid-line callouts like "A-6"
+        # use a different letter-first format, don't collide).
+        r"^\d\.\d[A-Z]?\s*\d{2,4}$",
+        # R3 side-finding, resolved (2026-09-14): dotted "R.R." restroom
+        # abbreviation ("Men's R.R.", "224 R.R.", "NON-COMPLIANT R.R."). Not
+        # placed in VALID_ROOM_KEYWORDS: a trailing-punctuation token wrapped
+        # in \b...\b never matches (verified: \bR\.R\.\b fails on every real
+        # sample — both sides of the boundary after a trailing "." followed
+        # by whitespace/end-of-string are non-word, so no transition exists).
+        # Leading boundary only, deliberately not anchored full-string
+        # (prefix text varies: "224 ", "231 Staff Men ", "NON-COMPLIANT ") —
+        # corpus-scanned exhaustively (all 141 pages, every "R.R"/"RR"
+        # occurrence, not just the drop population): 42 hits, 100% restroom
+        # context, zero railroad/rural-route ambiguity.
+        r"\bR\.R\.?",
+        # Second-gate sync (2026-09-17), same reasoning as room_name_patterns'
+        # matching entries added earlier this session: real OCR produced more
+        # than one surface form for each, so a plain VALID_ROOM_KEYWORDS
+        # literal isn't enough.
+        r"\bCUSTOMER\s*R\.?\s*R\.?",   # "CUSTOMER R.R.", "CUSTOMER RR", OCR-merged "CUSTOMERRR"
+        r"\bMECH\s*/\s*ELEC\b",        # "MECH/ELEC", "MECH /ELEC"
     )
 
     # Class-level compiled word-boundary pattern built from VALID_ROOM_KEYWORDS.
@@ -335,7 +435,7 @@ class SemanticRoomValidator:
     # and TaxonomyNormalizer.  All three now import from abbreviations.py.
     ABBREVIATION_EXPANSIONS = _ABBREVIATION_MAP
 
-    def _expand_abbreviation(self, name: str) -> str:
+    def _expand_abbreviation(self, name: str, block_single_letter: bool = True) -> str:
         """
         Expand abbreviated room names to canonical forms.
 
@@ -343,20 +443,40 @@ class SemanticRoomValidator:
 
         Args:
             name: Room name (potentially abbreviated)
+            block_single_letter: E2 (2026-09-09). When True (default), a
+                single-letter abbreviation ("K", "P", "G" in
+                ABBREVIATION_MAP) is never expanded here. Measured on
+                corpus_batch2 (88 pages): every one of 30 bare "K" room
+                candidates was a false positive on visual inspection
+                (fixture-type tag on a wire, a structural grid-line label,
+                or a schedule-table column-header letter) -- zero were a
+                real kitchen. "K"'s expansion to "KITCHEN" is the only
+                reason a bare single letter passes the room-keyword gate at
+                all (a bare "A"/"B"/etc. matches nothing and is dropped
+                harmlessly elsewhere). Multi-character abbreviations (BR,
+                WC, 1BR, ...) are unaffected -- those were checked
+                individually against real crops and are unambiguous.
+                Set False only for a corpus confirmed to use bare
+                single-letter room labels (see plan/single-letter-label-gate-plan-2026-09-09.md).
 
         Returns:
             Expanded canonical room name, or original if not an abbreviation
+            (including a blocked single-letter abbreviation).
         """
         name_upper = name.upper().strip()
 
         # Check if entire name is a known abbreviation
         if name_upper in self.ABBREVIATION_EXPANSIONS:
+            if block_single_letter and len(name_upper) == 1:
+                return name
             expanded = self.ABBREVIATION_EXPANSIONS[name_upper]
             logger.debug(f"Expanded abbreviation: '{name}' → '{expanded}'")
             return expanded
 
         # Check if name contains an abbreviation pattern (e.g., "BR 1" → "BEDROOM 1")
         for abbrev, expansion in self.ABBREVIATION_EXPANSIONS.items():
+            if block_single_letter and len(abbrev) == 1:
+                continue
             if name_upper.startswith(abbrev):
                 # Handle cases like "BR", "BR 1", "BR-1", "BR1", "BR 101"
                 suffix = name_upper[len(abbrev):].strip()
@@ -367,7 +487,7 @@ class SemanticRoomValidator:
 
         return name
 
-    def filter_rooms(self, rooms: List[Dict]) -> List[Dict]:
+    def filter_rooms(self, rooms: List[Dict], block_single_letter_abbreviations: bool = True) -> List[Dict]:
         """
         Filter rooms, keeping only valid spatial annotations.
 
@@ -375,6 +495,8 @@ class SemanticRoomValidator:
 
         Args:
             rooms: List of room dictionaries with 'name'/'room_name' and 'bbox' keys
+            block_single_letter_abbreviations: E2 (2026-09-09). Passed through
+                to _expand_abbreviation -- see that method's docstring.
 
         Returns:
             Filtered list of valid rooms
@@ -427,7 +549,9 @@ class SemanticRoomValidator:
 
             # CRITICAL FIX: Expand abbreviations BEFORE keyword check
             # This ensures abbreviated room names (BR, LR, BA) are recognized
-            expanded_name = self._expand_abbreviation(name)
+            expanded_name = self._expand_abbreviation(
+                name, block_single_letter=block_single_letter_abbreviations
+            )
 
             # Keep ONLY if the name contains a valid room keyword.
             # ⚠️  REMOVED: "or confidence > 0.95" bypass.
@@ -492,24 +616,31 @@ class TaxonomyNormalizer:
     # and ResidentialAbbreviationRecovery.
     ABBREVIATION_EXPANSIONS = _ABBREVIATION_MAP
 
-    def _expand_abbreviation(self, name: str) -> str:
+    def _expand_abbreviation(self, name: str, block_single_letter: bool = True) -> str:
         """
         Expand abbreviated room names to canonical forms.
 
         Args:
             name: Room name (potentially abbreviated)
+            block_single_letter: E2 (2026-09-09) -- see SemanticRoomValidator's
+                sibling method for the full measured rationale. Default True.
 
         Returns:
             Expanded canonical room name, or original if not an abbreviation
+            (including a blocked single-letter abbreviation).
         """
         name_upper = name.upper().strip()
 
         # Check if entire name is a known abbreviation
         if name_upper in self.ABBREVIATION_EXPANSIONS:
+            if block_single_letter and len(name_upper) == 1:
+                return name
             return self.ABBREVIATION_EXPANSIONS[name_upper]
 
         # Check if name contains an abbreviation pattern (e.g., "BR 1" → "BEDROOM 1")
         for abbrev, expansion in self.ABBREVIATION_EXPANSIONS.items():
+            if block_single_letter and len(abbrev) == 1:
+                continue
             if name_upper.startswith(abbrev):
                 suffix = name_upper[len(abbrev):].strip()
                 if not suffix or suffix[0] in [' ', '-', '1', '2', '3', '4', '5', '6', '7', '8', '9', '0']:
@@ -517,7 +648,7 @@ class TaxonomyNormalizer:
 
         return name
 
-    def normalize(self, room_name: str) -> str:
+    def normalize(self, room_name: str, block_single_letter_abbreviations: bool = True) -> str:
         """
         Map extracted room name to mandatory SFT taxonomy type.
 
@@ -536,11 +667,24 @@ class TaxonomyNormalizer:
                 f"— verify it represents a single room (e.g., IT/STORAGE) and not two rooms"
             )
 
+        # Try the raw token against taxonomy.py's own exact short-code table
+        # FIRST, before abbreviation expansion. Some short codes (e.g. "DR")
+        # are deliberately placed under one mandatory class directly in
+        # taxonomy.py, but abbreviations.py expands them to a phrase that
+        # resolves under a DIFFERENT class ("DR" -> "DINING ROOM" -> RESTAURANT,
+        # vs. taxonomy.py's own "DR" -> RESIDENTIAL UNIT). Letting the raw
+        # exact match win here honors taxonomy.py's explicit placement.
+        exact = resolve_exact_short_variant(room_name)
+        if exact is not None:
+            return exact
+
         # _expand_abbreviation existed on this class but was never called here,
         # so a bare abbreviation (e.g. "CL") reached normalize_to_mandatory()
         # unexpanded, hit the short-token guard, and fell back to STORAGE ROOM
         # instead of resolving through its real expansion ("CLOSET").
-        return normalize_to_mandatory(self._expand_abbreviation(room_name))
+        return normalize_to_mandatory(
+            self._expand_abbreviation(room_name, block_single_letter=block_single_letter_abbreviations)
+        )
 
 
 def filter_by_confidence(rooms: List[Dict], min_confidence: float = 0.85,
@@ -1286,6 +1430,7 @@ def prepare_sft_annotation(
     image_dir: Optional[Path] = None,
     use_window_elongation_filter: bool = False,
     exempt_sam_expanded_from_ink_filter: bool = False,
+    block_single_letter_abbreviations: bool = True,
 ) -> Dict:
     """
     Convert annotation to SFT-ready format.
@@ -1308,6 +1453,16 @@ def prepare_sft_annotation(
             with sam_expanded truthy -- measured to have no discriminative
             power for that population (see PipelineConfig's docstring for
             the numbers). Default False pending validation.
+        block_single_letter_abbreviations: E2 (2026-09-09). When True
+            (default), a single-letter abbreviation ("K" -> KITCHEN, "P" ->
+            PANTRY, "G" -> GARAGE in ABBREVIATION_MAP) is never expanded, so
+            it cannot pass the room-keyword gate. Measured on corpus_batch2:
+            30/30 bare "K" room candidates in 88 pages were false positives
+            on visual inspection (fixture-type tags, structural grid-line
+            labels, schedule-table column headers) -- zero were a real
+            kitchen. Set False only for a corpus confirmed to use bare
+            single-letter room labels genuinely (see
+            plan/single-letter-label-gate-plan-2026-09-09.md).
 
     CRITICAL FIXES:
     - Merges VLM-detected rooms with OCR-detected compound names
@@ -1337,20 +1492,46 @@ def prepare_sft_annotation(
     ocr_rooms = annotation.get("ocr_rooms", [])
     rooms = _merge_vlm_and_ocr(vlm_rooms, ocr_rooms)
 
-    # FIX-7: drop VLM detections with no OCR corroboration (source == vlm_only).
-    # By merge semantics a real *labeled* room's VLM box matches an OCR label and
-    # becomes vlm_ocr_merged; a surviving vlm_only box is a pure-visual detection
-    # no text confirms. Qwen3-VL visual grounding on CAD line-art is unreliable
-    # (verified: 11/11 vlm_only rooms >=1.67% area across 116 files were oversized
-    # /mislocated giants — logo/margin hallucinations and on-drawing swallowers;
-    # zero legit vlm_only found). Dropping them removes exactly that class; the
-    # VLM's real value (refining an OCR box → vlm_ocr_merged) is untouched.
+    # FIX-7: drop *large* VLM detections with no OCR corroboration (source ==
+    # vlm_only). By merge semantics a real *labeled* room's VLM box matches an
+    # OCR label and becomes vlm_ocr_merged; a surviving vlm_only box is a
+    # pure-visual detection no independent OCR pass confirms. Qwen3-VL visual
+    # grounding on CAD line-art is unreliable for large boxes specifically
+    # (verified: 11/11 vlm_only rooms >=1.67% area across 116 files were
+    # oversized/mislocated giants — logo/margin hallucinations and
+    # on-drawing swallowers; zero legit large vlm_only found).
+    #
+    # R3 (2026-09-14): that 1.67% threshold was measured but never applied —
+    # the original code dropped every vlm_only room regardless of size, not
+    # just the validated giants. Cross-checked against
+    # plan/zero-room-page-recovery-plan-2026-09-14.md's R2 filter ranking:
+    # this was the single largest cause of the 40/53 real-floor-plan pages
+    # losing every room (886 of 1437 dropped rooms across those 40 pages,
+    # 61.7%, dominant filter on 34/40) — small vlm_only rooms have a VLM-read
+    # name (room numbers, OFFICE/CORRIDOR/RESTROOM/...) that simply failed to
+    # spatially merge with an independent OCR box, not a hallucination.
+    # Blast-radius checked on the 88 pages that already survive: area-gating
+    # this filter recovers 71 more real rooms across 26 pages (spot-checked,
+    # all plausible named rooms) with zero rooms lost anywhere in that set —
+    # narrowing the drop condition can only ever admit rooms this stage used
+    # to remove, never remove ones it used to keep.
     _img_w0 = annotation.get("image_size", {}).get("width", 0)
     _img_h0 = annotation.get("image_size", {}).get("height", 0)
     _img_area0 = _img_w0 * _img_h0 if _img_w0 and _img_h0 else 0
+    _VLM_UNCORROBORATED_AREA_THRESHOLD = 0.0167
+    def _vlm_only_area_frac(r):
+        bbox = r.get("bbox")
+        if bbox and len(bbox) == 4 and _img_area0:
+            return (bbox[2] * bbox[3]) / _img_area0
+        return None
+    def _drop_vlm_only(r):
+        if r.get("source") != "vlm_only":
+            return False
+        area_frac = _vlm_only_area_frac(r)
+        return area_frac is None or area_frac >= _VLM_UNCORROBORATED_AREA_THRESHOLD
     pre_vlm = len(rooms)
-    _dropped_vlm_only = [r for r in rooms if r.get("source") == "vlm_only"]
-    rooms = [r for r in rooms if r.get("source") != "vlm_only"]
+    _dropped_vlm_only = [r for r in rooms if _drop_vlm_only(r)]
+    rooms = [r for r in rooms if not _drop_vlm_only(r)]
     n_vlm = pre_vlm - len(rooms)
     if n_vlm:
         drop_attribution["vlm_uncorroborated"] = n_vlm
@@ -1777,9 +1958,39 @@ def prepare_sft_annotation(
     if n_resolved > 0:
         logger.info(f"Remediation Fix #2: overlap resolution merged/removed {n_resolved} room(s)")
 
+    # Step 0d: Split out OCR candidates where a room-number tag was found but
+    # the descriptive room-name text was never resolved — see
+    # quality_checker.py's OCR_NAME_EMPTY check. Root cause is case-by-case:
+    # confirmed 2026-09-15 to most often be a room_name_patterns vocabulary
+    # gap (the name OCR'd fine but matched no known pattern, so it never
+    # became a name candidate to link the number to) rather than an
+    # image-quality issue — do not assume hatch/grid interference without
+    # checking the specific page. These previously fell into the generic
+    # "semantic" bucket below, hiding the cause entirely. Attribute them
+    # separately here so semantic doesn't double-count them.
+    def _name_unresolved(r):
+        return bool(r.get("room_number")) and not (r.get("room_name") or r.get("name") or "").strip()
+
+    pre_unresolved = len(rooms)
+    unresolved_name_rooms = [r for r in rooms if _name_unresolved(r)]
+    if unresolved_name_rooms:
+        rooms = [r for r in rooms if not _name_unresolved(r)]
+        n_unresolved = pre_unresolved - len(rooms)
+        drop_attribution["ocr_name_unresolved"] = n_unresolved
+        drop_detail["ocr_name_unresolved"] = [
+            {"bbox": r.get("bbox"), "room_number": r.get("room_number")}
+            for r in unresolved_name_rooms
+        ]
+        logger.info(
+            f"Step 0d: {n_unresolved} room(s) dropped — room-number found but "
+            f"name never resolved to a known room_name pattern"
+        )
+
     # Step 1: Semantic filtering
     pre_semantic = len(rooms)
-    rooms = validator.filter_rooms(rooms)
+    rooms = validator.filter_rooms(
+        rooms, block_single_letter_abbreviations=block_single_letter_abbreviations
+    )
     n_semantic = pre_semantic - len(rooms)
     drop_attribution["semantic"] = n_semantic
     if n_semantic > 0:
@@ -1840,7 +2051,9 @@ def prepare_sft_annotation(
     for room in rooms:
         room_name = room.get("room_name") or room.get("name", "")
         if room_name:
-            normalized = normalizer.normalize(room_name)
+            normalized = normalizer.normalize(
+                room_name, block_single_letter_abbreviations=block_single_letter_abbreviations
+            )
             room["type"] = normalized
             room["category"] = normalized  # Sync category field for COCO exporter
             logger.debug(f"Normalized '{room_name}' → {normalized}")

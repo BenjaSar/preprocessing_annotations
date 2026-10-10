@@ -29,6 +29,8 @@ try:
 except ImportError:
     HAS_SHAPELY = False
 
+from .object_types import DEFAULT_OBJECT_TYPE_REGISTRY, ObjectTypeRegistry
+
 logger = logging.getLogger(__name__)
 
 
@@ -65,6 +67,13 @@ class RoomWindowMapping:
     has_sink: bool = False
     window_count: int = 0
     intersecting_windows: List[WindowDetection] = None
+    # AV-2: detections that intersected this room but whose metadata["type"]
+    # is not registered in the ObjectTypeRegistry used for this mapping.
+    # Always 0 in the default (non-strict) dispatch mode -- see
+    # ObjectTypeRegistry.flag_for's strict=False fallback. Additive field;
+    # existing callers that only read the has_*/window_count fields are
+    # unaffected.
+    unknown_type_count: int = 0
 
     def __post_init__(self):
         if self.intersecting_windows is None:
@@ -74,6 +83,8 @@ class RoomWindowMapping:
 def map_detections_to_rooms(
     windows: List[WindowDetection],
     rooms: List[Dict[str, Any]],
+    type_registry: Optional[ObjectTypeRegistry] = None,
+    strict_type_dispatch: bool = False,
 ) -> List[RoomWindowMapping]:
     """
     Compute spatial intersection: which rooms have windows/doors/fixtures.
@@ -81,12 +92,20 @@ def map_detections_to_rooms(
     Module-level (not a WindowDetector method) so any detector emitting
     WindowDetection objects -- WindowDetector's own tiers, or a
     YoloObjectDetector (T-I3) -- can reuse the exact same geometry
-    instead of duplicating it. Type dispatch on ``metadata["type"]``
-    already covers door/toilet/bathtub/sink, not just windows.
+    instead of duplicating it. Type dispatch on ``metadata["type"]`` is
+    delegated to an ObjectTypeRegistry (AV-2) instead of an inline
+    if/elif chain, so a new detector class registers a flag field rather
+    than requiring an edit here (OCP).
 
     Args:
         windows: List of detected objects (bbox or polygon).
         rooms: List of room annotations, each with 'bbox' or 'polygon' field.
+        type_registry: Registry resolving metadata["type"] -> flag field.
+            Defaults to the shared DEFAULT_OBJECT_TYPE_REGISTRY.
+        strict_type_dispatch: When True, a type not in the registry is
+            counted in RoomWindowMapping.unknown_type_count instead of
+            being folded into has_windows. Default False reproduces the
+            pre-AV-2 behavior exactly (unregistered -> has_windows=True).
 
     Returns:
         List of RoomWindowMapping, one per room, with presence flags.
@@ -96,6 +115,8 @@ def map_detections_to_rooms(
     if not HAS_SHAPELY:
         logger.warning("Shapely not available; skipping spatial intersection")
         return mappings
+
+    registry = type_registry or DEFAULT_OBJECT_TYPE_REGISTRY
 
     for idx, room in enumerate(rooms):
         room_id = room.get("id", f"room_{idx}")
@@ -120,14 +141,11 @@ def map_detections_to_rooms(
 
         # Check which windows intersect this room
         intersecting = []
-        has_windows = False
-        has_skylights = False
-        has_openings = False
-
-        has_door = False
-        has_toilet = False
-        has_bathtub = False
-        has_sink = False
+        flags = {field: False for field in (
+            "has_windows", "has_skylights", "has_openings",
+            "has_door", "has_toilet", "has_bathtub", "has_sink",
+        )}
+        unknown_type_count = 0
 
         for window in windows:
             window_poly = None
@@ -144,34 +162,20 @@ def map_detections_to_rooms(
                 if room_poly.intersects(window_poly):
                     intersecting.append(window)
                     window_type = (window.metadata or {}).get("type", "window")
-                    if window_type == "skylight":
-                        has_skylights = True
-                    elif window_type in ("side_opening", "opening"):
-                        has_openings = True
-                    elif window_type == "door":
-                        has_door = True
-                    elif window_type == "toilet":
-                        has_toilet = True
-                    elif window_type == "bathtub":
-                        has_bathtub = True
-                    elif window_type == "sink":
-                        has_sink = True
+                    flag = registry.flag_for(window_type, strict=strict_type_dispatch)
+                    if flag is not None:
+                        flags[flag] = True
                     else:
-                        has_windows = True
+                        unknown_type_count += 1
             except Exception as e:
                 logger.debug(f"Intersection check failed: {e}")
 
         mapping = RoomWindowMapping(
             room_id=room_id,
-            has_windows=has_windows,
-            has_skylights=has_skylights,
-            has_openings=has_openings,
-            has_door=has_door,
-            has_toilet=has_toilet,
-            has_bathtub=has_bathtub,
-            has_sink=has_sink,
             window_count=len(intersecting),
             intersecting_windows=intersecting,
+            unknown_type_count=unknown_type_count,
+            **flags,
         )
         mappings.append(mapping)
 
@@ -209,6 +213,9 @@ def merge_object_mappings(
                 window_count=existing.window_count + m.window_count,
                 intersecting_windows=(
                     existing.intersecting_windows + m.intersecting_windows
+                ),
+                unknown_type_count=(
+                    existing.unknown_type_count + m.unknown_type_count
                 ),
             )
     return list(merged.values())

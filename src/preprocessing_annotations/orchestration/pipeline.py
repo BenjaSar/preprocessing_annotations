@@ -24,12 +24,14 @@ from ..ingestion.ocr_extractor import MEPTextExtractor, RoomCandidate, TextDetec
 from ..ingestion.two_pass_ocr_extractor import TwoPassOCRExtractor
 from ..vlm.vlm_annotator import VLMAnnotator
 from ..vlm.semantic_reconciler import SemanticReconciler
-from ..vlm.vlm_backend import VLMFactory
+from ..vlm.vlm_backend import VLMFactory, UnslothQwenBackend
+from ..vlm.classify import PageClassifier, UnslothPageClassifier
 from ..vlm import prompt_templates
 from ..detection.sam_segmenter import RoomSegmenter
 from ..detection.cubicasa5k_detector import CubiCasa5KDetector
 from ..bbox.bbox_visualizer import BboxVisualizer
 from ..export.exporters import LabelStudioExporter, ReviewPrioritizer, COCOExporter, CoverageReporter
+from ..export.object_exporter import ObjectDetectionCOCOExporter
 from ..automation import (
     LabelNormalizer, QualityChecker, RegionExtractor,
     ImageResizer, SemanticRoomValidator, TaxonomyNormalizer,
@@ -43,10 +45,11 @@ from ..automation.abbreviation_ocr_recovery import (
 )
 from ..detection.window_detector import (
     WindowDetector, WindowDetection, WindowDetectionTier, RoomWindowMapping,
-    apply_window_suffixes, map_detections_to_rooms, merge_object_mappings,
+    apply_window_suffixes, merge_object_mappings,
 )
 from ..detection.yolo_detector import YoloObjectDetector
 from ..detection.sam3_exemplar_detector import Sam3ExemplarDetector
+from ..detection.attachment import AttachmentPolicy, AttachmentPolicyFactory
 from .run_lock import single_instance
 
 logger = logging.getLogger(__name__)
@@ -131,6 +134,9 @@ class AnnotationPipeline:
         self._yolo_object_detector = None
         self._sam3_exemplar_detector = None
         self._bbox_visualizer = None
+        self._attachment_policy = None
+        self._page_classifier: Optional[PageClassifier] = None
+        self._page_classifier_checked = False
 
         # Initialize SFT annotation builder (used for mandatory schema output)
         self.sft_builder = SFTAnnotationBuilder()
@@ -325,6 +331,68 @@ class AnnotationPipeline:
                 config=self.config.sam3_exemplar
             )
         return self._sam3_exemplar_detector
+
+    @property
+    def attachment_policy(self) -> AttachmentPolicy:
+        """AV-3: resolves the configured object-detection -> room
+        attachment policy once per pipeline instance. Default
+        (AttachmentConfig.policy="intersection") is byte-identical to
+        the direct map_detections_to_rooms calls this property
+        replaced -- see IntersectionAttachmentPolicy."""
+        if self._attachment_policy is None:
+            self._attachment_policy = AttachmentPolicyFactory.create(
+                self.config.attachment
+            )
+        return self._attachment_policy
+
+    @property
+    def page_classifier(self) -> Optional[PageClassifier]:
+        """AV-6: resolved once per pipeline instance, only when
+        use_page_type is set. Constructing this reads self.vlm_annotator
+        (may trigger the lazy VLM load), which is safe here because
+        every caller of this property is already inside the
+        use_vlm-gated STEP 3 block -- the VLM is loaded by that point
+        regardless. Returns None when use_page_type is off, or when the
+        configured backend has no PageClassifier adapter (logs a
+        warning once instead of raising)."""
+        if not self._page_classifier_checked:
+            self._page_classifier_checked = True
+            if self.config.use_page_type:
+                backend = self.vlm_annotator
+                if isinstance(backend, UnslothQwenBackend):
+                    self._page_classifier = UnslothPageClassifier(backend)
+                else:
+                    logger.warning(
+                        "use_page_type is set but backend %s has no "
+                        "PageClassifier adapter -- page-type triage will "
+                        "be skipped for this run.",
+                        type(backend).__name__,
+                    )
+        return self._page_classifier
+
+    def _classify_page_type(self, img_path: Path) -> Optional[Dict[str, Any]]:
+        """AV-6: single-shot page-type triage for one image, called from
+        inside STEP 3's per-image loop while the VLM is already
+        resident -- adds one generate call to an already-loaded model,
+        no extra load/unload cycle (see UnslothPageClassifier's
+        docstring). Advisory only: the return value is persisted as an
+        observable field, never used to drop or accept a room. Returns
+        None (not a fallback dict) when use_page_type is off or the
+        backend has no adapter -- both handled by self.page_classifier
+        returning None; a real classification failure still surfaces
+        as {"page_type": "other", ...} from the adapter itself, not
+        None, so "we didn't try" and "we tried and it's uncertain"
+        stay distinguishable in the annotation.
+        """
+        classifier = self.page_classifier
+        if classifier is None:
+            return None
+        try:
+            result = classifier.classify(img_path)
+            return {"page_type": result.page_type, "rationale": result.rationale}
+        except Exception as e:
+            logger.warning(f"Page-type classification failed for {img_path.name}: {e}")
+            return {"page_type": "other", "rationale": f"classification error: {e}"}
 
     @property
     def bbox_visualizer(self) -> BboxVisualizer:
@@ -739,7 +807,10 @@ class AnnotationPipeline:
                         )
 
                     # Get VLM result (handles both Claude and Qwen backends)
-                    result = self._get_vlm_result(img_path)
+                    result = self._get_vlm_result(
+                        img_path,
+                        exclusion_zones=exclusion_zones_by_image.get(img_path.name, []),
+                    )
 
                     # FIX-A: Drop VLM detections matching known non-room patterns.
                     # Applied unconditionally (no OCR-proximity gate).
@@ -756,10 +827,19 @@ class AnnotationPipeline:
                     _emit_metric(img_path.stem, "vlm_annotation", _t0_vlm, "ok",
                                  room_count_out=len(result.rooms))
 
+                    # AV-6: advisory page-type triage, only when enabled --
+                    # runs inside this same per-image pass while the VLM
+                    # (self.vlm_annotator, already used above for
+                    # result) is already resident. None when
+                    # use_page_type is off (page_classifier's default
+                    # state), so this is a no-op call by default.
+                    page_type_result = self._classify_page_type(img_path)
+
                     # Save annotation (img_path needed for window detector)
                     object_detections_for_viz = self._save_annotation(
                         result, ann_path, ocr_results.get(img_path.name, []), img_path,
-                        exclusion_zones=exclusion_zones_by_image.get(img_path.name, []))
+                        exclusion_zones=exclusion_zones_by_image.get(img_path.name, []),
+                        page_type_result=page_type_result)
 
                     if img_path.name in image_status:
                         image_status[img_path.name]["annotated"] = True
@@ -943,10 +1023,25 @@ class AnnotationPipeline:
         processed_dir = output_dir / "processed_annotations"
         regions_dir = output_dir / "room_regions"
         reports_dir = output_dir / "quality_reports"
+        # R1 (2026-09-14): drop_attribution/drop_detail are computed
+        # unconditionally by prepare_sft_annotation (sft_validator.py,
+        # attached to the returned dict right before return, regardless of
+        # final room count) but were previously discarded whenever a page
+        # ended at 0 surviving rooms -- that branch below moves the image to
+        # skipped_pages/ without writing processed_annotations, so the
+        # reason(s) every room was dropped were lost. Measured impact: 53/141
+        # pages in corpus_batch2 hit this path; full manual review found
+        # 40 of those 53 are genuine floor plans with real, nameable rooms
+        # that should have survived -- with zero persisted record of which
+        # filter removed them. This directory closes that gap. Instrumentation
+        # only -- does not change which pages get skipped or any filter
+        # threshold (see plan/zero-room-page-recovery-plan-2026-09-14.md).
+        dropped_attribution_dir = output_dir / "dropped_page_attribution"
 
         processed_dir.mkdir(parents=True, exist_ok=True)
         regions_dir.mkdir(parents=True, exist_ok=True)
         reports_dir.mkdir(parents=True, exist_ok=True)
+        dropped_attribution_dir.mkdir(parents=True, exist_ok=True)
 
         quality_summary = {
             "total_annotations": 0,
@@ -975,6 +1070,7 @@ class AnnotationPipeline:
                     image_dir=images_dir,
                     use_window_elongation_filter=self.config.use_window_elongation_filter,
                     exempt_sam_expanded_from_ink_filter=self.config.exempt_sam_expanded_from_ink_filter,
+                    block_single_letter_abbreviations=self.config.block_single_letter_abbreviations,
                 )
                 filtered_room_count = len(annotation.get("rooms", []))
                 _sft_outcome = "sft_ready" if annotation.get("sft_ready") else "filtered"
@@ -1142,7 +1238,7 @@ class AnnotationPipeline:
                     {"id": idx, "bbox": r["coordinates"]["bbox"]}
                     for idx, r in enumerate(new_rr)
                 ]
-                new_mappings = map_detections_to_rooms(reconstructed_detections, rooms_for_remapping)
+                new_mappings = self.attachment_policy.attach(reconstructed_detections, rooms_for_remapping)
                 new_rr = self._apply_object_attributes(
                     new_rr, new_mappings, **self._confidence_weight_kwargs()
                 )
@@ -1164,8 +1260,28 @@ class AnnotationPipeline:
                     quality_summary["total_annotations"] += 1
 
                 elif not is_sft_ready and room_count == 0:
-                    # Genuinely empty annotation — move to skipped_pages/
-                    # (cover page, title block, roof/site sheet, or OCR failure)
+                    # "Genuinely empty" is this branch's original framing, but
+                    # R1's full manual review of corpus_batch2's 53 such pages
+                    # found 40/53 are real floor plans whose rooms were
+                    # filtered out, not empty source pages -- see
+                    # plan/zero-room-page-recovery-plan-2026-09-14.md. Still
+                    # moving the image to skipped_pages/ unchanged (R1 is
+                    # instrumentation only); the attribution write below is
+                    # what makes that 40/53 split possible to re-derive and
+                    # act on in a future phase, instead of guessed from a
+                    # bare NO_ROOMS_DETECTED code with no per-room reason.
+                    drop_attr = annotation.get("drop_attribution")
+                    if drop_attr:
+                        attribution_record = {
+                            "image_file": annotation.get("image_file"),
+                            "drop_attribution": drop_attr,
+                        }
+                        if annotation.get("drop_detail"):
+                            attribution_record["drop_detail"] = annotation["drop_detail"]
+                        attribution_path = dropped_attribution_dir / ann_path.name
+                        with open(attribution_path, "w") as f:
+                            json.dump(attribution_record, f, indent=2)
+
                     image_file = None
                     for _ext in self._IMAGE_EXTS:
                         _candidate = images_dir / f"{ann_path.stem}{_ext}"
@@ -1261,6 +1377,18 @@ class AnnotationPipeline:
         # 7c: Coverage report (class imbalance visibility before training)
         reporter = CoverageReporter()
         reporter.generate(processed_dir, output_dir / "coverage_report.json")
+
+        # 7d: AV-1 -- objectDetections (door/window geometry) to a
+        # standalone COCO file, own category id space, never merged into
+        # 7b's room-category coco/ export. Default off
+        # (ExportConfig.export_object_detections); flag-off output is
+        # unaffected by this step existing at all.
+        if self.config.export.export_object_detections:
+            object_exporter = ObjectDetectionCOCOExporter()
+            object_exporter.export(
+                processed_dir, output_dir / "coco_objects.json",
+                min_confidence=self.config.export.object_detection_min_confidence,
+            )
 
         # Save config for reproducibility
         config_path = output_dir / "pipeline_config.json"
@@ -1447,8 +1575,17 @@ class AnnotationPipeline:
         )
         return all_rooms
 
-    def _get_vlm_result(self, img_path: Path):
-        """Get VLM annotation result, with optional tiled inference for local backends."""
+    def _get_vlm_result(self, img_path: Path, exclusion_zones: Optional[list] = None):
+        """Get VLM annotation result, with optional tiled inference for local backends.
+
+        exclusion_zones (Claude path only): (x1,y1,x2,y2) pixel rectangles in
+        the ORIGINAL image's coordinate space (FIX-4,
+        ocr_extractor.compute_exclusion_zones) to pass into the prompt so
+        labels don't land on schedule tables/BOM/title-block text (B-4).
+        Not threaded into the tiled local-VLM path -- each tile is a crop
+        with its own coordinate frame, and remapping full-page zones into
+        per-tile local coordinates is separate, unvalidated work.
+        """
         vlm = self.vlm_annotator
         backend_name = self.config.vlm.backend.lower()
         is_local_vlm = backend_name in ("qwen", "unsloth")
@@ -1460,7 +1597,7 @@ class AnnotationPipeline:
             # Claude: tiling would quadruple API cost; skip silently unless explicit
             if self.config.use_tiling:
                 logger.debug("Tiling skipped for Claude backend (API cost); using full-image")
-            result = vlm.annotate(img_path)
+            result = vlm.annotate(img_path, exclusion_zones=exclusion_zones)
 
         return result
 
@@ -1818,6 +1955,7 @@ class AnnotationPipeline:
         ocr_rooms: List[RoomCandidate],
         img_path: Optional[Path] = None,
         exclusion_zones: Optional[List] = None,
+        page_type_result: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
         """
         Save VLM annotation result, merging with OCR data.
@@ -1945,6 +2083,13 @@ class AnnotationPipeline:
 
         # Add preliminary sft_ready flag (will be recomputed in post-processing step)
         data["sft_ready"] = False
+
+        # AV-6: advisory page-type triage result, if the caller ran it.
+        # None (the default) means "not attempted" -- leaves no key,
+        # rather than writing a misleading always-present field.
+        if page_type_result is not None:
+            data["page_type"] = page_type_result.get("page_type")
+            data["page_type_rationale"] = page_type_result.get("rationale", "")
 
         if self.config.use_windows or self.config.use_yolo_objects:
             try:
@@ -2213,7 +2358,7 @@ class AnnotationPipeline:
                     detection.confidence,
                 )
             mappings_sources.append(
-                map_detections_to_rooms(yolo_detections, rooms_for_detection)
+                self.attachment_policy.attach(yolo_detections, rooms_for_detection)
             )
 
         return merge_object_mappings(mappings_sources)
@@ -2376,6 +2521,14 @@ class AnnotationPipeline:
             },
             "sam": {
                 "model_type": self.config.sam.model_type,
+            },
+            "yolo_objects": {
+                "checkpoint_path": self.config.yolo_objects.checkpoint_path,
+                "confidence_threshold": self.config.yolo_objects.confidence_threshold,
+            },
+            "sam3_exemplar": {
+                "seed_confidence_threshold": self.config.sam3_exemplar.seed_confidence_threshold,
+                "sam3_confidence_threshold": self.config.sam3_exemplar.sam3_confidence_threshold,
             },
             "pipeline": {
                 "use_vlm": self.config.use_vlm,
@@ -2781,6 +2934,43 @@ Examples:
         "--dpi", type=int, default=None, help="Custom DPI for PDF extraction"
     )
     parser.add_argument(
+        "--enforce-min-edge-floor",
+        action="store_true",
+        help="Raise dpi for physically-small PDF sheets so every page rasterizes "
+             "to at least PDFConfig.min_longest_edge_px (default 4500). Off by "
+             "default pending a broader memory measurement on the CPU-only OCR "
+             "host — see PDFConfig.enforce_min_edge_floor's docstring.",
+    )
+    parser.add_argument(
+        "--use-page-type",
+        action="store_true",
+        help="AV-6: single-shot page-type triage (floor_plan / "
+             "non_architectural_document / other) per image, inside "
+             "STEP 3's existing per-image loop (no extra model load). "
+             "Advisory only: writes page_type/page_type_rationale on "
+             "the annotation, never drops or accepts a room. Requires "
+             "--use-vlm --vlm-backend unsloth (no-op with any other "
+             "backend, logs a warning). Default: off.",
+    )
+    parser.add_argument(
+        "--export-object-detections",
+        action="store_true",
+        help="AV-1: also export objectDetections (door/window geometry) "
+             "to coco_objects.json in the output directory, in its own "
+             "category id space (never merged into the room-geometry "
+             "coco/ export). Default: off.",
+    )
+    parser.add_argument(
+        "--object-detection-min-confidence",
+        type=float,
+        default=None,
+        help="Minimum confidence for a detection to be included in "
+             "coco_objects.json (default: ExportConfig."
+             "object_detection_min_confidence, 0.0 -- keeps every "
+             "persisted detection). Has no effect unless "
+             "--export-object-detections is also set.",
+    )
+    parser.add_argument(
         "--skip-existing",
         action="store_true",
         help="Skip images that already have annotations",
@@ -2827,6 +3017,7 @@ Examples:
     config.use_windows = args.use_windows
     config.use_yolo_objects = args.use_yolo_objects
     config.use_sam3_exemplar = args.use_sam3_exemplar
+    config.use_page_type = args.use_page_type
     _warn_if_sam3_exemplar_orphaned(config)
     _warn_if_yolo_objects_ocr_only(config)
     if args.corroboration_weight is not None:
@@ -2837,6 +3028,9 @@ Examples:
     if args.eval_gt_dir is not None:
         config.eval_gt_dir = args.eval_gt_dir
     config.min_rooms_for_sft = args.min_rooms
+    config.export.export_object_detections = args.export_object_detections
+    if args.object_detection_min_confidence is not None:
+        config.export.object_detection_min_confidence = args.object_detection_min_confidence
     if args.no_tiling:
         config.use_tiling = False
     config.ocr.backend = args.ocr_backend
@@ -2852,6 +3046,8 @@ Examples:
 
     if args.dpi:
         config.pdf.dpi = args.dpi
+    if args.enforce_min_edge_floor:
+        config.pdf.enforce_min_edge_floor = True
 
     # Serialize runs — VLM + SAM load multi-GB models; two concurrent runs exhaust RAM.
     with single_instance(wait=not args.no_wait):

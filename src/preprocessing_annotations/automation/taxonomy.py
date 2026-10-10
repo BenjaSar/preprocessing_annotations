@@ -155,6 +155,16 @@ MANDATORY_CLASSES: Dict[str, List[str]] = {
     "RESTROOM": [
         "RESTROOM", "BATHROOM", "WC", "LAVATORY",
         "POWDER ROOM", "MEN'S RESTROOM", "WOMEN'S RESTROOM",
+        # R3 (2026-09-14): "REST 4-2" style numbered-restroom labels
+        # (220301_Elect_plans_05) — sft_validator.py's keyword gate was
+        # updated in parallel to admit "REST".
+        "REST",
+        # R3 side-finding, resolved (2026-09-14): bare "RR" abbreviation
+        # ("MEN RR", "STAFF RR", "RR 204") — corpus-scanned, 100% restroom
+        # context. Dotted "R.R." handled separately by
+        # _REGEX_SURFACE_TO_MANDATORY below (trailing-punctuation defeats
+        # this list's word-boundary matching).
+        "RR",
     ],
     # TOILET is its own class (per taxonomy decision): school/institutional
     # plans label gendered toilet rooms distinctly from generic RESTROOM.
@@ -221,6 +231,12 @@ MANDATORY_CLASSES: Dict[str, List[str]] = {
         # not resolve the space-separated label ("YOGA ROOM" is neither a
         # substring of it nor vice-versa), so it fell back to STORAGE ROOM.
         "YOGA ROOM", "YOGA",
+        # Track 2 pilot (2026-09-15): cannabis-cultivation room types
+        # ("Crooked Creek Bloom/Veg Room" PDFs) -- no existing mandatory class
+        # fits a grow-facility flowering/vegetative room; OTHER is the same
+        # honest catch-all already used for generic "ROOM N" labels. Paired
+        # with sft_validator.py's matching VALID_ROOM_KEYWORDS entries.
+        "BLOOM ROOM", "BLOOM RM", "VEG ROOM",
     ],
 }
 
@@ -239,6 +255,23 @@ MANDATORY_CLASSES: Dict[str, List[str]] = {
 # containing a numbered-room fragment.
 _REGEX_SURFACE_TO_MANDATORY: List[tuple] = [
     (re.compile(r"^ROOM\s*\d+$", re.IGNORECASE), "OTHER"),
+    # R3 (2026-09-14): apartment unit-type-code + unit-number labels
+    # ("1.1R 229", "2.1R 227", "1.1 217") — paired with sft_validator.py's
+    # matching VALID_ROOM_REGEXES entry (see that file for the visual
+    # verification and corpus false-positive scan). These are real
+    # residential units, same class as "1BR"/"TYPE-A1" elsewhere in this
+    # taxonomy, just a building-specific numbering convention.
+    (re.compile(r"^\d\.\d[A-Z]?\s*\d{2,4}$"), "RESIDENTIAL UNIT"),
+    # R3 side-finding, resolved (2026-09-14): dotted "R.R." restroom
+    # abbreviation ("Men's R.R.", "224 R.R.", "NON-COMPLIANT R.R.") — paired
+    # with sft_validator.py's matching VALID_ROOM_REGEXES entry (see that
+    # file for the trailing-punctuation word-boundary defect this works
+    # around, and the corpus-wide false-positive scan). Callers use
+    # `.match()`, which anchors at position 0 only — this rule leads with
+    # `.*` so it still matches when "R.R." isn't at the very start of the
+    # string (e.g. "224 R.R.", "NON-COMPLIANT R.R."), unlike the other rules
+    # in this list which are naturally start-anchored already.
+    (re.compile(r".*R\.R\.?", re.IGNORECASE), "RESTROOM"),
 ]
 
 # ---------------------------------------------------------------------------
@@ -275,6 +308,9 @@ EXTENDED_TYPES: Dict[str, List[str]] = {
     "elevator": [
         "ELEVATOR", "ELEVATOR CORE", "ELEVATOR AREA",
         "LIFT", "ELEVATOR MACHINE ROOM",
+        # R3 (2026-09-14): "ELEV #1" style abbreviation (220301_Elect_plans_05);
+        # sft_validator.py's keyword gate admits "ELEV" in parallel.
+        "ELEV",
     ],
 
     # ── Storage variants (beyond mandatory) ──────────────────────────────────
@@ -308,6 +344,9 @@ EXTENDED_TYPES: Dict[str, List[str]] = {
     ],
     "laundry": [
         "LAUNDRY", "LAUNDRY ROOM", "UTILITY ROOM", "UTILITY",
+        # R3 (2026-09-14): "UTIL 301" style abbreviation (220301_Elect_plans_05);
+        # sft_validator.py's keyword gate admits "UTIL" in parallel.
+        "UTIL",
     ],
     "garage": [
         "GARAGE",
@@ -593,6 +632,33 @@ for _extended, _variants in EXTENDED_TYPES.items():
     _mapped = _EXTENDED_TO_MANDATORY.get(_extended, "STORAGE ROOM")
     for _v in _variants:
         _EXACT_VARIANT_TO_MANDATORY.setdefault(_v.upper(), _mapped)
+
+
+def resolve_exact_short_variant(raw: str) -> Optional[str]:
+    """
+    Exact-match a short (<=4 char) raw token against this module's own
+    variant tables, bypassing abbreviation expansion and substring rules.
+
+    Callers that pre-expand abbreviations before normalizing (e.g.
+    TaxonomyNormalizer in sft_validator.py) can silently defeat an explicit
+    short-code placement here. Example: "DR" is listed under RESIDENTIAL
+    UNIT above (deliberately, for architectural unit-code sheets), but
+    abbreviations.py expands "DR" -> "DINING ROOM" first, which resolves to
+    RESTAURANT via _SURFACE_TO_MANDATORY instead. Checking the raw token
+    here first lets this module's own explicit placement win, per its
+    stated intent (see the short-token guard comment in
+    normalize_to_mandatory below).
+
+    Returns None (not a fallback class) when the raw token isn't an exact
+    member of any variant list, so callers can tell "no opinion" apart from
+    a genuine resolution and fall back to their own expansion logic.
+    """
+    if not raw:
+        return None
+    raw_upper = raw.strip().upper()
+    if len(raw_upper) > 4:
+        return None
+    return _EXACT_VARIANT_TO_MANDATORY.get(raw_upper)
 
 
 def normalize_to_mandatory(raw: str) -> str:

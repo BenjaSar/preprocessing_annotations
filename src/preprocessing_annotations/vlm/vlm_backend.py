@@ -1687,6 +1687,63 @@ class UnslothQwenBackend(VLMBackend):
         _rescale_bbox_objects(doors, _NO_RESCALE / scale)
         return doors
 
+    def classify_page_type(self, image_path: Union[str, Path]) -> Dict[str, Any]:
+        """AV-6: single-shot page-type triage (floor_plan /
+        non_architectural_document / other) -- see
+        prompt_templates.build_page_type_prompt_unsloth's module
+        comment for the gap this addresses.
+
+        Advisory only: the caller persists this as an observable field;
+        it must never be used to drop or accept a room on its own (no
+        such caller exists in this codebase). Runs on an already-loaded
+        model (initialize() is idempotent, same as every other detect_*
+        method) -- intended to be called from inside the same per-image
+        pass as detect_rooms, while the VLM is already resident, not as
+        a separate model-load cycle.
+
+        Returns {"page_type": ..., "rationale": ...} always -- falls
+        back to {"page_type": "other", ...} on any failure (image
+        unreadable, generation error, unparseable/unrecognized
+        response) rather than raising, matching this class's other
+        detect_* methods' empty-list-on-failure convention.
+        """
+        image = self._open_image_rgb(image_path)
+        if image is None:
+            return {"page_type": "other", "rationale": "could not open image"}
+        resized, _ = self._resize_for_detection(image)
+        prompt = prompt_templates.build_page_type_prompt_unsloth()
+        try:
+            text = self._generate_for_image(
+                resized, prompt, self.config.page_type_max_new_tokens
+            )
+        except Exception as e:
+            logger.warning(f"classify_page_type: generation failed: {e}")
+            return {"page_type": "other", "rationale": f"generation failed: {e}"}
+        return self._parse_page_type_response(text)
+
+    @staticmethod
+    def _parse_page_type_response(response_text: str) -> Dict[str, Any]:
+        """Parse classify_page_type's JSON response. Falls back to
+        {"page_type": "other", ...} on any parse failure or an
+        unrecognized page_type value -- never raises, never returns a
+        page_type outside prompt_templates.PAGE_TYPE_CATEGORIES."""
+        import re
+
+        match = re.search(r"\{.*\}", response_text, re.DOTALL)
+        if not match:
+            return {"page_type": "other", "rationale": "unparseable response"}
+        try:
+            data = json.loads(match.group(0))
+        except (json.JSONDecodeError, TypeError):
+            return {"page_type": "other", "rationale": "invalid JSON"}
+        page_type = data.get("page_type")
+        if page_type not in prompt_templates.PAGE_TYPE_CATEGORIES:
+            return {
+                "page_type": "other",
+                "rationale": f"unrecognized page_type: {page_type!r}",
+            }
+        return {"page_type": page_type, "rationale": str(data.get("rationale", ""))}
+
     def _open_image_rgb(self, image_path: Union[str, Path]) -> Optional[Any]:
         """Initialize the model and open the image as RGB; None on failure."""
         try:
