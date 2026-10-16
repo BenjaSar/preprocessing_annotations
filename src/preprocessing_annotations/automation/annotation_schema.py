@@ -14,7 +14,8 @@ for Vision-Language Model fine-tuning (SFT).
                 "type": "<MANDATORY_CLASS or MANDATORY_CLASS w/ suffix>",
                 "name": "<original_label>",
                 "nameUnique": "<type - zone - seq>",
-                "coordinates": {"bbox": [x1, y1, x2, y2], "polygon": [...]},
+                "coordinates": {"bbox": [x1, y1, x2, y2], "polygon": [...],
+                                "box_convention": "label|room_extent|null"},
                 "confidence": float,
                 "coverage": {
                     "spatial_fraction": float,
@@ -56,6 +57,37 @@ class RoomCoordinates:
     """Spatial coordinates of a room."""
     bbox: List[float]  # [x1, y1, x2, y2] in pixels
     polygon: Optional[List[List[float]]] = None  # [[x, y], ...] optional
+
+
+# What a room's bbox actually encloses. The pipeline emits two conventions
+# at once and never said so, which reads downstream as oversized boxes:
+# an OCR-anchored room's box is its label text, while a vlm_only room's box
+# follows the VLM prompt's "box must enclose the ENTIRE room ... from wall
+# to wall". Measured on the 48 room-GT pages (box area / GT room area,
+# median): ocr_only 0.013, vlm_ocr_merged 0.015, vlm_only 0.348.
+#
+# Consumers need the distinction: a label box and a room box are different
+# training targets, and comparing or filtering them by size without it is
+# what makes the two look like one noisy distribution.
+LABEL_BOX = "label"
+ROOM_EXTENT_BOX = "room_extent"
+
+_BOX_CONVENTION_BY_SOURCE: Dict[str, str] = {
+    "ocr_only": LABEL_BOX,
+    "ocr_abbreviation_recovered": LABEL_BOX,
+    "vlm_ocr_merged": LABEL_BOX,
+    "vlm_only": ROOM_EXTENT_BOX,
+}
+
+
+def box_convention_of(source: str) -> Optional[str]:
+    """What this room's bbox encloses, or None when the source is unknown.
+
+    None is deliberate: an unrecognised source gets no convention rather
+    than a guessed one, so a new source shows up as unlabelled instead of
+    silently inheriting the wrong training target.
+    """
+    return _BOX_CONVENTION_BY_SOURCE.get(source)
 
 
 @dataclass
@@ -479,6 +511,7 @@ class SFTAnnotationBuilder:
             "nameUnique": room.name_unique,
             "coordinates": {
                 "bbox": room.coordinates.bbox,
+                "box_convention": box_convention_of(room.coverage.source),
             },
             "confidence": room.confidence,
             "coverage": {

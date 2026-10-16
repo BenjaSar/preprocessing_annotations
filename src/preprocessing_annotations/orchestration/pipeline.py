@@ -7,6 +7,7 @@ segmentation, and export.
 """
 
 import argparse
+import dataclasses
 import json
 import logging
 import os
@@ -22,6 +23,9 @@ from ..config import PipelineConfig
 from ..ingestion.pdf_extractor import PDFExtractor, PageTypeClassifier
 from ..ingestion.ocr_extractor import MEPTextExtractor, RoomCandidate, TextDetection
 from ..ingestion.two_pass_ocr_extractor import TwoPassOCRExtractor
+from ..ingestion.crop_reread import Reread
+from ..vlm.read import UnslothCropTextReader
+from .crop_reread_step import CropRereadStep
 from ..vlm.vlm_annotator import VLMAnnotator
 from ..vlm.semantic_reconciler import SemanticReconciler
 from ..vlm.vlm_backend import VLMFactory, UnslothQwenBackend
@@ -31,6 +35,7 @@ from ..detection.sam_segmenter import RoomSegmenter
 from ..detection.cubicasa5k_detector import CubiCasa5KDetector
 from ..bbox.bbox_visualizer import BboxVisualizer
 from ..export.exporters import LabelStudioExporter, ReviewPrioritizer, COCOExporter, CoverageReporter
+from ..export.group_split import GroupMap
 from ..export.object_exporter import ObjectDetectionCOCOExporter
 from ..automation import (
     LabelNormalizer, QualityChecker, RegionExtractor,
@@ -38,14 +43,18 @@ from ..automation import (
     filter_by_confidence, validate_for_sft, prepare_sft_annotation,
     SFTAnnotationBuilder, build_annotation_json, ConfidenceComputer
 )
-from ..automation.sft_validator import _merge_vlm_and_ocr
+from ..automation.sft_validator import (
+    _merge_vlm_and_ocr,
+    dropped_page_record,
+    has_room_name_candidate,
+)
 from ..automation.taxonomy import normalize_to_mandatory, get_extended_type
 from ..automation.abbreviation_ocr_recovery import (
     AbbreviationOCRRecovery, ResidentialAbbreviationRecovery
 )
 from ..detection.window_detector import (
     WindowDetector, WindowDetection, WindowDetectionTier, RoomWindowMapping,
-    apply_window_suffixes, merge_object_mappings,
+    ObjectDetectionPass, apply_window_suffixes, merge_object_mappings,
 )
 from ..detection.yolo_detector import YoloObjectDetector
 from ..detection.sam3_exemplar_detector import Sam3ExemplarDetector
@@ -122,6 +131,9 @@ class AnnotationPipeline:
         # Initialize components lazily
         self._pdf_extractor = None
         self._ocr_extractor = None
+        # Set when the assembly step decides on crop re-read; recorded in
+        # the run manifest so a skip is never invisible. None = it ran.
+        self._crop_reread_skipped: Optional[str] = self.config.crop_reread_skip_reason()
         self._vlm_annotator = None
         self._sam_segmenter = None
         self._cubicasa_room_detector = None
@@ -249,6 +261,7 @@ class AnnotationPipeline:
                 ocr_config=self.config.ocr,
                 vlm_backend=vlm_backend,
                 confidence_threshold=0.92,  # PaddleOCR routinely returns >0.97; trigger VLM fallback only for genuinely uncertain tokens
+                vlm_fallback_enabled=self.config.use_ocr_vlm_fallback,
             )
         return self._ocr_extractor
 
@@ -686,6 +699,7 @@ class AnnotationPipeline:
         # Raw Pass-1 detections retained per image for the deferred assembly step
         # (VLM refine + abbreviation recovery run after the OCR heap is released).
         raw_detections_by_image: Dict[str, List[TextDetection]] = {}
+        crop_rereads_by_image: Dict[str, List[Reread]] = {}
         # FIX-4: per-image BOM/title-block exclusion zones derived from OCR excluded-token clusters.
         exclusion_zones_by_image: Dict[str, list] = {}
 
@@ -763,11 +777,14 @@ class AnnotationPipeline:
         # recovery — same order and logic as the original single-pass path, so
         # ocr_results match the pre-change baseline. refine_with_vlm is a no-op
         # when there is no VLM backend, so this is safe with use_vlm disabled too.
+        crop_reread_step = self._crop_reread_step()
         for img_path in self._iter_images(images_dir):
             ocr_results[img_path.name] = self._assemble_ocr_candidates(
                 img_path,
                 ocr_results.get(img_path.name, []),
                 raw_detections_by_image.get(img_path.name, []),
+                crop_reread_step,
+                crop_rereads_by_image,
             )
 
         # Step 3: VLM annotation (optional)
@@ -839,7 +856,9 @@ class AnnotationPipeline:
                     object_detections_for_viz = self._save_annotation(
                         result, ann_path, ocr_results.get(img_path.name, []), img_path,
                         exclusion_zones=exclusion_zones_by_image.get(img_path.name, []),
-                        page_type_result=page_type_result)
+                        page_type_result=page_type_result,
+                        ocr_text_detections=raw_detections_by_image.get(img_path.name, []),
+                        crop_rereads=crop_rereads_by_image.get(img_path.name, []))
 
                     if img_path.name in image_status:
                         image_status[img_path.name]["annotated"] = True
@@ -886,7 +905,9 @@ class AnnotationPipeline:
                     ocr_rooms = ocr_results.get(img_path.name, [])
                     try:
                         self._save_ocr_annotation(img_path, ocr_rooms, annotations_dir,
-                                                   exclusion_zones=exclusion_zones_by_image.get(img_path.name, []))
+                                                   exclusion_zones=exclusion_zones_by_image.get(img_path.name, []),
+                                                   ocr_text_detections=raw_detections_by_image.get(img_path.name, []),
+                        crop_rereads=crop_rereads_by_image.get(img_path.name, []))
                         stats["images_annotated"] += 1
                         stats["rooms_detected"] += len(ocr_rooms)
                         if img_path.name in image_status:
@@ -915,11 +936,15 @@ class AnnotationPipeline:
                 # Previously, images with zero OCR rooms were silently dropped:
                 # no annotation file was written, no warning was logged, and
                 # the image disappeared from all downstream steps and exports.
-                # A zero-room annotation is written with sft_ready=False and
-                # lands in needs_review.json so a human can inspect it.
+                # A zero-room annotation is written with sft_ready=False. Step 4
+                # then moves such pages to skipped_pages/ and leaves them out of
+                # processed_annotations/, so needs_review.json never lists them;
+                # their trace is dropped_page_attribution/.
                 try:
                     self._save_ocr_annotation(img_path, rooms, annotations_dir,
-                                              exclusion_zones=exclusion_zones_by_image.get(img_path.name, []))
+                                              exclusion_zones=exclusion_zones_by_image.get(img_path.name, []),
+                                              ocr_text_detections=raw_detections_by_image.get(img_path.name, []),
+                        crop_rereads=crop_rereads_by_image.get(img_path.name, []))
                     stats["images_annotated"] += 1
                     stats["rooms_detected"] += len(rooms)
                     if img_path.name in image_status:
@@ -1063,6 +1088,10 @@ class AnnotationPipeline:
                 # Captured before prepare_sft_annotation pops "ocr_rooms" — needed
                 # downstream by the quality checker's OCR_NAME_EMPTY check.
                 raw_ocr_rooms = annotation.get("ocr_rooms", [])
+                # Same reason: the raw candidates are gone after the call below.
+                has_name_candidate = has_room_name_candidate(
+                    annotation, self.config.block_single_letter_abbreviations
+                )
                 _t0_sft = time.time()
                 annotation = prepare_sft_annotation(
                     annotation,
@@ -1071,6 +1100,7 @@ class AnnotationPipeline:
                     use_window_elongation_filter=self.config.use_window_elongation_filter,
                     exempt_sam_expanded_from_ink_filter=self.config.exempt_sam_expanded_from_ink_filter,
                     block_single_letter_abbreviations=self.config.block_single_letter_abbreviations,
+                    room_filter=self.config.room_filter,
                 )
                 filtered_room_count = len(annotation.get("rooms", []))
                 _sft_outcome = "sft_ready" if annotation.get("sft_ready") else "filtered"
@@ -1270,14 +1300,8 @@ class AnnotationPipeline:
                     # what makes that 40/53 split possible to re-derive and
                     # act on in a future phase, instead of guessed from a
                     # bare NO_ROOMS_DETECTED code with no per-room reason.
-                    drop_attr = annotation.get("drop_attribution")
-                    if drop_attr:
-                        attribution_record = {
-                            "image_file": annotation.get("image_file"),
-                            "drop_attribution": drop_attr,
-                        }
-                        if annotation.get("drop_detail"):
-                            attribution_record["drop_detail"] = annotation["drop_detail"]
+                    attribution_record = dropped_page_record(annotation, has_name_candidate)
+                    if attribution_record:
                         attribution_path = dropped_attribution_dir / ann_path.name
                         with open(attribution_path, "w") as f:
                             json.dump(attribution_record, f, indent=2)
@@ -1297,7 +1321,8 @@ class AnnotationPipeline:
                             shutil.move(str(image_file), str(skipped_dir / image_file.name))
                             logger.warning(
                                 f"    {ann_path.name}: Moved to skipped_pages/ "
-                                f"(sft_ready=false, 0 rooms — non-floorplan page)"
+                                f"(sft_ready=false, 0 rooms"
+                                f"{'' if has_name_candidate else ', no room-name candidate'})"
                             )
                         except Exception as move_err:
                             logger.warning(
@@ -1370,8 +1395,10 @@ class AnnotationPipeline:
         coco_exporter = COCOExporter()
         coco_exporter.export_splits(
             processed_dir, images_dir, output_dir / "coco",
-            splits=(0.70, 0.15, 0.15), seed=42,
+            splits=self.config.export.split_ratios,
+            seed=self.config.export.split_seed,
             min_annotations_per_image=self.config.min_rooms_for_sft,
+            group_map=GroupMap.load(self.config.export.split_group_map_path),
         )
 
         # 7c: Coverage report (class imbalance visibility before training)
@@ -1524,19 +1551,55 @@ class AnnotationPipeline:
         logger.info("Pipeline run() complete — all steps finished.")
         return stats
 
+    def _crop_reread_step(self) -> Optional[CropRereadStep]:
+        """The crop-reread step, or None when this run cannot do it.
+
+        Built once per run, not per page, so the selector and reader are not
+        rebuilt for every page. The skip reason is logged and kept for the
+        run manifest: crop re-read is on by default, so a run that silently
+        proceeded without it would look re-read when it was not.
+        """
+        self._crop_reread_skipped = self.config.crop_reread_skip_reason()
+        if self._crop_reread_skipped is not None:
+            logger.info("  Crop re-read: skipped (%s)", self._crop_reread_skipped)
+            return None
+        logger.info(
+            "  Crop re-read: active (%s)", asdict(self.config.crop_reread)
+        )
+        return CropRereadStep(
+            self.ocr_extractor.ocr_extractor,
+            UnslothCropTextReader(self.vlm_annotator),
+            self.config.crop_reread,
+        )
+
     def _assemble_ocr_candidates(
         self,
         img_path: Path,
         pass1_rooms: List[RoomCandidate],
         raw_detections: List[TextDetection],
+        crop_reread_step: Optional[CropRereadStep] = None,
+        crop_rereads_by_image: Optional[Dict[str, List[Reread]]] = None,
     ) -> List[RoomCandidate]:
-        """Finalize OCR candidates for one page: Pass-2 VLM refine, then residential
-        abbreviation recovery.
+        """Finalize OCR candidates for one page: optional crop re-read, then
+        Pass-2 VLM refine, then residential abbreviation recovery.
 
         Runs after the PaddleOCR heap is released so the VLM can load without
         co-residence. Order (refine → abbrev) and the per-candidate logic match the
         original in-loop two-pass path, so outputs are unchanged.
+
+        Crop re-read (C2) replaces pass1_rooms before refine, the same order
+        the offline replay measured. Abbreviation recovery below keeps reading
+        the untouched OCR detections: it matches whole abbreviations, which is
+        not what the re-read targets, and leaving it on the raw text keeps this
+        change confined to candidate generation.
         """
+        if crop_reread_step is not None:
+            pass1_rooms, rereads = crop_reread_step.rebuild_candidates(
+                img_path, raw_detections
+            )
+            if crop_rereads_by_image is not None:
+                crop_rereads_by_image[img_path.name] = rereads
+
         refined = self.ocr_extractor.refine_with_vlm(img_path, pass1_rooms)
 
         recovered_abbrevs: List[RoomCandidate] = []
@@ -1956,6 +2019,8 @@ class AnnotationPipeline:
         img_path: Optional[Path] = None,
         exclusion_zones: Optional[List] = None,
         page_type_result: Optional[Dict[str, Any]] = None,
+        ocr_text_detections: Optional[List[TextDetection]] = None,
+        crop_rereads: Optional[List[Reread]] = None,
     ) -> List[Dict[str, Any]]:
         """
         Save VLM annotation result, merging with OCR data.
@@ -2015,7 +2080,9 @@ class AnnotationPipeline:
         # Build SFT format ("roomsRecognized") from the merged VLM+OCR room list.
         # When the VLM produces 0 valid rooms (stripe rejection), OCR rooms are
         # used so that raw annotations reflect what OCR actually found.
-        merged_room_dicts = _merge_vlm_and_ocr(data["rooms"], data["ocr_rooms"])
+        merged_room_dicts = _merge_vlm_and_ocr(
+            data["rooms"], data["ocr_rooms"], self.config.room_filter.merge_proximity_px
+        ).rooms
 
         sft_rooms = []
         for idx, room_dict in enumerate(merged_room_dicts, start=1):
@@ -2080,6 +2147,15 @@ class AnnotationPipeline:
         # FIX-4: store exclusion zones so prepare_sft_annotation can drop mislocalized rooms
         if exclusion_zones:
             data["exclusion_zones"] = exclusion_zones
+        if ocr_text_detections is not None:
+            data["ocrTextDetections"] = self._serialize_text_detections(ocr_text_detections)
+        if crop_rereads:
+            # C2: kept OUT of ocrTextDetections on purpose. That key is the
+            # offline replay's baseline input, so folding re-read text into it
+            # would make every later "no re-read" baseline already re-read.
+            # Probe format (eval/crop_reread_records.load_rereads), so a sweep
+            # can re-pick selector bounds on this run with no second GPU pass.
+            data["cropRereads"] = [dataclasses.asdict(r) for r in crop_rereads]
 
         # Add preliminary sft_ready flag (will be recomputed in post-processing step)
         data["sft_ready"] = False
@@ -2111,11 +2187,15 @@ class AnnotationPipeline:
                     }
                     for idx, r in enumerate(merged_room_dicts)
                 ]
-                mappings = self._detect_object_mappings(
+                detection_pass = self._detect_object_mappings(
                     img_path=img_path, rooms_for_detection=rooms_for_detection,
                 )
+                mappings = detection_pass.mappings
                 object_detections = self._collect_object_detections(mappings)
                 data["objectDetections"] = object_detections
+                data["unattachedObjectDetections"] = [
+                    self._serialize_detection(d) for d in detection_pass.unattached
+                ]
                 data["roomsRecognized"] = self._apply_object_attributes(
                     data["roomsRecognized"], mappings,
                     **self._confidence_weight_kwargs()
@@ -2132,6 +2212,8 @@ class AnnotationPipeline:
     def _save_ocr_annotation(
         self, img_path: Path, rooms: List[RoomCandidate], annotations_dir: Path,
         exclusion_zones: Optional[List] = None,
+        ocr_text_detections: Optional[List[TextDetection]] = None,
+        crop_rereads: Optional[List[Reread]] = None,
     ) -> None:
         """
         Save OCR-only annotation.
@@ -2207,6 +2289,15 @@ class AnnotationPipeline:
         # FIX-4: store exclusion zones
         if exclusion_zones:
             data["exclusion_zones"] = exclusion_zones
+        if ocr_text_detections is not None:
+            data["ocrTextDetections"] = self._serialize_text_detections(ocr_text_detections)
+        if crop_rereads:
+            # C2: kept OUT of ocrTextDetections on purpose. That key is the
+            # offline replay's baseline input, so folding re-read text into it
+            # would make every later "no re-read" baseline already re-read.
+            # Probe format (eval/crop_reread_records.load_rereads), so a sweep
+            # can re-pick selector bounds on this run with no second GPU pass.
+            data["cropRereads"] = [dataclasses.asdict(r) for r in crop_rereads]
 
         # Add preliminary sft_ready flag (will be recomputed in post-processing step)
         data["sft_ready"] = False
@@ -2225,10 +2316,14 @@ class AnnotationPipeline:
                     }
                     for idx, r in enumerate(data["rooms"])
                 ]
-                mappings = self._detect_object_mappings(
+                detection_pass = self._detect_object_mappings(
                     img_path=img_path, rooms_for_detection=rooms_for_detection,
                 )
+                mappings = detection_pass.mappings
                 data["objectDetections"] = self._collect_object_detections(mappings)
+                data["unattachedObjectDetections"] = [
+                    self._serialize_detection(d) for d in detection_pass.unattached
+                ]
                 data["roomsRecognized"] = self._apply_object_attributes(
                     data["roomsRecognized"], mappings,
                     **self._confidence_weight_kwargs()
@@ -2285,7 +2380,7 @@ class AnnotationPipeline:
 
     def _detect_object_mappings(
         self, img_path: Path, rooms_for_detection: List[Dict[str, Any]],
-    ) -> List[RoomWindowMapping]:
+    ) -> ObjectDetectionPass:
         """Run every enabled object-detection source (WindowDetector's
         tiers, and/or T-I's YoloObjectDetector) and OR-merge their
         per-room flags (merge_object_mappings, window_detector.py).
@@ -2295,6 +2390,7 @@ class AnnotationPipeline:
         too, so flipping one flag never changes the other's behavior.
         """
         mappings_sources: List[List[RoomWindowMapping]] = []
+        unattached: List[WindowDetection] = []
 
         if self.config.use_windows:
             image_array = self._load_image_for_detection(img_path)
@@ -2357,11 +2453,18 @@ class AnnotationPipeline:
                     detection.bbox,
                     detection.confidence,
                 )
-            mappings_sources.append(
-                self.attachment_policy.attach(yolo_detections, rooms_for_detection)
+            yolo_mappings = self.attachment_policy.attach(
+                yolo_detections, rooms_for_detection
             )
+            attached_ids = {
+                id(wd) for m in yolo_mappings for wd in m.intersecting_windows
+            }
+            unattached = [d for d in yolo_detections if id(d) not in attached_ids]
+            mappings_sources.append(yolo_mappings)
 
-        return merge_object_mappings(mappings_sources)
+        return ObjectDetectionPass(
+            mappings=merge_object_mappings(mappings_sources), unattached=unattached
+        )
 
     @staticmethod
     def _collect_object_detections(
@@ -2381,13 +2484,26 @@ class AnnotationPipeline:
                 if id(wd) in seen_ids:
                     continue
                 seen_ids.add(id(wd))
-                detections.append({
-                    "category": (wd.metadata or {}).get("type"),
-                    "bbox": list(wd.bbox),
-                    "confidence": wd.confidence,
-                    "source_tier": wd.source_tier.value,
-                })
+                detections.append(AnnotationPipeline._serialize_detection(wd))
         return detections
+
+    @staticmethod
+    def _serialize_text_detections(detections: List[TextDetection]) -> List[Dict[str, Any]]:
+        """Raw Pass-1 OCR detections (pre-candidate), so candidate generation
+        can be replayed offline from the run's own annotations."""
+        return [
+            {"text": d.text, "bbox": [list(point) for point in d.bbox], "confidence": d.confidence}
+            for d in detections
+        ]
+
+    @staticmethod
+    def _serialize_detection(wd: WindowDetection) -> Dict[str, Any]:
+        return {
+            "category": (wd.metadata or {}).get("type"),
+            "bbox": list(wd.bbox),
+            "confidence": wd.confidence,
+            "source_tier": wd.source_tier.value,
+        }
 
     @staticmethod
     def _evidence_bbox_area_frac(
@@ -2511,6 +2627,8 @@ class AnnotationPipeline:
                 "backend": self.config.ocr.backend,
                 "confidence_threshold": self.config.ocr.confidence_threshold,
                 "preprocess": self.config.ocr.preprocess,
+                "room_name_patterns": list(self.config.ocr.room_name_patterns),
+                "room_number_pattern": self.config.ocr.room_number_pattern,
             },
             "vlm": {
                 "backend": self.config.vlm.backend,
@@ -2543,7 +2661,29 @@ class AnnotationPipeline:
                 "tile_rows": self.config.tile_rows,
                 "tile_overlap_pct": self.config.tile_overlap_pct,
                 "tile_trigger_px": self.config.tile_trigger_px,
+                "use_page_type": self.config.use_page_type,
+                "use_ocr_vlm_fallback": self.config.use_ocr_vlm_fallback,
+                "use_crop_reread": self.config.use_crop_reread,
+                # What actually happened, not just what was asked for: the
+                # flag defaults on but the step needs an unsloth CropTextReader.
+                "crop_reread_active": self._crop_reread_skipped is None,
+                "crop_reread_skip_reason": self._crop_reread_skipped,
+                "use_pdf_text_layer": self.config.use_pdf_text_layer,
+                "use_window_elongation_filter": self.config.use_window_elongation_filter,
+                "exempt_sam_expanded_from_ink_filter": self.config.exempt_sam_expanded_from_ink_filter,
+                "block_single_letter_abbreviations": self.config.block_single_letter_abbreviations,
             },
+            "export": {
+                "split_ratios": list(self.config.export.split_ratios),
+                "split_seed": self.config.export.split_seed,
+                "split_group_map_path": (
+                    str(self.config.export.split_group_map_path)
+                    if self.config.export.split_group_map_path is not None else None
+                ),
+            },
+            "room_filter": asdict(self.config.room_filter),
+            "crop_reread": asdict(self.config.crop_reread),
+            "attachment": asdict(self.config.attachment),
             "confidence_weights": {
                 "detection": self.config.confidence_weights.detection,
                 "classification": self.config.confidence_weights.classification,
@@ -2942,6 +3082,19 @@ Examples:
              "host — see PDFConfig.enforce_min_edge_floor's docstring.",
     )
     parser.add_argument(
+        "--no-crop-reread",
+        action="store_true",
+        help="Skip the VLM crop re-read of OCR fragments that look like room "
+             "keywords (orchestration/crop_reread_step.py). On by default "
+             "wherever the run has an unsloth VLM backend; this turns it off.",
+    )
+    parser.add_argument(
+        "--no-ocr-vlm-fallback",
+        action="store_true",
+        help="Skip two-pass OCR's Pass 2 (VLM fallback for low-confidence "
+             "Pass-1 candidates). Default: Pass 2 runs where it triggers.",
+    )
+    parser.add_argument(
         "--use-page-type",
         action="store_true",
         help="AV-6: single-shot page-type triage (floor_plan / "
@@ -3018,6 +3171,8 @@ Examples:
     config.use_yolo_objects = args.use_yolo_objects
     config.use_sam3_exemplar = args.use_sam3_exemplar
     config.use_page_type = args.use_page_type
+    config.use_ocr_vlm_fallback = not args.no_ocr_vlm_fallback
+    config.use_crop_reread = not args.no_crop_reread
     _warn_if_sam3_exemplar_orphaned(config)
     _warn_if_yolo_objects_ocr_only(config)
     if args.corroboration_weight is not None:

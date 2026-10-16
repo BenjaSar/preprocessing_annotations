@@ -1,0 +1,4585 @@
+{
+  "run_dir": "/home/ubuntu/floorplan_classifier/VLM/sprint1_verify53",
+  "pdf_dir": "/home/ubuntu/floorplan_classifier/VLM/test_input",
+  "gt_coco_path": "/home/ubuntu/floorplan_classifier/VLM/gt_segmentation/result.json",
+  "pages_scored": 48,
+  "gt_rooms": 1497,
+  "missed_gt_rooms": 514,
+  "by_cause": {
+    "text_at_run_resolution": 158,
+    "text_only_at_higher_resolution": 111,
+    "no_text": 245
+  },
+  "by_cause_and_category": {
+    "text_at_run_resolution": {
+      "bedroom": 22,
+      "toilet": 19,
+      "classroom": 12,
+      "others": 10,
+      "stairwell": 7,
+      "living_room": 7,
+      "janitor_closet": 7,
+      "storage_room": 7,
+      "counc_office": 7,
+      "corridor": 4,
+      "main_office": 4,
+      "closet": 4,
+      "art_rooom": 3,
+      "mail_idf": 3,
+      "practice": 3,
+      "electrical_room": 3,
+      "lounge": 3,
+      "office": 3,
+      "restroom": 3,
+      "conference": 2,
+      "file_rm": 2,
+      "mechanical_room": 2,
+      "food_services_office": 2,
+      "room": 1,
+      "social-service": 1,
+      "social_service": 1,
+      "waiting_room": 1,
+      "private_office": 1,
+      "recreation_room": 1,
+      "special_education": 1,
+      "clinic": 1,
+      "band": 1,
+      "gym": 1,
+      "prep": 1,
+      "principal": 1,
+      "it": 1,
+      "vestibule": 1,
+      "yoga_room": 1,
+      "package_room": 1,
+      "fire_command_center": 1,
+      "mail_room": 1,
+      "lobby": 1
+    },
+    "text_only_at_higher_resolution": {
+      "toilet": 36,
+      "janitor_closet": 21,
+      "kitchen": 20,
+      "closet": 7,
+      "stairwell": 6,
+      "others": 5,
+      "private_office": 2,
+      "office": 2,
+      "corridor": 2,
+      "electrical_room": 2,
+      "storage_room": 1,
+      "break_room": 1,
+      "cctv_room": 1,
+      "telecom_room": 1,
+      "bedroom": 1,
+      "mechanical_room": 1,
+      "lounge": 1,
+      "classroom": 1
+    },
+    "no_text": {
+      "janitor_closet": 92,
+      "toilet": 57,
+      "kitchen": 56,
+      "closet": 24,
+      "stairwell": 7,
+      "others": 4,
+      "vestibule": 3,
+      "room": 1,
+      "storage_room": 1
+    }
+  },
+  "rooms": [
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page000",
+      "gt_index": 7,
+      "gt_category": "stairwell",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "TAIR",
+        "AIR"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page000",
+      "gt_index": 8,
+      "gt_category": "stairwell",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "STAIR G"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page000",
+      "gt_index": 16,
+      "gt_category": "stairwell",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "TAIRL",
+        "TAIR_D"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page000",
+      "gt_index": 30,
+      "gt_category": "art_rooom",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "AUNDR",
+        "EX",
+        "FX"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page000",
+      "gt_index": 34,
+      "gt_category": "art_rooom",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "5",
+        "LT06",
+        "EX",
+        "EYE",
+        "HNCE"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page000",
+      "gt_index": 42,
+      "gt_category": "room",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "ROOM"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page000",
+      "gt_index": 46,
+      "gt_category": "social-service",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "FX"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page000",
+      "gt_index": 48,
+      "gt_category": "others",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "LT06",
+        "REFUSE"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page000",
+      "gt_index": 6,
+      "gt_category": "toilet",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "11",
+        "A"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page000",
+      "gt_index": 9,
+      "gt_category": "private_office",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "D",
+        "D",
+        "D",
+        "BAT",
+        "AVI-ON"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page000",
+      "gt_index": 10,
+      "gt_category": "toilet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page000",
+      "gt_index": 12,
+      "gt_category": "toilet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page000",
+      "gt_index": 13,
+      "gt_category": "toilet",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "OC"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page000",
+      "gt_index": 14,
+      "gt_category": "toilet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page000",
+      "gt_index": 15,
+      "gt_category": "toilet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page000",
+      "gt_index": 20,
+      "gt_category": "toilet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page000",
+      "gt_index": 21,
+      "gt_category": "toilet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page000",
+      "gt_index": 22,
+      "gt_category": "stairwell",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "BEM",
+        "STARE",
+        "EM"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page000",
+      "gt_index": 23,
+      "gt_category": "office",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "D",
+        "PIR/DH"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page000",
+      "gt_index": 24,
+      "gt_category": "storage_room",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "AC",
+        "AVI-ON",
+        "11",
+        "RAGE",
+        "LT-06",
+        "8-0"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page000",
+      "gt_index": 25,
+      "gt_category": "toilet",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "5"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page000",
+      "gt_index": 29,
+      "gt_category": "break_room",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "EM",
+        "EM",
+        "SC",
+        "BRE",
+        "AK",
+        "ROOM",
+        "EM",
+        "559",
+        "St",
+        "4",
+        "EM",
+        "EM"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page000",
+      "gt_index": 33,
+      "gt_category": "private_office",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "EM"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page000",
+      "gt_index": 37,
+      "gt_category": "cctv_room",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "OAT"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page000",
+      "gt_index": 39,
+      "gt_category": "telecom_room",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "BjAT",
+        "9"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page000",
+      "gt_index": 41,
+      "gt_category": "room",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page001",
+      "gt_index": 9,
+      "gt_category": "toilet",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "17"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page001",
+      "gt_index": 13,
+      "gt_category": "toilet",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "04.8"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page001",
+      "gt_index": 21,
+      "gt_category": "stairwell",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "TAIR_B",
+        "NO"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page001",
+      "gt_index": 26,
+      "gt_category": "social_service",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "SOCIA",
+        "FX"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page001",
+      "gt_index": 27,
+      "gt_category": "waiting_room",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "$",
+        "EX"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page001",
+      "gt_index": 31,
+      "gt_category": "private_office",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "DL"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page001",
+      "gt_index": 34,
+      "gt_category": "stairwell",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        ".O.S. +49.02"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page001",
+      "gt_index": 41,
+      "gt_category": "recreation_room",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "EX",
+        "OP"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page001",
+      "gt_index": 52,
+      "gt_category": "bedroom",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "12SF"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page001",
+      "gt_index": 53,
+      "gt_category": "bedroom",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "147_SF"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page001",
+      "gt_index": 54,
+      "gt_category": "bedroom",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "147_SF"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page001",
+      "gt_index": 55,
+      "gt_category": "bedroom",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "121SF",
+        "BR19-0"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page001",
+      "gt_index": 75,
+      "gt_category": "living_room",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "$$",
+        "DA",
+        "2",
+        "YPE-B4",
+        "506 SF",
+        "506_SF",
+        "RADA"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page001",
+      "gt_index": 79,
+      "gt_category": "corridor",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "EGRE"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page001",
+      "gt_index": 84,
+      "gt_category": "bedroom",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "39-0",
+        "100 SF",
+        "3R"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page001",
+      "gt_index": 85,
+      "gt_category": "bedroom",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "103SF",
+        "BR_2",
+        "390"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page001",
+      "gt_index": 90,
+      "gt_category": "living_room",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "R/DA/SA",
+        "101",
+        "TYP",
+        "TYPE-A",
+        "ESS",
+        "HOMELESS UNIT",
+        "R/DA/S",
+        "505",
+        "OR",
+        "390",
+        "60"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page001",
+      "gt_index": 91,
+      "gt_category": "bedroom",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "17190"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page001",
+      "gt_index": 107,
+      "gt_category": "living_room",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "LR/DA/SA",
+        "304SF",
+        "(SUPPORTIVE",
+        "TYPEA10",
+        "HOMELESS UNI",
+        "74.SF"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page001",
+      "gt_index": 0,
+      "gt_category": "toilet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page001",
+      "gt_index": 1,
+      "gt_category": "toilet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page001",
+      "gt_index": 3,
+      "gt_category": "toilet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page001",
+      "gt_index": 4,
+      "gt_category": "toilet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page001",
+      "gt_index": 5,
+      "gt_category": "toilet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page001",
+      "gt_index": 6,
+      "gt_category": "toilet",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "BT-04"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page001",
+      "gt_index": 7,
+      "gt_category": "toilet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page001",
+      "gt_index": 8,
+      "gt_category": "toilet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page001",
+      "gt_index": 10,
+      "gt_category": "toilet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page001",
+      "gt_index": 12,
+      "gt_category": "toilet",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "04"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page001",
+      "gt_index": 14,
+      "gt_category": "toilet",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "LT=04"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page001",
+      "gt_index": 15,
+      "gt_category": "toilet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page001",
+      "gt_index": 16,
+      "gt_category": "toilet",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "3",
+        "-8",
+        "04"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page001",
+      "gt_index": 17,
+      "gt_category": "toilet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page001",
+      "gt_index": 18,
+      "gt_category": "toilet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page001",
+      "gt_index": 19,
+      "gt_category": "toilet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page001",
+      "gt_index": 20,
+      "gt_category": "toilet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page001",
+      "gt_index": 22,
+      "gt_category": "stairwell",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page001",
+      "gt_index": 23,
+      "gt_category": "stairwell",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "F.M"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page001",
+      "gt_index": 24,
+      "gt_category": "toilet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page001",
+      "gt_index": 29,
+      "gt_category": "toilet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page001",
+      "gt_index": 30,
+      "gt_category": "stairwell",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page001",
+      "gt_index": 33,
+      "gt_category": "stairwell",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "EM"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page001",
+      "gt_index": 35,
+      "gt_category": "corridor",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "EGRESS CORRIDOR",
+        "M7"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page001",
+      "gt_index": 37,
+      "gt_category": "closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page001",
+      "gt_index": 38,
+      "gt_category": "closet",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "CL."
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page001",
+      "gt_index": 40,
+      "gt_category": "kitchen",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "T-06"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page001",
+      "gt_index": 42,
+      "gt_category": "others",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page001",
+      "gt_index": 45,
+      "gt_category": "janitor_closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page001",
+      "gt_index": 46,
+      "gt_category": "janitor_closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page001",
+      "gt_index": 47,
+      "gt_category": "vestibule",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page001",
+      "gt_index": 48,
+      "gt_category": "toilet",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "AC"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page001",
+      "gt_index": 49,
+      "gt_category": "janitor_closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page001",
+      "gt_index": 50,
+      "gt_category": "janitor_closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page001",
+      "gt_index": 51,
+      "gt_category": "office",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "MAN",
+        "DIM",
+        "06",
+        "5/06"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page001",
+      "gt_index": 56,
+      "gt_category": "janitor_closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page001",
+      "gt_index": 57,
+      "gt_category": "janitor_closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page001",
+      "gt_index": 64,
+      "gt_category": "closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page001",
+      "gt_index": 65,
+      "gt_category": "closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page001",
+      "gt_index": 67,
+      "gt_category": "janitor_closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page001",
+      "gt_index": 70,
+      "gt_category": "janitor_closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page001",
+      "gt_index": 71,
+      "gt_category": "janitor_closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page001",
+      "gt_index": 72,
+      "gt_category": "janitor_closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page001",
+      "gt_index": 73,
+      "gt_category": "janitor_closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page001",
+      "gt_index": 74,
+      "gt_category": "janitor_closet",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "JANITORE"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page001",
+      "gt_index": 77,
+      "gt_category": "janitor_closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page001",
+      "gt_index": 78,
+      "gt_category": "janitor_closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page001",
+      "gt_index": 81,
+      "gt_category": "janitor_closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page001",
+      "gt_index": 82,
+      "gt_category": "janitor_closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page001",
+      "gt_index": 83,
+      "gt_category": "janitor_closet",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "CL"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page001",
+      "gt_index": 86,
+      "gt_category": "janitor_closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page001",
+      "gt_index": 88,
+      "gt_category": "janitor_closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page001",
+      "gt_index": 89,
+      "gt_category": "janitor_closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page001",
+      "gt_index": 93,
+      "gt_category": "janitor_closet",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "LN."
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page001",
+      "gt_index": 96,
+      "gt_category": "janitor_closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page001",
+      "gt_index": 97,
+      "gt_category": "janitor_closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page001",
+      "gt_index": 99,
+      "gt_category": "janitor_closet",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "LA."
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page001",
+      "gt_index": 100,
+      "gt_category": "janitor_closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page001",
+      "gt_index": 101,
+      "gt_category": "janitor_closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page001",
+      "gt_index": 102,
+      "gt_category": "janitor_closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page001",
+      "gt_index": 103,
+      "gt_category": "janitor_closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page001",
+      "gt_index": 104,
+      "gt_category": "janitor_closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page001",
+      "gt_index": 105,
+      "gt_category": "janitor_closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page001",
+      "gt_index": 108,
+      "gt_category": "janitor_closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page001",
+      "gt_index": 110,
+      "gt_category": "janitor_closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page001",
+      "gt_index": 112,
+      "gt_category": "janitor_closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page001",
+      "gt_index": 114,
+      "gt_category": "janitor_closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page001",
+      "gt_index": 116,
+      "gt_category": "janitor_closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page001",
+      "gt_index": 118,
+      "gt_category": "janitor_closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page001",
+      "gt_index": 121,
+      "gt_category": "janitor_closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page001",
+      "gt_index": 123,
+      "gt_category": "kitchen",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page001",
+      "gt_index": 124,
+      "gt_category": "kitchen",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "Q6,"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page001",
+      "gt_index": 125,
+      "gt_category": "kitchen",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page001",
+      "gt_index": 126,
+      "gt_category": "kitchen",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "06"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page001",
+      "gt_index": 127,
+      "gt_category": "kitchen",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page001",
+      "gt_index": 128,
+      "gt_category": "kitchen",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "06"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page001",
+      "gt_index": 129,
+      "gt_category": "kitchen",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page001",
+      "gt_index": 131,
+      "gt_category": "kitchen",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page001",
+      "gt_index": 132,
+      "gt_category": "kitchen",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page001",
+      "gt_index": 133,
+      "gt_category": "kitchen",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "06"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page001",
+      "gt_index": 134,
+      "gt_category": "kitchen",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "06"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page001",
+      "gt_index": 135,
+      "gt_category": "kitchen",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page001",
+      "gt_index": 136,
+      "gt_category": "kitchen",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page001",
+      "gt_index": 137,
+      "gt_category": "kitchen",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page001",
+      "gt_index": 138,
+      "gt_category": "kitchen",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 1,
+      "gt_category": "toilet",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "B"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 2,
+      "gt_category": "toilet",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "$"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 10,
+      "gt_category": "toilet",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "BT"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 11,
+      "gt_category": "toilet",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "B"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 28,
+      "gt_category": "toilet",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "8"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 32,
+      "gt_category": "toilet",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "."
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 108,
+      "gt_category": "stairwell",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "STAIR E",
+        "JP"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 113,
+      "gt_category": "bedroom",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "101SF",
+        "BRI"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 117,
+      "gt_category": "bedroom",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "BR.",
+        "31"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 121,
+      "gt_category": "bedroom",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "BR.",
+        "131SF"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 123,
+      "gt_category": "bedroom",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "129SF",
+        "BR."
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 135,
+      "gt_category": "living_room",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "LR/DA",
+        "$4",
+        "180.SF"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 138,
+      "gt_category": "bedroom",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "152SF",
+        "BR_2"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 140,
+      "gt_category": "bedroom",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "BRS"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 170,
+      "gt_category": "living_room",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "LR/DA",
+        "183SF",
+        "504SF",
+        "13R",
+        "YPE-B1.1",
+        "HOMELES"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 0,
+      "gt_category": "toilet",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "LT-04",
+        "8"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 3,
+      "gt_category": "toilet",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "04"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 4,
+      "gt_category": "toilet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 5,
+      "gt_category": "toilet",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "T04"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 6,
+      "gt_category": "toilet",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "7'-8"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 7,
+      "gt_category": "toilet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 8,
+      "gt_category": "toilet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 9,
+      "gt_category": "toilet",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "04"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 12,
+      "gt_category": "toilet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 13,
+      "gt_category": "toilet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 14,
+      "gt_category": "toilet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 15,
+      "gt_category": "toilet",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "S"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 16,
+      "gt_category": "toilet",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "7'-8"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 17,
+      "gt_category": "toilet",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "7'8"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 18,
+      "gt_category": "toilet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 19,
+      "gt_category": "toilet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 20,
+      "gt_category": "toilet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 21,
+      "gt_category": "toilet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 22,
+      "gt_category": "toilet",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "04",
+        "7-8"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 23,
+      "gt_category": "toilet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 24,
+      "gt_category": "toilet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 25,
+      "gt_category": "toilet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 26,
+      "gt_category": "toilet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 27,
+      "gt_category": "toilet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 29,
+      "gt_category": "toilet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 30,
+      "gt_category": "toilet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 31,
+      "gt_category": "toilet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 33,
+      "gt_category": "toilet",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "B4"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 34,
+      "gt_category": "toilet",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "04"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 35,
+      "gt_category": "kitchen",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 36,
+      "gt_category": "kitchen",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 37,
+      "gt_category": "kitchen",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 38,
+      "gt_category": "kitchen",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 39,
+      "gt_category": "kitchen",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "06"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 40,
+      "gt_category": "kitchen",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 41,
+      "gt_category": "kitchen",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "F06"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 42,
+      "gt_category": "kitchen",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 43,
+      "gt_category": "kitchen",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 44,
+      "gt_category": "kitchen",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 45,
+      "gt_category": "kitchen",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 46,
+      "gt_category": "kitchen",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 47,
+      "gt_category": "kitchen",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 48,
+      "gt_category": "kitchen",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 49,
+      "gt_category": "kitchen",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 50,
+      "gt_category": "kitchen",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "90f"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 51,
+      "gt_category": "kitchen",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 52,
+      "gt_category": "kitchen",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "LT-"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 53,
+      "gt_category": "kitchen",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 54,
+      "gt_category": "kitchen",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 55,
+      "gt_category": "kitchen",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "06"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 56,
+      "gt_category": "kitchen",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 57,
+      "gt_category": "kitchen",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 58,
+      "gt_category": "kitchen",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 59,
+      "gt_category": "kitchen",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 60,
+      "gt_category": "kitchen",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 61,
+      "gt_category": "kitchen",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 62,
+      "gt_category": "kitchen",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 63,
+      "gt_category": "kitchen",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 64,
+      "gt_category": "kitchen",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "06"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 65,
+      "gt_category": "kitchen",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 66,
+      "gt_category": "kitchen",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 67,
+      "gt_category": "kitchen",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "06"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 68,
+      "gt_category": "kitchen",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 69,
+      "gt_category": "kitchen",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 70,
+      "gt_category": "others",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 71,
+      "gt_category": "kitchen",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 72,
+      "gt_category": "janitor_closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 73,
+      "gt_category": "janitor_closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 74,
+      "gt_category": "janitor_closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 75,
+      "gt_category": "janitor_closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 76,
+      "gt_category": "janitor_closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 77,
+      "gt_category": "janitor_closet",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "eTS"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 78,
+      "gt_category": "janitor_closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 79,
+      "gt_category": "janitor_closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 80,
+      "gt_category": "toilet",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "PJANITOR"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 81,
+      "gt_category": "janitor_closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 82,
+      "gt_category": "janitor_closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 83,
+      "gt_category": "janitor_closet",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "CA."
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 84,
+      "gt_category": "janitor_closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 85,
+      "gt_category": "janitor_closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 86,
+      "gt_category": "janitor_closet",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "CL"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 87,
+      "gt_category": "janitor_closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 88,
+      "gt_category": "janitor_closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 89,
+      "gt_category": "janitor_closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 90,
+      "gt_category": "janitor_closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 91,
+      "gt_category": "janitor_closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 92,
+      "gt_category": "janitor_closet",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "CL"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 93,
+      "gt_category": "janitor_closet",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "CL."
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 94,
+      "gt_category": "janitor_closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 95,
+      "gt_category": "janitor_closet",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "CLI"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 96,
+      "gt_category": "janitor_closet",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "CLj"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 97,
+      "gt_category": "janitor_closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 98,
+      "gt_category": "janitor_closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 99,
+      "gt_category": "janitor_closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 100,
+      "gt_category": "janitor_closet",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "CL."
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 101,
+      "gt_category": "janitor_closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 102,
+      "gt_category": "janitor_closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 103,
+      "gt_category": "janitor_closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 105,
+      "gt_category": "janitor_closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 106,
+      "gt_category": "janitor_closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 107,
+      "gt_category": "stairwell",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "STAIR"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 109,
+      "gt_category": "electrical_room",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "LEC.RM"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 124,
+      "gt_category": "janitor_closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 126,
+      "gt_category": "janitor_closet",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "CL"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 132,
+      "gt_category": "janitor_closet",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "OL"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 136,
+      "gt_category": "bedroom",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "BR",
+        "127 SF"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 141,
+      "gt_category": "janitor_closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 142,
+      "gt_category": "janitor_closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 143,
+      "gt_category": "janitor_closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 144,
+      "gt_category": "janitor_closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 145,
+      "gt_category": "janitor_closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 146,
+      "gt_category": "janitor_closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 148,
+      "gt_category": "janitor_closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 160,
+      "gt_category": "janitor_closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 163,
+      "gt_category": "toilet",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "B"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 164,
+      "gt_category": "janitor_closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 179,
+      "gt_category": "electrical_room",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "LECTRICAL"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page002",
+      "gt_index": 182,
+      "gt_category": "janitor_closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page003",
+      "gt_index": 9,
+      "gt_category": "toilet",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "-B"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page003",
+      "gt_index": 32,
+      "gt_category": "janitor_closet",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "CL."
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page003",
+      "gt_index": 38,
+      "gt_category": "corridor",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "EX",
+        "EX"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page003",
+      "gt_index": 45,
+      "gt_category": "bedroom",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "380",
+        "36.SF",
+        "BRLA"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page003",
+      "gt_index": 51,
+      "gt_category": "bedroom",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "116SF",
+        "BR_2"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page003",
+      "gt_index": 52,
+      "gt_category": "bedroom",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "103.S",
+        "BR_1"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page003",
+      "gt_index": 64,
+      "gt_category": "bedroom",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "156SF",
+        "BR_2"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page003",
+      "gt_index": 0,
+      "gt_category": "toilet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page003",
+      "gt_index": 1,
+      "gt_category": "kitchen",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page003",
+      "gt_index": 2,
+      "gt_category": "janitor_closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page003",
+      "gt_index": 3,
+      "gt_category": "kitchen",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page003",
+      "gt_index": 4,
+      "gt_category": "kitchen",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "06"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page003",
+      "gt_index": 5,
+      "gt_category": "kitchen",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page003",
+      "gt_index": 6,
+      "gt_category": "toilet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page003",
+      "gt_index": 7,
+      "gt_category": "toilet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page003",
+      "gt_index": 8,
+      "gt_category": "toilet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page003",
+      "gt_index": 10,
+      "gt_category": "toilet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page003",
+      "gt_index": 11,
+      "gt_category": "toilet",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "S"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page003",
+      "gt_index": 12,
+      "gt_category": "toilet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page003",
+      "gt_index": 13,
+      "gt_category": "toilet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page003",
+      "gt_index": 14,
+      "gt_category": "toilet",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "0"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page003",
+      "gt_index": 15,
+      "gt_category": "toilet",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "7'-8",
+        "S",
+        "T-05"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page003",
+      "gt_index": 16,
+      "gt_category": "toilet",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "T-04",
+        "S"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page003",
+      "gt_index": 19,
+      "gt_category": "kitchen",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page003",
+      "gt_index": 20,
+      "gt_category": "kitchen",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page003",
+      "gt_index": 21,
+      "gt_category": "kitchen",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page003",
+      "gt_index": 23,
+      "gt_category": "janitor_closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page003",
+      "gt_index": 24,
+      "gt_category": "kitchen",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "06"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page003",
+      "gt_index": 25,
+      "gt_category": "stairwell",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "STAIRE",
+        "DN"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page003",
+      "gt_index": 26,
+      "gt_category": "janitor_closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page003",
+      "gt_index": 27,
+      "gt_category": "janitor_closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page003",
+      "gt_index": 29,
+      "gt_category": "janitor_closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page003",
+      "gt_index": 30,
+      "gt_category": "janitor_closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page003",
+      "gt_index": 31,
+      "gt_category": "janitor_closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page003",
+      "gt_index": 33,
+      "gt_category": "janitor_closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page003",
+      "gt_index": 34,
+      "gt_category": "janitor_closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page003",
+      "gt_index": 35,
+      "gt_category": "janitor_closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page003",
+      "gt_index": 36,
+      "gt_category": "janitor_closet",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "CE"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page003",
+      "gt_index": 37,
+      "gt_category": "janitor_closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page003",
+      "gt_index": 41,
+      "gt_category": "janitor_closet",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "CL."
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page003",
+      "gt_index": 47,
+      "gt_category": "janitor_closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page003",
+      "gt_index": 50,
+      "gt_category": "janitor_closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page003",
+      "gt_index": 66,
+      "gt_category": "stairwell",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "STAER"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page003",
+      "gt_index": 69,
+      "gt_category": "others",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "REFU",
+        "ROO"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page003",
+      "gt_index": 70,
+      "gt_category": "janitor_closet",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "NITOR"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page004",
+      "gt_index": 25,
+      "gt_category": "bedroom",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "132SF",
+        "BR."
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page004",
+      "gt_index": 45,
+      "gt_category": "living_room",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "R/DA",
+        "1715F"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page004",
+      "gt_index": 51,
+      "gt_category": "bedroom",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "107.S",
+        "BRI"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page004",
+      "gt_index": 52,
+      "gt_category": "bedroom",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "19SF",
+        "19 SF",
+        "BRE",
+        "BRI"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page004",
+      "gt_index": 57,
+      "gt_category": "living_room",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "LR/DA",
+        "172S",
+        "IMELESS",
+        "YPE-C4"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page004",
+      "gt_index": 0,
+      "gt_category": "toilet",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "8-"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page004",
+      "gt_index": 1,
+      "gt_category": "toilet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page004",
+      "gt_index": 2,
+      "gt_category": "toilet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page004",
+      "gt_index": 4,
+      "gt_category": "toilet",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "T-04"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page004",
+      "gt_index": 6,
+      "gt_category": "kitchen",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page004",
+      "gt_index": 7,
+      "gt_category": "kitchen",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "06"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page004",
+      "gt_index": 9,
+      "gt_category": "kitchen",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page004",
+      "gt_index": 10,
+      "gt_category": "toilet",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "LT04"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page004",
+      "gt_index": 12,
+      "gt_category": "toilet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page004",
+      "gt_index": 13,
+      "gt_category": "toilet",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "B",
+        "7-8"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page004",
+      "gt_index": 14,
+      "gt_category": "kitchen",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "6"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page004",
+      "gt_index": 15,
+      "gt_category": "kitchen",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page004",
+      "gt_index": 16,
+      "gt_category": "toilet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page004",
+      "gt_index": 17,
+      "gt_category": "toilet",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "7'-8"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page004",
+      "gt_index": 18,
+      "gt_category": "kitchen",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "KTH"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page004",
+      "gt_index": 19,
+      "gt_category": "kitchen",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page004",
+      "gt_index": 20,
+      "gt_category": "kitchen",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page004",
+      "gt_index": 21,
+      "gt_category": "janitor_closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page004",
+      "gt_index": 34,
+      "gt_category": "janitor_closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page004",
+      "gt_index": 36,
+      "gt_category": "janitor_closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page004",
+      "gt_index": 37,
+      "gt_category": "janitor_closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page004",
+      "gt_index": 38,
+      "gt_category": "janitor_closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page004",
+      "gt_index": 39,
+      "gt_category": "janitor_closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page004",
+      "gt_index": 41,
+      "gt_category": "janitor_closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page004",
+      "gt_index": 42,
+      "gt_category": "janitor_closet",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "CL"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page004",
+      "gt_index": 43,
+      "gt_category": "janitor_closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page004",
+      "gt_index": 44,
+      "gt_category": "janitor_closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page004",
+      "gt_index": 58,
+      "gt_category": "janitor_closet",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "OLI"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page004",
+      "gt_index": 59,
+      "gt_category": "janitor_closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page004",
+      "gt_index": 60,
+      "gt_category": "others",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "AC"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page004",
+      "gt_index": 61,
+      "gt_category": "janitor_closet",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "ANITOR"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page005",
+      "gt_index": 13,
+      "gt_category": "bedroom",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "BR.",
+        "132SF"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page005",
+      "gt_index": 29,
+      "gt_category": "toilet",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "T04"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page005",
+      "gt_index": 35,
+      "gt_category": "bedroom",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "136SF",
+        "BRI"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page005",
+      "gt_index": 1,
+      "gt_category": "closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page005",
+      "gt_index": 2,
+      "gt_category": "closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page005",
+      "gt_index": 3,
+      "gt_category": "closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page005",
+      "gt_index": 4,
+      "gt_category": "closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page005",
+      "gt_index": 5,
+      "gt_category": "closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page005",
+      "gt_index": 6,
+      "gt_category": "closet",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "CL."
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page005",
+      "gt_index": 7,
+      "gt_category": "closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page005",
+      "gt_index": 16,
+      "gt_category": "kitchen",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "06"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page005",
+      "gt_index": 17,
+      "gt_category": "kitchen",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page005",
+      "gt_index": 18,
+      "gt_category": "kitchen",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page005",
+      "gt_index": 19,
+      "gt_category": "kitchen",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "06"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page005",
+      "gt_index": 20,
+      "gt_category": "closet",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "T",
+        "CL"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page005",
+      "gt_index": 21,
+      "gt_category": "toilet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page005",
+      "gt_index": 22,
+      "gt_category": "toilet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page005",
+      "gt_index": 23,
+      "gt_category": "toilet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page005",
+      "gt_index": 24,
+      "gt_category": "janitor_closet",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "NITOR"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page005",
+      "gt_index": 25,
+      "gt_category": "closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page005",
+      "gt_index": 26,
+      "gt_category": "closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page005",
+      "gt_index": 27,
+      "gt_category": "toilet",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "S"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page005",
+      "gt_index": 28,
+      "gt_category": "kitchen",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page005",
+      "gt_index": 36,
+      "gt_category": "kitchen",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page005",
+      "gt_index": 37,
+      "gt_category": "closet",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "CLI"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page005",
+      "gt_index": 38,
+      "gt_category": "closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page005",
+      "gt_index": 39,
+      "gt_category": "closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page005",
+      "gt_index": 40,
+      "gt_category": "closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page005",
+      "gt_index": 41,
+      "gt_category": "toilet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page005",
+      "gt_index": 42,
+      "gt_category": "closet",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "CL."
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page005",
+      "gt_index": 43,
+      "gt_category": "closet",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "CL"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page005",
+      "gt_index": 44,
+      "gt_category": "toilet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page005",
+      "gt_index": 45,
+      "gt_category": "toilet",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "04"
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page005",
+      "gt_index": 46,
+      "gt_category": "kitchen",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page005",
+      "gt_index": 47,
+      "gt_category": "closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page005",
+      "gt_index": 48,
+      "gt_category": "closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page005",
+      "gt_index": 49,
+      "gt_category": "kitchen",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page005",
+      "gt_index": 54,
+      "gt_category": "mechanical_room",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "AC",
+        "F.F U"
+      ]
+    },
+    {
+      "page": "540 Madison Avenue Divcowest Suite 29A - AVI-ON LAYOUT_page000",
+      "gt_index": 2,
+      "gt_category": "conference",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "CON",
+        "HV-A#1"
+      ]
+    },
+    {
+      "page": "540 Madison Avenue Divcowest Suite 29A - AVI-ON LAYOUT_page000",
+      "gt_index": 3,
+      "gt_category": "conference",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "CON",
+        "Ca",
+        "HV-29A#1",
+        "HV-29A#1",
+        "HV-29A#1",
+        "HV-29A#1",
+        "HV-29A#1",
+        "HV-29A",
+        "HV-29A#1",
+        "H",
+        "HV-29A",
+        "H",
+        "HV-29A#1",
+        "-HV-2",
+        "DP"
+      ]
+    },
+    {
+      "page": "BP-1 Kennedy Middle School  - AVI-ON LAYOUT FLAT_page002",
+      "gt_index": 0,
+      "gt_category": "classroom",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "C153",
+        "LASSROOM- 129"
+      ]
+    },
+    {
+      "page": "BP-1 Kennedy Middle School  - AVI-ON LAYOUT FLAT_page002",
+      "gt_index": 1,
+      "gt_category": "storage_room",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "S"
+      ]
+    },
+    {
+      "page": "BP-1 Kennedy Middle School  - AVI-ON LAYOUT FLAT_page002",
+      "gt_index": 7,
+      "gt_category": "counc_office",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "C108",
+        "COUNC OFF",
+        "OE1M",
+        "2"
+      ]
+    },
+    {
+      "page": "BP-1 Kennedy Middle School  - AVI-ON LAYOUT FLAT_page002",
+      "gt_index": 15,
+      "gt_category": "file_rm",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "FILE RM",
+        "C110",
+        "STF"
+      ]
+    },
+    {
+      "page": "BP-1 Kennedy Middle School  - AVI-ON LAYOUT FLAT_page002",
+      "gt_index": 16,
+      "gt_category": "mail_idf",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "C111",
+        "MAIL/IDF",
+        "STF"
+      ]
+    },
+    {
+      "page": "BP-1 Kennedy Middle School  - AVI-ON LAYOUT FLAT_page002",
+      "gt_index": 21,
+      "gt_category": "janitor_closet",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "C115",
+        "JANITORS CLOSET"
+      ]
+    },
+    {
+      "page": "BP-1 Kennedy Middle School  - AVI-ON LAYOUT FLAT_page002",
+      "gt_index": 28,
+      "gt_category": "special_education",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "128",
+        "C150",
+        "EDUCATION",
+        "CIM",
+        "SPECIAL"
+      ]
+    },
+    {
+      "page": "BP-1 Kennedy Middle School  - AVI-ON LAYOUT FLAT_page002",
+      "gt_index": 35,
+      "gt_category": "clinic",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "CLINIC",
+        "C104",
+        "OE1M",
+        "CININC"
+      ]
+    },
+    {
+      "page": "BP-1 Kennedy Middle School  - AVI-ON LAYOUT FLAT_page002",
+      "gt_index": 40,
+      "gt_category": "others",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "COF"
+      ]
+    },
+    {
+      "page": "BP-1 Kennedy Middle School  - AVI-ON LAYOUT FLAT_page002",
+      "gt_index": 24,
+      "gt_category": "lounge",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "LBM"
+      ]
+    },
+    {
+      "page": "BP-1 Kennedy Middle School  - AVI-ON LAYOUT FLAT_page002",
+      "gt_index": 32,
+      "gt_category": "others",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "BP-1 Kennedy Middle School  - AVI-ON LAYOUT FLAT_page003",
+      "gt_index": 14,
+      "gt_category": "janitor_closet",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "C115",
+        "JANITORS CLOSET"
+      ]
+    },
+    {
+      "page": "BP-1 Kennedy Middle School  - AVI-ON LAYOUT FLAT_page003",
+      "gt_index": 15,
+      "gt_category": "mail_idf",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "C111",
+        "C11",
+        "STF",
+        "MAIL/IDF",
+        "MAILIDE"
+      ]
+    },
+    {
+      "page": "BP-1 Kennedy Middle School  - AVI-ON LAYOUT FLAT_page003",
+      "gt_index": 20,
+      "gt_category": "main_office",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "D103",
+        "MAIN OFFICE",
+        "OE1M",
+        "MAIN OFFICEE"
+      ]
+    },
+    {
+      "page": "BP-1 Kennedy Middle School  - AVI-ON LAYOUT FLAT_page004",
+      "gt_index": 8,
+      "gt_category": "storage_room",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "E103",
+        "KITCHEN STORAGE"
+      ]
+    },
+    {
+      "page": "BP-1 Kennedy Middle School  - AVI-ON LAYOUT FLAT_page004",
+      "gt_index": 15,
+      "gt_category": "practice",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "E121",
+        "PRACTICE",
+        "CIM",
+        "RACTIC"
+      ]
+    },
+    {
+      "page": "BP-1 Kennedy Middle School  - AVI-ON LAYOUT FLAT_page004",
+      "gt_index": 18,
+      "gt_category": "band",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "E120",
+        "CIM",
+        "TYP.",
+        "BAND-131"
+      ]
+    },
+    {
+      "page": "BP-1 Kennedy Middle School  - AVI-ON LAYOUT FLAT_page005",
+      "gt_index": 6,
+      "gt_category": "stairwell",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "BP-1 Kennedy Middle School  - AVI-ON LAYOUT FLAT_page005",
+      "gt_index": 7,
+      "gt_category": "stairwell",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "BP-1 Kennedy Middle School  - AVI-ON LAYOUT FLAT_page006",
+      "gt_index": 6,
+      "gt_category": "storage_room",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "H107",
+        "OUTDOOR STORAGE"
+      ]
+    },
+    {
+      "page": "BP-1 Kennedy Middle School  - AVI-ON LAYOUT FLAT_page006",
+      "gt_index": 12,
+      "gt_category": "electrical_room",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "H112",
+        "ELEC"
+      ]
+    },
+    {
+      "page": "BP-1 Kennedy Middle School Electrical Pages_page000",
+      "gt_index": 3,
+      "gt_category": "classroom",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "A103",
+        "CLASSRODM - 117",
+        "QD3"
+      ]
+    },
+    {
+      "page": "BP-1 Kennedy Middle School Electrical Pages_page002",
+      "gt_index": 12,
+      "gt_category": "counc_office",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "C108",
+        "COUNC OFF",
+        "OE1M"
+      ]
+    },
+    {
+      "page": "BP-1 Kennedy Middle School Electrical Pages_page002",
+      "gt_index": 13,
+      "gt_category": "counc_office",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "C107",
+        "COUNC OFF",
+        "OE1M"
+      ]
+    },
+    {
+      "page": "BP-1 Kennedy Middle School Electrical Pages_page002",
+      "gt_index": 19,
+      "gt_category": "janitor_closet",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "C115",
+        "JANITORS CLOSET"
+      ]
+    },
+    {
+      "page": "BP-1 Kennedy Middle School Electrical Pages_page002",
+      "gt_index": 24,
+      "gt_category": "storage_room",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "BP-1 Kennedy Middle School Electrical Pages_page003",
+      "gt_index": 7,
+      "gt_category": "main_office",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "D103",
+        "MAIN OFFICE",
+        "OE1M"
+      ]
+    },
+    {
+      "page": "BP-1 Kennedy Middle School Electrical Pages_page003",
+      "gt_index": 16,
+      "gt_category": "janitor_closet",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "C115",
+        "JANITORS CLOSET"
+      ]
+    },
+    {
+      "page": "BP-1 Kennedy Middle School Electrical Pages_page003",
+      "gt_index": 17,
+      "gt_category": "mail_idf",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "C111",
+        "MAIL/IDF",
+        "STF"
+      ]
+    },
+    {
+      "page": "BP-1 Kennedy Middle School Electrical Pages_page003",
+      "gt_index": 20,
+      "gt_category": "toilet",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "C112",
+        "IOILEI"
+      ]
+    },
+    {
+      "page": "BP-1 Kennedy Middle School Electrical Pages_page003",
+      "gt_index": 25,
+      "gt_category": "file_rm",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "C110",
+        "FILE RM",
+        "STF"
+      ]
+    },
+    {
+      "page": "BP-1 Kennedy Middle School Electrical Pages_page004",
+      "gt_index": 10,
+      "gt_category": "practice",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "E123",
+        "PRACTICE",
+        "CIM"
+      ]
+    },
+    {
+      "page": "BP-1 Kennedy Middle School Electrical Pages_page004",
+      "gt_index": 14,
+      "gt_category": "practice",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "E121",
+        "PRACTICE",
+        "CIM"
+      ]
+    },
+    {
+      "page": "BP-1 Kennedy Middle School Electrical Pages_page005",
+      "gt_index": 9,
+      "gt_category": "stairwell",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "BP-1 Kennedy Middle School Electrical Pages_page005",
+      "gt_index": 10,
+      "gt_category": "stairwell",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "BP-1 Kennedy Middle School Electrical Pages_page006",
+      "gt_index": 1,
+      "gt_category": "gym",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "G103",
+        "GYM"
+      ]
+    },
+    {
+      "page": "BP-1 Kennedy Middle School Electrical Pages_page006",
+      "gt_index": 13,
+      "gt_category": "electrical_room",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "H112",
+        "ELEC"
+      ]
+    },
+    {
+      "page": "BP-1 Lake Shore High School Electrical Pages_page000",
+      "gt_index": 4,
+      "gt_category": "classroom",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "A108",
+        "TYP.",
+        "CLASOM 141",
+        "CI",
+        "TYP.",
+        "2X"
+      ]
+    },
+    {
+      "page": "BP-1 Lake Shore High School Electrical Pages_page000",
+      "gt_index": 11,
+      "gt_category": "classroom",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "A114",
+        "TYP",
+        "CLASM138",
+        "CIM"
+      ]
+    },
+    {
+      "page": "BP-1 Lake Shore High School Electrical Pages_page000",
+      "gt_index": 1,
+      "gt_category": "stairwell",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "BP-1 Lake Shore High School Electrical Pages_page001",
+      "gt_index": 2,
+      "gt_category": "storage_room",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "TORAGE???",
+        "STF",
+        "B113",
+        "???STORAGE???"
+      ]
+    },
+    {
+      "page": "BP-1 Lake Shore High School Electrical Pages_page001",
+      "gt_index": 13,
+      "gt_category": "classroom",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "CLASSROQM A118D",
+        "B1j07",
+        "CIM"
+      ]
+    },
+    {
+      "page": "BP-1 Lake Shore High School Electrical Pages_page002",
+      "gt_index": 1,
+      "gt_category": "janitor_closet",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "C108",
+        "iiAANTTI ii"
+      ]
+    },
+    {
+      "page": "BP-1 Lake Shore High School Electrical Pages_page002",
+      "gt_index": 3,
+      "gt_category": "stairwell",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "C110"
+      ]
+    },
+    {
+      "page": "BP-1 Lake Shore High School Electrical Pages_page002",
+      "gt_index": 14,
+      "gt_category": "prep",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "PREP ROOM",
+        "C114"
+      ]
+    },
+    {
+      "page": "BP-1 Lake Shore High School Electrical Pages_page003",
+      "gt_index": 2,
+      "gt_category": "art_rooom",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "AR'TCLASSROOM",
+        "D408"
+      ]
+    },
+    {
+      "page": "BP-1 Lake Shore High School Electrical Pages_page003",
+      "gt_index": 11,
+      "gt_category": "electrical_room",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "D114",
+        "??? ELEC ???"
+      ]
+    },
+    {
+      "page": "BP-1 Lake Shore High School Electrical Pages_page003",
+      "gt_index": 14,
+      "gt_category": "others",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "OE1M"
+      ]
+    },
+    {
+      "page": "BP-1 Lake Shore High School Electrical Pages_page003",
+      "gt_index": 21,
+      "gt_category": "closet",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "D112A"
+      ]
+    },
+    {
+      "page": "BP-1 Lake Shore High School Electrical Pages_page003",
+      "gt_index": 22,
+      "gt_category": "closet",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "D112B"
+      ]
+    },
+    {
+      "page": "BP-1 Lake Shore High School Electrical Pages_page003",
+      "gt_index": 23,
+      "gt_category": "closet",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "D112C"
+      ]
+    },
+    {
+      "page": "BP-1 Lake Shore High School Electrical Pages_page003",
+      "gt_index": 13,
+      "gt_category": "others",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "AC",
+        "AVI-ON",
+        "SCENE",
+        "PIR/DH",
+        "XPP",
+        "010V",
+        "XPp",
+        "10V"
+      ]
+    },
+    {
+      "page": "BP-1 Lake Shore High School Electrical Pages_page003",
+      "gt_index": 15,
+      "gt_category": "others",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "XPP",
+        "010V",
+        "OE",
+        "XPP",
+        "010V"
+      ]
+    },
+    {
+      "page": "BP-1 Lake Shore High School Electrical Pages_page003",
+      "gt_index": 26,
+      "gt_category": "others",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "DC",
+        "XPP",
+        "010V",
+        "VI-ON",
+        "XPP",
+        "010V"
+      ]
+    },
+    {
+      "page": "BP-1 Lake Shore High School Electrical Pages_page003",
+      "gt_index": 30,
+      "gt_category": "others",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "BP-1 Lake Shore High School Electrical Pages_page004",
+      "gt_index": 0,
+      "gt_category": "lounge",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "TEACHERS LOUNGE",
+        "F135A"
+      ]
+    },
+    {
+      "page": "BP-1 Lake Shore High School Electrical Pages_page004",
+      "gt_index": 14,
+      "gt_category": "counc_office",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "F131",
+        "COUNC.OF",
+        "COUNC. OFFICE"
+      ]
+    },
+    {
+      "page": "BP-1 Lake Shore High School Electrical Pages_page004",
+      "gt_index": 15,
+      "gt_category": "mechanical_room",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "F136",
+        "MECH. / ROOF ACCESS",
+        "MECH. / ROOF ACCES!"
+      ]
+    },
+    {
+      "page": "BP-1 Lake Shore High School Electrical Pages_page004",
+      "gt_index": 16,
+      "gt_category": "principal",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "F109",
+        "PRINCIPAL'S OFFICE"
+      ]
+    },
+    {
+      "page": "BP-1 Lake Shore High School Electrical Pages_page004",
+      "gt_index": 17,
+      "gt_category": "main_office",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "F105",
+        "MAIN OFFICEE"
+      ]
+    },
+    {
+      "page": "BP-1 Lake Shore High School Electrical Pages_page004",
+      "gt_index": 22,
+      "gt_category": "lounge",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "F135B",
+        "TEACHERS LOUNGE"
+      ]
+    },
+    {
+      "page": "BP-1 Lake Shore High School Electrical Pages_page004",
+      "gt_index": 24,
+      "gt_category": "counc_office",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "F128",
+        "COUNC. OFFICE"
+      ]
+    },
+    {
+      "page": "BP-1 Lake Shore High School Electrical Pages_page004",
+      "gt_index": 25,
+      "gt_category": "counc_office",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "F130",
+        "COUNC. OFFICE",
+        "COUNC.OFFICE"
+      ]
+    },
+    {
+      "page": "BP-1 Lake Shore High School Electrical Pages_page004",
+      "gt_index": 26,
+      "gt_category": "food_services_office",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "F138",
+        "FOOD SERVICES OFFICE"
+      ]
+    },
+    {
+      "page": "BP-1 Lake Shore High School Electrical Pages_page004",
+      "gt_index": 27,
+      "gt_category": "food_services_office",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "F139",
+        "FOOD SERVICES OFFICE"
+      ]
+    },
+    {
+      "page": "BP-1 Lake Shore High School Electrical Pages_page004",
+      "gt_index": 33,
+      "gt_category": "counc_office",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "F126",
+        "COUNC. OFFICE"
+      ]
+    },
+    {
+      "page": "BP-1 Lake Shore High School Electrical Pages_page004",
+      "gt_index": 37,
+      "gt_category": "office",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "F113",
+        "SRO OFFICE"
+      ]
+    },
+    {
+      "page": "BP-1 Lake Shore High School Electrical Pages_page004",
+      "gt_index": 39,
+      "gt_category": "it",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "F118",
+        "IT"
+      ]
+    },
+    {
+      "page": "BP-1 Lake Shore High School Electrical Pages_page005",
+      "gt_index": 7,
+      "gt_category": "storage_room",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "H108A",
+        "FTF",
+        "S"
+      ]
+    },
+    {
+      "page": "BP-1 Lake Shore High School Electrical Pages_page005",
+      "gt_index": 8,
+      "gt_category": "mechanical_room",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "H107",
+        "A/",
+        "A/V ROOM",
+        "STF"
+      ]
+    },
+    {
+      "page": "BP-1 Lake Shore High School Electrical Pages_page005",
+      "gt_index": 9,
+      "gt_category": "others",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "H112",
+        "???"
+      ]
+    },
+    {
+      "page": "BP-1 Lake Shore High School Electrical Pages_page005",
+      "gt_index": 10,
+      "gt_category": "others",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "H113",
+        "???"
+      ]
+    },
+    {
+      "page": "BP-1 Lake Shore High School Electrical Pages_page006",
+      "gt_index": 11,
+      "gt_category": "classroom",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "A212",
+        "CIM",
+        "LASSROOM217"
+      ]
+    },
+    {
+      "page": "BP-1 Lake Shore High School Electrical Pages_page007",
+      "gt_index": 5,
+      "gt_category": "classroom",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "CLASS",
+        "C205",
+        "M-201",
+        "CIM"
+      ]
+    },
+    {
+      "page": "BP-1 Lake Shore High School Electrical Pages_page007",
+      "gt_index": 16,
+      "gt_category": "restroom",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "C213",
+        "ADA RESTROOM"
+      ]
+    },
+    {
+      "page": "BP-1 Masonic Heights Elementary - AVI-ON LAYOUT FLAT_page000",
+      "gt_index": 13,
+      "gt_category": "closet",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "L3"
+      ]
+    },
+    {
+      "page": "BP-1 Masonic Heights Elementary - AVI-ON LAYOUT FLAT_page000",
+      "gt_index": 11,
+      "gt_category": "vestibule",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "BP-1 Masonic Heights Elementary - AVI-ON LAYOUT FLAT_page001",
+      "gt_index": 2,
+      "gt_category": "classroom",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "LASSROOM1"
+      ]
+    },
+    {
+      "page": "BP-1 Masonic Heights Elementary - AVI-ON LAYOUT FLAT_page001",
+      "gt_index": 21,
+      "gt_category": "others",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "AHU",
+        "B111",
+        "B11"
+      ]
+    },
+    {
+      "page": "BP-1 Masonic Heights Elementary - AVI-ON LAYOUT FLAT_page002",
+      "gt_index": 33,
+      "gt_category": "closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "BP-1 Masonic Heights Elementary - AVI-ON LAYOUT FLAT_page002",
+      "gt_index": 34,
+      "gt_category": "toilet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "BP-1 Masonic Heights Elementary - AVI-ON LAYOUT FLAT_page002",
+      "gt_index": 36,
+      "gt_category": "closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "BP-1 Masonic Heights Elementary - AVI-ON LAYOUT FLAT_page002",
+      "gt_index": 37,
+      "gt_category": "closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "BP-1 Masonic Heights Elementary - AVI-ON LAYOUT FLAT_page002",
+      "gt_index": 40,
+      "gt_category": "closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "BP-1 Masonic Heights Elementary - AVI-ON LAYOUT FLAT_page003",
+      "gt_index": 9,
+      "gt_category": "toilet",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "3",
+        "2",
+        "L3"
+      ]
+    },
+    {
+      "page": "BP-1 Masonic Heights Elementary - AVI-ON LAYOUT FLAT_page003",
+      "gt_index": 13,
+      "gt_category": "toilet",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "3"
+      ]
+    },
+    {
+      "page": "BP-1 Masonic Heights Elementary School Electrical Pages_page000",
+      "gt_index": 9,
+      "gt_category": "storage_room",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "A120",
+        "FILE STORAGE",
+        "STF"
+      ]
+    },
+    {
+      "page": "BP-1 Masonic Heights Elementary School Electrical Pages_page000",
+      "gt_index": 14,
+      "gt_category": "main_office",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "A123",
+        "MAIN OFFICE",
+        "L3",
+        "L3",
+        "L3",
+        "L3",
+        "L3",
+        "TYP.",
+        "CMM",
+        "L3",
+        ".",
+        "L3"
+      ]
+    },
+    {
+      "page": "BP-1 Masonic Heights Elementary School Electrical Pages_page000",
+      "gt_index": 18,
+      "gt_category": "vestibule",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "BP-1 Masonic Heights Elementary School Electrical Pages_page001",
+      "gt_index": 1,
+      "gt_category": "classroom",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "B105",
+        "CIM",
+        "CLASSROOM.4"
+      ]
+    },
+    {
+      "page": "BP-1 Masonic Heights Elementary School Electrical Pages_page001",
+      "gt_index": 18,
+      "gt_category": "others",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "B111",
+        "AHU"
+      ]
+    },
+    {
+      "page": "BP-1 Masonic Heights Elementary School Electrical Pages_page002",
+      "gt_index": 31,
+      "gt_category": "toilet",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "_3"
+      ]
+    },
+    {
+      "page": "BP-1 Masonic Heights Elementary School Electrical Pages_page002",
+      "gt_index": 4,
+      "gt_category": "toilet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "BP-1 Masonic Heights Elementary School Electrical Pages_page002",
+      "gt_index": 6,
+      "gt_category": "closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "BP-1 Masonic Heights Elementary School Electrical Pages_page002",
+      "gt_index": 7,
+      "gt_category": "closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "BP-1 Masonic Heights Elementary School Electrical Pages_page002",
+      "gt_index": 32,
+      "gt_category": "closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "BP-1 Masonic Heights Elementary School Electrical Pages_page002",
+      "gt_index": 33,
+      "gt_category": "closet",
+      "cause": "no_text",
+      "texts": []
+    },
+    {
+      "page": "BP-1 Masonic Heights Elementary School Electrical Pages_page003",
+      "gt_index": 6,
+      "gt_category": "classroom",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "CLASSRPOM 6A",
+        "CIM",
+        "D1|08"
+      ]
+    },
+    {
+      "page": "BP-1 Masonic Heights Elementary School Electrical Pages_page003",
+      "gt_index": 16,
+      "gt_category": "toilet",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "D106B",
+        "2",
+        "L3"
+      ]
+    },
+    {
+      "page": "BP-1 Masonic Heights Elementary School Electrical Pages_page003",
+      "gt_index": 20,
+      "gt_category": "toilet",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "L3"
+      ]
+    },
+    {
+      "page": "BP-1 Masonic Heights Elementary School Electrical Pages_page003",
+      "gt_index": 13,
+      "gt_category": "toilet",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "L3"
+      ]
+    },
+    {
+      "page": "BP-1 Violet Elementary School  - AVI-ON LAYOUT FLAT_page000",
+      "gt_index": 18,
+      "gt_category": "others",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "A113",
+        "SPEECH",
+        "TYP.",
+        "CIM",
+        "3",
+        "2X4"
+      ]
+    },
+    {
+      "page": "BP-1 Violet Elementary School  - AVI-ON LAYOUT FLAT_page001",
+      "gt_index": 2,
+      "gt_category": "classroom",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "CIM",
+        "CLASSRQOM14",
+        "CLASSRQOM 14",
+        "4",
+        "2X4"
+      ]
+    },
+    {
+      "page": "BP-1 Violet Elementary School  - AVI-ON LAYOUT FLAT_page002",
+      "gt_index": 3,
+      "gt_category": "classroom",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "CLASSRO",
+        "CIM",
+        "B108",
+        "CLASSROO",
+        "Y",
+        "2X4"
+      ]
+    },
+    {
+      "page": "BP-1 Violet Elementary School  - AVI-ON LAYOUT FLAT_page003",
+      "gt_index": 3,
+      "gt_category": "classroom",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        ".",
+        "D12",
+        "CIM",
+        "TYP"
+      ]
+    },
+    {
+      "page": "BP-1 Violet Elementary School  - AVI-ON LAYOUT FLAT_page003",
+      "gt_index": 7,
+      "gt_category": "toilet",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "TOILET",
+        "D107"
+      ]
+    },
+    {
+      "page": "BP-1 Violet Elementary School Electrical Pages_page000",
+      "gt_index": 20,
+      "gt_category": "office",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "A113",
+        "SPEECH",
+        "3",
+        "TYP.",
+        "CIM",
+        "24"
+      ]
+    },
+    {
+      "page": "BP-1 Violet Elementary School Electrical Pages_page002",
+      "gt_index": 13,
+      "gt_category": "toilet",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "B107B",
+        "[OILF"
+      ]
+    },
+    {
+      "page": "Bradley Fair_Avi-on Submittal_page000",
+      "gt_index": 3,
+      "gt_category": "vestibule",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "ESTIBL",
+        "LSPCI-66",
+        "EM/N",
+        "UEE"
+      ]
+    },
+    {
+      "page": "Bradley Fair_Avi-on Submittal_page000",
+      "gt_index": 6,
+      "gt_category": "office",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "CONNECT SENS",
+        "CORRESPONDING XFAC",
+        "CORRESPONDING-XFAC",
+        "CONNECT SENSORS TO",
+        "LD-1",
+        "APC-74",
+        "AC-"
+      ]
+    },
+    {
+      "page": "Bradley Fair_Avi-on Submittal_page000",
+      "gt_index": 7,
+      "gt_category": "restroom",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "APC74",
+        "1LSPC"
+      ]
+    },
+    {
+      "page": "Bradley Fair_Avi-on Submittal_page000",
+      "gt_index": 8,
+      "gt_category": "yoga_room",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "LD",
+        "OGA/MEDITA",
+        "EM/N",
+        "R",
+        "-80",
+        "EV/NL",
+        "ON",
+        "LTC ZONE",
+        "LD",
+        "APC80",
+        "c-ae"
+      ]
+    },
+    {
+      "page": "Bradley Fair_Avi-on Submittal_page000",
+      "gt_index": 9,
+      "gt_category": "janitor_closet",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "COR"
+      ]
+    },
+    {
+      "page": "Bradley Fair_Avi-on Submittal_page000",
+      "gt_index": 10,
+      "gt_category": "toilet",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "LSPC1"
+      ]
+    },
+    {
+      "page": "Bradley Fair_Avi-on Submittal_page000",
+      "gt_index": 11,
+      "gt_category": "toilet",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "LSPC168",
+        "PC84",
+        "WOMENC-"
+      ]
+    },
+    {
+      "page": "Bradley Fair_Avi-on Submittal_page000",
+      "gt_index": 12,
+      "gt_category": "corridor",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "SENSORS",
+        "84",
+        "LA",
+        "ECEPXON",
+        "LA",
+        "CONNECT",
+        "APC69",
+        "84",
+        "LSPCI-O"
+      ]
+    },
+    {
+      "page": "Bradley Fair_Avi-on Submittal_page000",
+      "gt_index": 15,
+      "gt_category": "restroom",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "LD-1",
+        "LL-S-9",
+        "Ri-OO-1"
+      ]
+    },
+    {
+      "page": "Bradley Fair_Avi-on Submittal_page000",
+      "gt_index": 17,
+      "gt_category": "corridor",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "CONNECT SENSORS TO",
+        "EM/NL",
+        "LSPC168",
+        "APC85",
+        "CORRESPONDING-XFAC",
+        "A-5",
+        "LSPCI",
+        "LSPC168 APC73LSPCI",
+        "LSPCI-"
+      ]
+    },
+    {
+      "page": "Bradley Fair_Avi-on Submittal_page000",
+      "gt_index": 18,
+      "gt_category": "package_room",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "PACKAGE",
+        "APC"
+      ]
+    },
+    {
+      "page": "Bradley Fair_Avi-on Submittal_page000",
+      "gt_index": 19,
+      "gt_category": "fire_command_center",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "ENTE"
+      ]
+    },
+    {
+      "page": "Bradley Fair_Avi-on Submittal_page000",
+      "gt_index": 20,
+      "gt_category": "mail_room",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "APC73(2)LT18",
+        "PC7",
+        "2/LT1",
+        "APC73"
+      ]
+    },
+    {
+      "page": "Bradley Fair_Avi-on Submittal_page000",
+      "gt_index": 21,
+      "gt_category": "others",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "LE",
+        "PE"
+      ]
+    },
+    {
+      "page": "Bradley Fair_Avi-on Submittal_page000",
+      "gt_index": 22,
+      "gt_category": "storage_room",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "CART",
+        "TAP"
+      ]
+    },
+    {
+      "page": "Bradley Fair_Avi-on Submittal_page000",
+      "gt_index": 23,
+      "gt_category": "lounge",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "7",
+        "APC",
+        "-73"
+      ]
+    },
+    {
+      "page": "Bradley Fair_Avi-on Submittal_page000",
+      "gt_index": 24,
+      "gt_category": "others",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "74",
+        "PC74",
+        "m[A-1"
+      ]
+    },
+    {
+      "page": "Bradley Fair_Avi-on Submittal_page000",
+      "gt_index": 26,
+      "gt_category": "lobby",
+      "cause": "text_at_run_resolution",
+      "texts": [
+        "APC74",
+        "OLT14",
+        "IPC-74",
+        "LCI-aLD"
+      ]
+    },
+    {
+      "page": "Bradley Fair_Avi-on Submittal_page000",
+      "gt_index": 13,
+      "gt_category": "toilet",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "APC84",
+        "LD",
+        "LL-S-5",
+        "APC-84"
+      ]
+    },
+    {
+      "page": "Bradley Fair_Avi-on Submittal_page000",
+      "gt_index": 14,
+      "gt_category": "toilet",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "-S-5",
+        "APC-84"
+      ]
+    },
+    {
+      "page": "Bradley Fair_Avi-on Submittal_page000",
+      "gt_index": 25,
+      "gt_category": "closet",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "APC",
+        "21"
+      ]
+    },
+    {
+      "page": "Bradley Fair_Avi-on Submittal_page000",
+      "gt_index": 27,
+      "gt_category": "corridor",
+      "cause": "text_only_at_higher_resolution",
+      "texts": [
+        "LD1",
+        "LTO",
+        "LD-1",
+        "L0-1",
+        "D-1",
+        "KD-",
+        "LTO1",
+        "D-1",
+        "LD-1",
+        "H"
+      ]
+    }
+  ]
+}

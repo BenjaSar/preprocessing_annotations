@@ -96,3 +96,47 @@ ABBREVIATION_MAP: dict[str, str] = {
     "G":     "GARAGE",
     "SHOP":  "WORKSHOP",
 }
+
+
+# Characters that may follow an abbreviation for it to still be the whole
+# token: a separator, or the start of a room number. A letter means the
+# abbreviation is just the first letters of a longer word ("BR" in "BRIDGE"),
+# which must not expand.
+_ABBREVIATION_BOUNDARY: tuple[str, ...] = (" ", "-")
+
+
+def expand_abbreviation(name: str, block_single_letter: bool = True) -> str:
+    """Expand a leading room-label abbreviation ("BR 1" -> "BEDROOM 1").
+
+    Shared by SemanticRoomValidator and TaxonomyNormalizer, which each used
+    to carry their own copy of this logic.
+
+    block_single_letter (E2, 2026-09-09): when True a single-letter
+    abbreviation ("K", "P", "G") never expands -- measured on corpus_batch2,
+    30/30 bare "K" room candidates were fixture tags or grid labels, not
+    kitchens. See SemanticRoomValidator._expand_abbreviation for the full
+    rationale.
+
+    The boundary is tested on the raw remainder, before stripping: the old
+    code stripped first and then checked for a space, so a space could never
+    match and "<ABBREV> <WORD>" never expanded ("JAN CLOSET" stayed as-is
+    while "JAN" and "JAN 101" expanded).
+    """
+    name_upper = name.upper().strip()
+
+    if name_upper in ABBREVIATION_MAP:
+        if block_single_letter and len(name_upper) == 1:
+            return name
+        return ABBREVIATION_MAP[name_upper]
+
+    for abbrev, expansion in ABBREVIATION_MAP.items():
+        if block_single_letter and len(abbrev) == 1:
+            continue
+        if not name_upper.startswith(abbrev):
+            continue
+        remainder = name_upper[len(abbrev):]
+        if remainder and not (remainder[0] in _ABBREVIATION_BOUNDARY or remainder[0].isdigit()):
+            continue
+        return f"{expansion} {remainder.strip()}".strip()
+
+    return name

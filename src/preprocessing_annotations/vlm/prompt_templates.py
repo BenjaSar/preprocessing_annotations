@@ -218,6 +218,22 @@ def build_page_type_prompt_unsloth() -> str:
     return _PAGE_TYPE_PROMPT_UNSLOTH
 
 
+# Crop re-read (ingestion/crop_reread.py): a second, pixel-level look at
+# one OCR text fragment. Transcription only -- no hint that the text is a
+# room name, so the model is not steered toward inventing one.
+_CROP_TEXT_PROMPT_UNSLOTH = """This image is a small crop of an architectural drawing.
+Transcribe the text label at the centre of the crop exactly as printed, including any letters partly crossed by drawing lines.
+Do not correct, expand, translate or guess words. Ignore text cut off at the crop edge.
+
+Return a JSON array holding one string, e.g. ["TEXT AS PRINTED"].
+If no text at the centre is legible, return []."""
+
+
+def build_crop_text_prompt_unsloth() -> str:
+    """Crop transcription prompt for the Unsloth Qwen backend."""
+    return _CROP_TEXT_PROMPT_UNSLOTH
+
+
 def build_window_prompt() -> str:
     """Window-detection prompt shared by the Claude and Qwen2.5-VL backends."""
     return _WINDOW_PROMPT

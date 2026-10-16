@@ -343,6 +343,21 @@ class OCRConfig:
             r"^MECH\s*/?\s*ELEC$",         # "MECH/ELEC", "MECH /ELEC"
             r"^MOTHER('?S)?\s+ROOM$",
             r"^NIGHT\s+DROP\s*/?\s*ITM$",
+            # --- Candidate-builder gap (2026-10-13): real OCR labels inside
+            # GT rooms that passed the semantic keyword gate but matched no
+            # pattern here (eval/missed_room_ocr.py). Measured with
+            # eval/candidate_replay.py on sprint1_verify54 (in-sample: these
+            # forms come from the same 48 GT pages): located 796 -> 821,
+            # precision .9317 -> .9334, no document lost recall; all 33
+            # matching OCR texts on the 58 pages lie inside GT rooms. STAIR
+            # form also covers merged name+number ("STAIR A101").
+            r"^JANITORS?\s+CLOSET$",
+            r"^STAIR\s+[A-Z0-9]+$",
+            r"^COUNC\.?\s*OFFICE$",
+            r"^MAIN\s+OFFICE$",
+            r"^MAIL\s*/\s*IDF$",
+            r"^TEACHERS?\s+LOUNGE$",
+            r"^ADA\s+RESTROOM$",
         ]
     )
 
@@ -483,6 +498,10 @@ class VLMConfig:
     # room/door/window budgets (those are sized for numerous bbox
     # instances; this task emits exactly one small object).
     page_type_max_new_tokens: int = 128
+
+    # Crop re-read (ingestion/crop_reread.py) budget: a JSON array holding
+    # one short label string, smaller than the page-type object above.
+    crop_text_max_new_tokens: int = 64
 
     # Room token budget for Thinking-variant Unsloth checkpoints only.
     # Verified 2026-07-24 (t7_stochastic run, qwen3-vl-8b-thinking): the
@@ -627,6 +646,133 @@ class ExportConfig:
     # what the detector/pipeline already applied before persisting
     # objectDetections.
     object_detection_min_confidence: float = 0.0
+
+    # COCO train/val/test split (export/group_split.py). The split unit is a
+    # group: one source document by default, or a wider family named in the
+    # group map. Measured on sprint1_verify54: pages of one document correlate
+    # .80-.93, the two PDFs of one building share room names (Jaccard .50-.59),
+    # and two schools of one design family reach .39-.45 (unrelated-document
+    # median .029) -- so a page-level split leaks and a per-PDF split can too.
+    split_ratios: Tuple[float, float, float] = (0.70, 0.15, 0.15)
+    split_seed: int = 42
+    # JSON: {"groups": {"<document>": "<group>"}, "pinned_test_groups": [...]},
+    # written by scripts/make_split_group_map.py and then edited by hand to
+    # merge documents into design families. Pinned groups always land in test
+    # (the room-GT documents are the only room eval set there is, so they must
+    # stay out of any training split). Documents the map does not name are
+    # their own group, so a run on another corpus needs no entry. Set to None
+    # to split by document with nothing pinned.
+    split_group_map_path: Optional[Path] = field(
+        default_factory=lambda: _PROJECT_ROOT / "gt_segmentation" / "split_group_map.json"
+    )
+
+
+@dataclass
+class RoomGtEvalConfig:
+    """AV-8 (2026-10-10): first room-extent ground truth for this
+    project's target domain -- Label Studio COCO polygon export over the
+    48 test_input pages (1497 room polygons, 93 room categories). Images
+    are byte-identical (md5, 48/48) to sprint1_verify50/51's images/; they
+    are NOT the corpus_batch2 pages sprint1_verify52 ran on (0/48 match).
+
+    Scored by eval/room_gt_eval.py: label localization (prediction center
+    inside a GT polygon), extent (bbox IoU), and object->room attachment
+    per AttachmentPolicy.
+    """
+
+    gt_coco_path: Path = field(
+        default_factory=lambda: _PROJECT_ROOT / "gt_segmentation" / "result.json"
+    )
+
+    # Reviewed GT-category -> taxonomy-class map, drafted by
+    # scripts/draft_gt_category_map.py and completed by a human. Needed to
+    # score whether a located room also carries the right class; without it
+    # only the room's position is scored. A category mapped to null is left
+    # out of the category score and reported as excluded.
+    gt_category_map_path: Path = field(
+        default_factory=lambda: _PROJECT_ROOT / "gt_segmentation" / "gt_category_map.json"
+    )
+
+    # Same Accuracy@0.5 convention as EvalConfig.gt_iou_threshold.
+    gt_iou_threshold: float = 0.5
+
+    # Oversize bar: a predicted box bigger than the GT room its center sits
+    # in. Definitional, not tuned -- above ratio 1.0 the box cannot be that
+    # room's extent, it has swallowed neighbours. Configurable because the
+    # pipeline emits two box conventions (label-scale for OCR-anchored
+    # rooms, VLM room-extent for vlm_only ones) and a per-convention bar may
+    # be wanted later. IoU cannot replace this: a too-small and a too-large
+    # box both score 0, so an oversize regression hides behind a flat IoU.
+    max_box_to_gt_area_ratio: float = 1.0
+
+    # NearestWithCutoffAttachmentPolicy has no measured cutoff; the harness
+    # derives candidate cutoffs from the data itself -- these percentiles of
+    # the detection-center -> correct-room-label distance distribution --
+    # instead of guessing pixel values. In-sample by construction: a cutoff
+    # picked from this sweep must be re-checked on held-out pages.
+    attachment_cutoff_percentiles: Tuple[int, ...] = (50, 75, 90)
+
+
+@dataclass
+class MissedRoomOcrConfig:
+    """eval/missed_room_ocr.py: why a GT room never got a room candidate.
+
+    rerender_scale_factor: a GT room with no OCR text at the run's own
+    resolution is re-rendered from its PDF at this multiple of the run's
+    raster scale and OCR'd again. Text found only then is attributed to
+    resolution. An experiment parameter, not a tuned value.
+    """
+
+    rerender_scale_factor: float = 2.0
+
+
+@dataclass
+class CropRereadConfig:
+    """ingestion/crop_reread.py: VLM second look at OCR text fragments.
+
+    Gap (eval/missed_room_ocr_sprint1_verify53.json): 158 GT rooms never get
+    a candidate although OCR reads text inside them, part of it truncated or
+    misread room words ("TAIR", "CLASSRODM"). A detection is re-read when its
+    text fails every room-label pattern yet looks like a room keyword.
+
+    min_text_letters / keyword_similarity_min: selector bounds, swept
+      2026-10-15 via eval/candidate_replay.py --rereads over 7 settings
+      (verify54, 48 scored pages).
+
+      What is validated out-of-sample is re-reading ITSELF, not any one
+      setting: leave-one-document-out it locates 857 GT rooms against the
+      no-reread 821 at precision .9337 vs .9334, and no fold chose the
+      no-reread baseline.
+
+      keyword_similarity_min 0.8 is an IN-SAMPLE pick -- chosen after seeing
+      all 7 full-corpus scores, where it dominated 0.7 (same 857 located,
+      precision .9342 vs .9337, 1034 predictions vs 1041). The folds
+      themselves split (6 consistency_min=0.6 / 3 this / 1 all-defaults), so
+      0.8 won only 3 of 10. Treat it as a starting value; the fixed setting
+      is decided at C3 from a fresh run's own re-reads, not from this sweep.
+      Raising min_text_letters only loses rooms (4 -> 856, 5 -> 852).
+
+      This dataclass serves two roles -- how broadly crop_reread_probe.py
+      reads, and what the selector later accepts -- so a probe run at these
+      defaults can no longer be swept back down to 0.7 (the crops were never
+      read). Probe with an explicit --selector at least as broad as anything
+      to be swept.
+    consistency_min: a re-read replaces the OCR text only when the OCR text
+      is contained in it or this similar to it, so the VLM cannot turn an
+      unrelated token into a room name. Held at 0.7 deliberately: loosening
+      it to 0.6 was the most-chosen setting in the re-pick (6/10 folds) but
+      bought only 2 further located rooms (859 vs 857) and +.0001 precision,
+      which does not justify weakening the one guard that stops a re-read
+      inventing a room name.
+    crop_padding_box_heights: crop margin around the detection, in multiples
+      of its box height, so a truncated word's missing glyphs are in view.
+      An experiment parameter, not a tuned value.
+    """
+
+    min_text_letters: int = 3
+    keyword_similarity_min: float = 0.8
+    consistency_min: float = 0.7
+    crop_padding_box_heights: float = 1.0
 
 
 @dataclass
@@ -1680,6 +1826,64 @@ class MlflowConfig:
 
 
 @dataclass
+class RoomFilterConfig:
+    """Thresholds used by prepare_sft_annotation / _merge_vlm_and_ocr.
+
+    Defaults are the literals previously hardcoded in sft_validator.py —
+    no behavior change at defaults. Room-GT (2026-10-10) shows 36% / 63% of
+    GT rooms are below min_room_area_px / room_min_area; do not retune without
+    a leave-one-building-out check.
+    """
+
+    # Area floor (px²) for non-OCR-anchored rooms in the geometric filter.
+    min_room_area_px: int = 10_000
+
+    # Room-scale gate floor (px²); OCR-anchored sources bypass it.
+    room_min_area: int = 40_000
+
+    # Max fraction of image area for any single room box.
+    max_room_frac: float = 0.30
+
+    # Max fraction of image area for a vlm_only room box.
+    max_vlm_unit_frac: float = 0.08
+
+    # Edge-gap (px) under which an OCR box and a VLM box count as the same
+    # room in _merge_vlm_and_ocr (_bbox_distance). 0 = boxes must overlap.
+    merge_proximity_px: int = 100
+
+    # FIX-5 (non-drawing-region drop) and FIX-6 (ruled-table detection).
+    # Derived over 473 boxes on 58 sheets against an 18-file visual audit
+    # (sprint1_verify35), before any room GT existed:
+    #   ink_binarise_max: grayscale value below which a pixel counts as ink; a
+    #     fixed near-white cut (per-page Otsu was tested and rejected: it
+    #     collapses the wrong/right gap on some sheets).
+    #   min_ink_frac: at that level wrong-box ink maxed at 0.077 and right-box
+    #     ink bottomed at 0.102; the cut sits in that gap. A box with a lower
+    #     ink fraction is dropped. Room GT (sprint1_verify53): low_ink dropped
+    #     1044 candidates, 629 outside any GT room, 322 redundant, 93 harmful.
+    ink_binarise_max: int = 200
+    min_ink_frac: float = 0.09
+
+    # FIX-7: a vlm_only room (no OCR corroboration) is dropped when its box
+    # covers at least this fraction of the image. 0.0 drops every vlm_only room.
+    vlm_uncorroborated_area_frac: float = 0.0167
+
+    # Two-pass OCR's VLM fallback turns VLM-detected rooms into OCR candidates
+    # carrying the VLM's own box and self-reported confidence. Such a candidate
+    # duplicates its VLM room rather than corroborating it, and let invented
+    # rooms bypass FIX-7 and the OCR-anchored gates. True skips it in
+    # prepare_sft_annotation, so the VLM room stays vlm_only. Room GT
+    # (sprint1_verify53): located 797 -> 796, the one lost hit a wrongly named
+    # room; all 7 changed non-GT pages viewed, lost boxes all mislocated.
+    skip_vlm_echo_candidates: bool = True
+
+    # Slack (px) when matching an OCR candidate's box to a VLM room's box:
+    # two_pass_ocr_extractor truncates the VLM box to int when it builds the
+    # candidate.
+    vlm_echo_bbox_tolerance_px: int = 1
+
+
+@dataclass
 class PipelineConfig:
     """Master configuration for the full annotation pipeline.
 
@@ -1710,6 +1914,7 @@ class PipelineConfig:
     )
     mlflow: MlflowConfig = field(default_factory=MlflowConfig)
     attachment: AttachmentConfig = field(default_factory=AttachmentConfig)
+    room_filter: RoomFilterConfig = field(default_factory=RoomFilterConfig)
 
     # Optional: ground-truth annotations dir (same format as this pipeline's
     # own annotations/ output). If set, run() calls bbox_metrics.evaluate_dataset
@@ -1775,6 +1980,56 @@ class PipelineConfig:
     # priority past Prototype First. Do not cite this as a measured
     # triage accuracy.
     use_page_type: bool = False
+
+    # Two-pass OCR's Pass 2 (VLM fallback for Pass-1 candidates under 0.92
+    # confidence) on pages where it triggers. sprint1_verify54 (replay from
+    # saved raw OCR): Pass 2 replaced none of the 1187 Pass-1 candidates; it
+    # added 36 VLM-box echoes and 281 candidates whose boxes do not match
+    # their same-name VLM rooms. Pass-1-only replay: located 796 -> 795,
+    # precision .9317 -> .9335. Default True = unchanged behavior pending that
+    # trade-off decision. False skips Pass 2 only; OCR device selection is
+    # unchanged (it depends on the VLM backend being present).
+    use_ocr_vlm_fallback: bool = True
+
+    # C2 (2026-10-15): crop re-read -- a VLM second look at OCR fragments
+    # that are not room labels but look like room keywords ("TAIR",
+    # "CLASSRODM"). Runs in the assembly step, after the PaddleOCR heap is
+    # released, and rebuilds that page's Pass-1 candidates from the re-read
+    # detections (orchestration/crop_reread_step.py).
+    #
+    # Measured offline on sprint1_verify54 (eval/candidate_replay.py
+    # --rereads, 48 scored pages): leave-one-document-out it locates 857 GT
+    # rooms against the no-reread 821, precision .9337 vs .9334, and no fold
+    # chose no-reread. In-sample it costs recall in one document
+    # (bp_1_kennedy_middle_school_electrical_pages).
+    #
+    # Default True (2026-10-16): run it whenever the pipeline CAN. This is a
+    # capability gate, not a promise that it ran -- the step needs a
+    # CropTextReader, and UnslothCropTextReader is the only implementation
+    # (vlm/read/), so a Claude-backend or OCR-only run has nothing to read
+    # crops with and proceeds without it. It is also skipped alongside
+    # use_pdf_text_layer, whose extras reach room candidates by a path this
+    # step does not reproduce and which no crop-reread measurement covers.
+    #
+    # Skipping is reported, never silent: AnnotationPipeline logs the reason
+    # and the run manifest records cropReread.active plus that reason, so a
+    # run cannot look re-read when it was not. Setting this False skips it
+    # unconditionally (--no-crop-reread).
+    #
+    # Cost, from the 58-page probe: 677 crops, median 9 per page, max 42,
+    # 3 pages had none; median 0.99 s/crop, 819 s total. The selector only
+    # picks fragments that are not already room labels but look like room
+    # keywords, so a page with no such text costs nothing.
+    #
+    # KNOWN REGRESSION, accepted by the project owner on 2026-10-16 when
+    # asking for this to run automatically: in-sample on verify54 it costs
+    # recall in one document (bp_1_kennedy_middle_school_electrical_pages),
+    # and all of its evidence is a replay of one run's saved OCR over the 48
+    # GT pages. 32 of 58 pages change room count there (30 gain, 2 lose, net
+    # +58 rooms). C3 -- a fresh run scored end to end -- has NOT happened.
+    use_crop_reread: bool = True
+
+    crop_reread: CropRereadConfig = field(default_factory=CropRereadConfig)
 
     # E2 (2026-09-09): block single-letter abbreviation expansion ("K" ->
     # KITCHEN, "P" -> PANTRY, "G" -> GARAGE in ABBREVIATION_MAP) in the
@@ -1934,6 +2189,36 @@ class PipelineConfig:
 
     # Parallel processing
     num_workers: int = 4
+
+    def crop_reread_skip_reason(self) -> Optional[str]:
+        """Why crop re-read will not run, or None when it will.
+
+        A reason rather than an exception: use_crop_reread defaults on, so
+        the ordinary OCR-only or Claude-backend run must proceed without the
+        step instead of failing at startup. The caller is expected to log
+        this and record it, so a skip is visible rather than silent.
+        """
+        if not self.use_crop_reread:
+            return "use_crop_reread is off"
+        if not self.use_vlm:
+            return (
+                "use_vlm is off: the re-read is a VLM second look at OCR "
+                "fragments and has no non-VLM fallback"
+            )
+        backend = self.vlm.backend.lower()
+        if backend != "unsloth":
+            return (
+                f"vlm.backend is {backend!r}, not 'unsloth': "
+                f"UnslothCropTextReader is the only CropTextReader "
+                f"implementation (vlm/read/)"
+            )
+        if self.use_pdf_text_layer:
+            return (
+                "use_pdf_text_layer is on: its extras reach room candidates "
+                "by a path the re-read step does not reproduce, and no "
+                "crop-reread measurement covers that combination"
+            )
+        return None
 
     @classmethod
     def for_high_detail(cls) -> "PipelineConfig":

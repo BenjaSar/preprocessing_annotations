@@ -414,6 +414,14 @@ class MEPTextExtractor:
             for pattern in self.config.room_name_patterns
         ]
 
+    def is_room_name(self, text: str) -> bool:
+        """True when `text` matches one of OCRConfig.room_name_patterns."""
+        return any(p.search(text) for p in self._room_name_patterns)
+
+    def matches_room_label(self, text: str) -> bool:
+        """True when `text` on its own is a room number or a room name."""
+        return bool(self._room_number_pattern.match(text)) or self.is_room_name(text)
+
     def release(self) -> None:
         """Drop the OCR backend and return its native heap to the OS.
 
@@ -752,7 +760,7 @@ class MEPTextExtractor:
             text = detection.text.strip()
 
             is_number = bool(self._room_number_pattern.match(text))
-            is_name = any(p.search(text) for p in self._room_name_patterns)
+            is_name = self.is_room_name(text)
 
             if not (is_number or is_name):
                 continue
@@ -831,12 +839,6 @@ class MEPTextExtractor:
 
         sorted_dets = sorted(detections, key=sort_key)
 
-        def _self_matches(text: str) -> bool:
-            return (
-                bool(self._room_number_pattern.match(text))
-                or any(p.search(text) for p in self._room_name_patterns)
-            )
-
         def _make_merged(group: List[TextDetection]) -> TextDetection:
             """Produce a single TextDetection from a group of constituents."""
             g_sorted = sorted(group, key=lambda d: min(p[0] for p in d.bbox))
@@ -890,7 +892,7 @@ class MEPTextExtractor:
                 for window in range(min(MAX_WINDOW, len(ch) - k), 1, -1):
                     group = ch[k: k + window]
                     merged = _make_merged(group)
-                    if _self_matches(merged.text.strip()):
+                    if self.matches_room_label(merged.text.strip()):
                         best_end = k + window
                         best_merged = merged
                         logger.debug(
@@ -950,12 +952,6 @@ class MEPTextExtractor:
         """
         if not detections:
             return []
-
-        def _self_matches(text: str) -> bool:
-            return (
-                bool(self._room_number_pattern.match(text))
-                or any(p.search(text) for p in self._room_name_patterns)
-            )
 
         def _x_range(d: TextDetection):
             xs = [p[0] for p in d.bbox]
@@ -1043,7 +1039,7 @@ class MEPTextExtractor:
                 group_indices = [i] + [idx for idx, _ in stack_candidates[:depth]]
                 candidate_text = " ".join(d.text.strip() for d in
                                           sorted(group_tokens, key=lambda d: _centroid(d.bbox)[1]))
-                if _self_matches(candidate_text):
+                if self.matches_room_label(candidate_text):
                     merged_token = _make_stack_merge(group_tokens)
                     best_indices = group_indices
                     logger.debug(
@@ -1132,6 +1128,23 @@ class MEPTextExtractor:
     # (separately configured), giving full in-plan label recall at 4500px input.
     _OCR_MAX_DIM_PX: int = 4500
 
+    @classmethod
+    def ocr_scale_size(cls, size: Tuple[int, int]) -> Optional[Tuple[int, int]]:
+        """The size OCR reads `size` at, or None when it reads it unchanged.
+
+        Detection coordinates are in this space, so anything that crops the
+        page from those coordinates -- crop re-read
+        (ingestion/crop_reread.py) -- has to scale the image the same way.
+        Extracted rather than duplicated: the two must not drift apart, and
+        the OCR copy is a temp file deleted right after extraction, so a
+        later consumer cannot simply reuse it.
+        """
+        longest = max(size)
+        if longest <= cls._OCR_MAX_DIM_PX:
+            return None
+        scale = cls._OCR_MAX_DIM_PX / longest
+        return int(size[0] * scale), int(size[1] * scale)
+
     # Y1 (2026-08-20 audit, corrects a wrong integration point from the
     # same-day PDF-text-layer prototype): "OCR already found something
     # HERE" tolerance for merging extra_detections into candidate
@@ -1194,12 +1207,12 @@ class MEPTextExtractor:
             from PIL import Image as _PIL
             with _PIL.open(image_path) as _img:
                 orig_w, orig_h = _img.size
-            if max(orig_w, orig_h) > self._OCR_MAX_DIM_PX:
-                scale = self._OCR_MAX_DIM_PX / max(orig_w, orig_h)
-                new_w, new_h = int(orig_w * scale), int(orig_h * scale)
+            ocr_size = self.ocr_scale_size((orig_w, orig_h))
+            if ocr_size is not None:
+                new_w, new_h = ocr_size
                 logger.info(
                     f"OCR resize: {orig_w}x{orig_h} → {new_w}x{new_h} "
-                    f"(scale={scale:.3f}) to match annotation coordinate space"
+                    f"(scale={new_w / orig_w:.3f}) to match annotation coordinate space"
                 )
                 with _PIL.open(image_path) as _img:
                     resized = _img.resize((new_w, new_h), _PIL.Resampling.LANCZOS)

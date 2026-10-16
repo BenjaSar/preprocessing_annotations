@@ -16,7 +16,7 @@ Integration: Called after room detection, before SFT annotation serialization.
 import logging
 import tempfile
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import List, Optional, Dict, Tuple, Any
@@ -78,6 +78,18 @@ class RoomWindowMapping:
     def __post_init__(self):
         if self.intersecting_windows is None:
             self.intersecting_windows = []
+
+
+@dataclass
+class ObjectDetectionPass:
+    """One page's object-detection outcome: per-room mappings plus the
+    detections the attachment policy attached to no room.
+
+    `unattached` covers the YOLO/SAM3 source only; the WindowDetector tiers
+    return mappings without exposing their raw detections.
+    """
+    mappings: List[RoomWindowMapping]
+    unattached: List[WindowDetection] = field(default_factory=list)
 
 
 def map_detections_to_rooms(

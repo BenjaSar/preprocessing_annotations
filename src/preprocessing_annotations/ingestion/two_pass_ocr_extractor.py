@@ -56,6 +56,7 @@ class TwoPassOCRExtractor:
         ocr_config: OCRConfig,
         vlm_backend: Optional[VLMBackend] = None,
         confidence_threshold: float = 0.92,
+        vlm_fallback_enabled: bool = True,
     ):
         """
         Initialize two-pass OCR extractor.
@@ -63,6 +64,8 @@ class TwoPassOCRExtractor:
         Args:
             ocr_config: OCRConfig for Pass 1 (PaddleOCR)
             vlm_backend: VLMBackend for Pass 2 fallback (optional)
+            vlm_fallback_enabled: False skips Pass 2 while leaving the backend
+                (and therefore the local-VLM CPU forcing below) in place.
             confidence_threshold: Use VLM fallback if confidence < this value (default: 0.92).
                 PaddleOCR typically returns >0.97 on legible floor plan text; 0.92 triggers
                 the fallback only for tokens that are genuinely ambiguous.
@@ -88,6 +91,7 @@ class TwoPassOCRExtractor:
         self.ocr_extractor = MEPTextExtractor(ocr_config)
         self.vlm_backend = vlm_backend
         self.confidence_threshold = confidence_threshold
+        self.vlm_fallback_enabled = vlm_fallback_enabled
         
         logger.info(
             f"Initialized TwoPassOCRExtractor with confidence_threshold={confidence_threshold}"
@@ -160,10 +164,11 @@ class TwoPassOCRExtractor:
             if r.confidence < self.confidence_threshold
         ]
 
-        if not low_confidence_rooms or self.vlm_backend is None:
+        if not low_confidence_rooms or self.vlm_backend is None or not self.vlm_fallback_enabled:
             logger.info(
                 f"Pass 2 skipped: {len(low_confidence_rooms)} low-confidence rooms, "
-                f"VLM backend available: {self.vlm_backend is not None}"
+                f"VLM backend available: {self.vlm_backend is not None}, "
+                f"fallback enabled: {self.vlm_fallback_enabled}"
             )
             return pass1_rooms
 

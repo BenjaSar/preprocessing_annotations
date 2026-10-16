@@ -1,7 +1,7 @@
 """
 Mandatory SFT Taxonomy — Single Source of Truth.
 
-Implements the standardized 31-class room taxonomy required for Vision-Language
+Implements the standardized room taxonomy (MANDATORY_CLASSES) required for Vision-Language
 Model fine-tuning, while preserving fine-grained residential/utility classification
 via extended_type for non-SFT use cases.
 
@@ -113,6 +113,10 @@ MANDATORY_CLASSES: Dict[str, List[str]] = {
         "COMPUTER LAB", "SCIENCE LAB",
         "SPECIAL EDUCATION", "SPECIAL ED",
         "SCIENCE CLASSROOM", "LITERATURE CLASSROOM",
+        # N3 (2026-10-10): GT-confirmed on 48-page eval (8/10 MEDIA CENTER
+        # candidates inside GT media_center polygons). A school media center
+        # is a library/resource space — nearest existing class is CLASSROOM.
+        "MEDIA CENTER", "MEDIA ROOM",
     ],
     "LECTURE HALL": [
         "LECTURE HALL", "AUDITORIUM", "THEATER", "THEATRE",
@@ -129,8 +133,14 @@ MANDATORY_CLASSES: Dict[str, List[str]] = {
     ],
     "CAFETERIA": [
         "CAFETERIA", "CAFE", "BREAK ROOM", "BREAKROOM",
-        "KITCHEN", "KITCHENETTE", "PANTRY", "BREAK AREA",
+        # KITCHEN/KITCHENETTE moved to their own KITCHEN class (2026-10-13,
+        # reviewer: "Cafeteria vs Kitchen: they are different"). LOUNGE and
+        # PANTRY stay here -- reviewer kept lounge with cafeteria.
+        "PANTRY", "BREAK AREA",
         "STAFF LOUNGE", "TEACHER LOUNGE",
+        # Paired with OCRConfig.room_name_patterns ^TEACHERS?\s+LOUNGE$ (2026-10-13);
+        # without it the plural fell back to STORAGE ROOM.
+        "TEACHERS LOUNGE",
     ],
 
     # ── Retail ──────────────────────────────────────────────────────────────
@@ -141,8 +151,11 @@ MANDATORY_CLASSES: Dict[str, List[str]] = {
 
     # ── Circulation ─────────────────────────────────────────────────────────
     "LOBBY": [
-        "LOBBY", "RECEPTION", "FOYER", "VESTIBULE", "ENTRANCE",
-        "ENTRY", "ENTRY AREA", "ENTRANCE VESTIBULE",
+        # VESTIBULE and ENTRANCE VESTIBULE moved to their own VESTIBULE class
+        # (2026-10-13, reviewer: "Vestibule different to Lobby"). ENTRANCE,
+        # ENTRY, FOYER, RECEPTION and WAITING stay here.
+        "LOBBY", "RECEPTION", "FOYER", "ENTRANCE",
+        "ENTRY", "ENTRY AREA",
         "WAITING ROOM", "WAITING AREA",
         "RECP", "RECEP",
     ],
@@ -201,6 +214,11 @@ MANDATORY_CLASSES: Dict[str, List[str]] = {
         "ELECTRICAL ROOM", "ELECTRICAL", "ELECTRIC ROOM",
         "ELECTRICAL/MECHANICAL ROOM", "TELECOM ROOM", "RISER",
         "SERVER ROOM", "DATA CENTER", "NETWORK ROOM",
+        # N3 (2026-10-10): GT-confirmed on 48-page eval (3/4 MDF, 2/3 IDF
+        # candidates inside GT mdf/idf_mail_idf polygons). MDF = Main
+        # Distribution Frame, IDF = Intermediate Distribution Frame — both
+        # are telecom/network closets, same class as TELECOM ROOM above.
+        "MDF", "MDF ROOM", "IDF", "IDF ROOM",
     ],
 
     # ── Athletic ────────────────────────────────────────────────────────────
@@ -217,6 +235,52 @@ MANDATORY_CLASSES: Dict[str, List[str]] = {
     "WAREHOUSE": [
         "WAREHOUSE", "LOADING DOCK", "RECEIVING", "WAREHOUSE SPACE",
     ],
+
+    # ── Categories supplied by the GT reviewer (2026-10-13) ──────────────────
+    # Room kinds the room GT annotates that had no mandatory class, so every
+    # one of them resolved to the STORAGE ROOM fallback. Each variant list
+    # holds the class name the reviewer gave; blast-radius measured over 266
+    # distinct production labels (sprint1_verify54 + verify52): exactly one
+    # label changes class, TEACHER COUNCELING, which is the intended fix.
+    # A "ROOM" class was requested too and is NOT added: measured, it shadows
+    # the extended-class room names at the substring step (BOILER ROOM and
+    # MACHINE ROOM leave ELECTRICAL ROOM), a regression on 4 rooms.
+    # Adding a class lets a detected room be classified correctly; it does not
+    # make the room detected -- the room-name patterns and the semantic
+    # keyword gate decide that, and they are a separate, paired change.
+    "ART CLASSROOM": ["ART CLASSROOM"],
+    "CHILDREN'S PLAYROOM": ["CHILDREN'S PLAYROOM"],
+    "CLINIC": ["CLINIC"],
+    "FILE ROOM": ["FILE ROOM"],
+    # Reviewer's spelling kept as the class name; the standard spelling is a
+    # variant so a correctly spelled label still resolves here.
+    "MAINTENACE ROOM": ["MAINTENACE ROOM", "MAINTENANCE ROOM"],
+    "MUSIC ROOM": ["MUSIC ROOM"],
+    "OFFICE ASSIST PRINCIPAL": ["OFFICE ASSIST PRINCIPAL"],
+    "OFFICE FIRE COMMAND CENTER": ["OFFICE FIRE COMMAND CENTER"],
+    "OFFICE IT": ["OFFICE IT"],
+    "OPEN AREA": ["OPEN AREA"],
+    "PACKAGE ROOM": ["PACKAGE ROOM"],
+    "PLUMBING ROOM": ["PLUMBING ROOM"],
+    "STAGE ROOM": ["STAGE ROOM"],
+    # GT spells this category "teacher_counceling"; kept to match.
+    "TEACHER COUNCELING": ["TEACHER COUNCELING"],
+
+    # ── Splits the GT reviewer asked for (2026-10-13) ────────────────────────
+    # Each of these was being merged into another class, so category scoring
+    # could not tell the two apart. Blast radius measured per class before
+    # shipping (266 distinct production labels, verify54 + verify52).
+    # Kept merged by the same reviewer: lounge with CAFETERIA, vault with
+    # STORAGE ROOM.
+    "KITCHEN": ["KITCHEN", "KITCHENETTE"],
+    "CLOSET": ["CLOSET"],
+    # Only the unambiguous mechanical labels move. The mixed ones
+    # ("ELECTRICAL/MECHANICAL ROOM", "MECHANICAL/ELECTRICAL ROOM", "HVAC ROOM",
+    # "BUILDING SYSTEMS") stay with ELECTRICAL ROOM -- the reviewer separated
+    # mechanical from electrical, not the combined rooms.
+    "MECHANICAL ROOM": ["MECHANICAL ROOM", "MECHANICAL", "MECH ROOM"],
+    "LIBRARY": ["LIBRARY"],
+    "VESTIBULE": ["VESTIBULE", "ENTRANCE VESTIBULE"],
 
     # ── Other (kept, detected, but no dedicated class) ───────────────────────
     # Real spaces that must be DETECTED (not dropped) but do not fit any
@@ -436,7 +500,7 @@ VLM_CATEGORY_MAP: Dict[str, str] = {
 
     # Food Service
     "kitchen_break_room": "CAFETERIA",
-    "kitchen": "CAFETERIA",
+    "kitchen": "KITCHEN",
     "break_room": "CAFETERIA",
     "dining_room": "RESTAURANT",
     "cafeteria": "CAFETERIA",
@@ -451,7 +515,7 @@ VLM_CATEGORY_MAP: Dict[str, str] = {
     "storage_room": "STORAGE ROOM",
     # CLOSET is not storage — folded into JANITOR CLOSET, which already
     # holds the closest existing synonyms (CUSTODIAL CLOSET, CLEANING CLOSET).
-    "closet": "JANITOR CLOSET",
+    "closet": "CLOSET",
 
     # Janitor
     "janitor": "JANITOR CLOSET",

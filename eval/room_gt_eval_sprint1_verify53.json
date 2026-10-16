@@ -1,0 +1,74 @@
+{
+  "run_dir": "/home/ubuntu/floorplan_classifier/VLM/sprint1_verify53",
+  "gt_coco_path": "/home/ubuntu/floorplan_classifier/VLM/gt_segmentation/result.json",
+  "pages_scored": 48,
+  "gt_pages_missing_from_run": [],
+  "detections_scored": 2190,
+  "iou_threshold": 0.5,
+  "localization": {
+    "predictions": 953,
+    "predictions_center_in_gt": 888,
+    "predictions_iou_match": 0,
+    "gt_rooms": 1497,
+    "gt_rooms_located": 797,
+    "gt_rooms_iou_matched": 0,
+    "prediction_best_iou_sum": 38.195027042909366,
+    "gt_best_iou_sum": 39.5014974399627,
+    "label_precision": 0.9317943336831059,
+    "label_recall": 0.5323981295925184,
+    "label_f1": 0.6776234311546349,
+    "label_fdr": 0.06820566631689406,
+    "label_fnr": 0.4676018704074816,
+    "extent_precision": 0.0,
+    "extent_recall": 0.0,
+    "extent_f1": 0.0,
+    "mean_iou_per_prediction": 0.0400787272223603,
+    "mean_iou_per_gt_room": 0.026387105838318436
+  },
+  "attachment": {
+    "intersection": {
+      "correct": 59,
+      "wrong": 26,
+      "attachable": 1578,
+      "correctly_attached": 59,
+      "precision": 0.6941176470588235,
+      "recall_of_attachable": 0.037389100126742715,
+      "f1": 0.07095610342754059,
+      "fdr": 0.3058823529411765,
+      "fnr": 0.9626108998732573
+    },
+    "nearest_with_cutoff_p50_288px": {
+      "correct": 966,
+      "wrong": 663,
+      "attachable": 1578,
+      "correctly_attached": 966,
+      "precision": 0.5930018416206262,
+      "recall_of_attachable": 0.6121673003802282,
+      "f1": 0.6024321796071095,
+      "fdr": 0.4069981583793738,
+      "fnr": 0.38783269961977185
+    },
+    "nearest_with_cutoff_p75_701px": {
+      "correct": 1096,
+      "wrong": 1002,
+      "attachable": 1578,
+      "correctly_attached": 1096,
+      "precision": 0.5224022878932316,
+      "recall_of_attachable": 0.6945500633713562,
+      "f1": 0.5963003264417845,
+      "fdr": 0.4775977121067684,
+      "fnr": 0.30544993662864384
+    },
+    "nearest_with_cutoff_p90_1293px": {
+      "correct": 1100,
+      "wrong": 1058,
+      "attachable": 1578,
+      "correctly_attached": 1100,
+      "precision": 0.5097312326227988,
+      "recall_of_attachable": 0.697084917617237,
+      "f1": 0.588865096359743,
+      "fdr": 0.49026876737720115,
+      "fnr": 0.302915082382763
+    }
+  }
+}

@@ -1744,6 +1744,33 @@ class UnslothQwenBackend(VLMBackend):
             }
         return {"page_type": page_type, "rationale": str(data.get("rationale", ""))}
 
+    def read_crop_text(self, image: Any) -> str:
+        """Transcribe the text label at the centre of an RGB crop.
+
+        Used by ingestion/crop_reread.py for a second look at an OCR text
+        fragment. Returns "" on any failure (generation error, no
+        legible text, unparseable response) rather than raising, matching
+        this class's other detect_* methods."""
+        self.initialize()
+        prompt = prompt_templates.build_crop_text_prompt_unsloth()
+        try:
+            text = self._generate_for_image(
+                image, prompt, self.config.crop_text_max_new_tokens
+            )
+        except Exception as e:
+            logger.warning(f"read_crop_text: generation failed: {e}")
+            return ""
+        return self._parse_crop_text_response(text)
+
+    @staticmethod
+    def _parse_crop_text_response(response_text: str) -> str:
+        """First string of the response's JSON array, stripped; "" when
+        the array is missing, empty or does not start with a string."""
+        parsed = _extract_json_array(response_text)
+        if not parsed or not isinstance(parsed[0], str):
+            return ""
+        return parsed[0].strip()
+
     def _open_image_rgb(self, image_path: Union[str, Path]) -> Optional[Any]:
         """Initialize the model and open the image as RGB; None on failure."""
         try:

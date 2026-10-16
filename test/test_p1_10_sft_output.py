@@ -169,7 +169,8 @@ def test_taxonomy_normalization():
         ("HALLWAY", "CORRIDOR"),
         ("OFFICE", "PRIVATE OFFICE"),
         ("OFFICE ROOM", "PRIVATE OFFICE"),
-        ("KITCHEN", "CAFETERIA"),
+        # KITCHEN split out of CAFETERIA 2026-10-13 (reviewer: they are different)
+        ("KITCHEN", "KITCHEN"),
         ("CAFETERIA", "CAFETERIA"),
         ("DINING ROOM", "RESTAURANT"),
         ("BATHROOM", "RESTROOM"),
