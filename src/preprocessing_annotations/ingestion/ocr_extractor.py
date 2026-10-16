@@ -137,10 +137,29 @@ _ELECTRICAL_SCHEDULE_FIELD_PATTERN = re.compile(
 )
 
 
+# Column headers of a lighting/fixture legend. Measured on
+# sprint1_verify55 "Lesisure Town Clubhouse Lighting_page005": that sheet's
+# left strip is a legend whose header row reads MARK / VOLT / MOUNT /
+# WALL-CEILING, and whose rows then read 120 / SURFACE / HANGING / FAN. Its
+# row labels survived as rooms ("BREAK ROOM" 155x116 at x=193, "STAIR 2"
+# 140x85, "BD") because the only already-excluded token there was LEGEND --
+# one token, under compute_exclusion_zones' 3-token cluster minimum, so no
+# zone formed and all 5 zones on that page sat at x >= 1304.
+#
+# Scoped to header words rather than row contents on purpose: a zone still
+# needs min_cluster_tokens of these clustered together, so a stray MOUNT or
+# VOLT elsewhere in a drawing cannot create one on its own.
+_LEGEND_HEADER_PATTERN = re.compile(
+    r"^(MARK|VOLT|MOUNT|WALL\s*[/\-]\s*CEILING)$",
+    re.IGNORECASE,
+)
+
+
 def _is_excluded_token(text: str) -> bool:
     """Return True if the raw OCR text should never become a room candidate."""
     return bool(
-        _PANEL_PATTERN.match(text)
+        _LEGEND_HEADER_PATTERN.match(text.strip())
+        or _PANEL_PATTERN.match(text)
         or _EQUIPMENT_ONLY_PATTERN.match(text)
         or _INSTRUCTION_PATTERN.search(text)
         or _DOCUMENTATION_PATTERN.search(text)

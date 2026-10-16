@@ -1708,6 +1708,7 @@ def prepare_sft_annotation(
         n_shape_excl = pre_shape - len(object_detections)
         if n_shape_excl:
             drop_attribution["window_shape_mismatch"] = n_shape_excl
+
             logger.info(
                 f"FIX-9b: dropped {n_shape_excl} objectDetection(s) tagged "
                 f"window with a non-elongated (door-like) bbox"
