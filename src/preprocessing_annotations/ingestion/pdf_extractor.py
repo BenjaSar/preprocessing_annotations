@@ -26,6 +26,15 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+# Page images are written as ``{pdf_stem}_page{N:03d}`` (extract_to_directory).
+_PAGE_STEM = re.compile(r"^(?P<pdf_stem>.+)_page(?P<index>\d+)$")
+
+
+def page_source(stem: str) -> Optional[Tuple[str, int]]:
+    """(pdf stem, page index) encoded in a page image's stem, or None."""
+    match = _PAGE_STEM.match(stem)
+    return (match["pdf_stem"], int(match["index"])) if match else None
+
 
 class PDFExtractionError(Exception):
     """Raised when PDF extraction fails."""

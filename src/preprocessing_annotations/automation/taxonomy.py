@@ -282,6 +282,17 @@ MANDATORY_CLASSES: Dict[str, List[str]] = {
     "LIBRARY": ["LIBRARY"],
     "VESTIBULE": ["VESTIBULE", "ENTRANCE VESTIBULE"],
 
+    # ── Class assigned by the project owner (2026-10-17) ────────────────────
+    # "Utility room resolves to equipment room." Before this, UTILITY /
+    # UTILITY ROOM / UTIL sat in EXTENDED_TYPES["laundry"], which maps to
+    # RESIDENTIAL UNIT -- a utility room is not a dwelling unit -- and a bare
+    # "EQUIPMENT ROOM" label fell through to the STORAGE ROOM fallback.
+    # The utility variants are MOVED here, not copied, so each label has one
+    # declaration (same as the KITCHEN / VESTIBULE splits above).
+    # "UTIL" as in "UTIL 301" (220301_Elect_plans_05, R3 2026-09-14);
+    # sft_validator.py's keyword gate admits "UTIL" and "UTILITY" already.
+    "EQUIPMENT ROOM": ["EQUIPMENT ROOM", "UTILITY ROOM", "UTILITY", "UTIL"],
+
     # ── Other (kept, detected, but no dedicated class) ───────────────────────
     # Real spaces that must be DETECTED (not dropped) but do not fit any
     # specific mandatory class — per taxonomy decision: CUSTODIAL, LOCKER rooms.
@@ -406,12 +417,9 @@ EXTENDED_TYPES: Dict[str, List[str]] = {
         "LR", "LV", "LVG",
         "LIVING RM", "LIV ROOM",
     ],
-    "laundry": [
-        "LAUNDRY", "LAUNDRY ROOM", "UTILITY ROOM", "UTILITY",
-        # R3 (2026-09-14): "UTIL 301" style abbreviation (220301_Elect_plans_05);
-        # sft_validator.py's keyword gate admits "UTIL" in parallel.
-        "UTIL",
-    ],
+    # UTILITY / UTILITY ROOM / UTIL moved to the EQUIPMENT ROOM mandatory
+    # class (2026-10-17, project owner's decision).
+    "laundry": ["LAUNDRY", "LAUNDRY ROOM"],
     "garage": [
         "GARAGE",
     ],

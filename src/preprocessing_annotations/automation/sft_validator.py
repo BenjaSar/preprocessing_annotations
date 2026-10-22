@@ -13,6 +13,8 @@ from PIL import Image
 import io
 import logging
 
+from .duplicate_boxes import split_redundant_room_extents
+
 import cv2
 import numpy as np
 
@@ -2118,6 +2120,20 @@ def prepare_sft_annotation(
             room["type"] = normalized
             room["category"] = normalized  # Sync category field for COCO exporter
             logger.debug(f"Normalized '{room_name}' → {normalized}")
+
+    # One room, two boxes: see automation/duplicate_boxes.py. Runs HERE, not
+    # earlier in the chain: the rule pairs a room-extent box with a label box
+    # of the same room type, and a room only has its type once the loop above
+    # has normalised it (measured: placed before this, it silently missed
+    # duplicates whose rooms were not yet typed).
+    if _rf.drop_redundant_room_extent_boxes:
+        rooms, redundant = split_redundant_room_extents(rooms)
+        if redundant:
+            drop_attribution["redundant_room_extent_box"] = len(redundant)
+            drop_detail["redundant_room_extent_box"] = [_room_desc(r) for r in redundant]
+            logger.info(
+                f"dropped {len(redundant)} room-extent box(es) already holding a label box"
+            )
 
     # Step 4: SFT validation
     pre_sft = len(rooms)

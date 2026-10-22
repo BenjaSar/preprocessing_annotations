@@ -1762,6 +1762,36 @@ class UnslothQwenBackend(VLMBackend):
             return ""
         return self._parse_crop_text_response(text)
 
+    def locate_room_label(self, image: Any, room_name: str) -> Optional[List[int]]:
+        """Where `room_name` is printed inside an RGB crop: [x1, y1, x2, y2]
+        in crop pixels, or None.
+
+        Used by ingestion/label_anchor.py to express a wall-to-wall room box
+        in the label convention. Returns None on any failure rather than
+        raising, matching this class's other detect_* methods."""
+        self.initialize()
+        prompt = prompt_templates.build_room_label_box_prompt_unsloth(room_name)
+        try:
+            text = self._generate_for_image(
+                image, prompt, self.config.room_label_box_max_new_tokens
+            )
+        except Exception as e:
+            logger.warning(f"locate_room_label: generation failed: {e}")
+            return None
+        return self._parse_room_label_box_response(text)
+
+    @staticmethod
+    def _parse_room_label_box_response(response_text: str) -> Optional[List[int]]:
+        """The response's JSON array as four ints, or None when it is missing,
+        empty, the wrong length or not numeric."""
+        parsed = _extract_json_array(response_text)
+        if not parsed or len(parsed) != 4:
+            return None
+        try:
+            return [int(round(float(v))) for v in parsed]
+        except (TypeError, ValueError):
+            return None
+
     @staticmethod
     def _parse_crop_text_response(response_text: str) -> str:
         """First string of the response's JSON array, stripped; "" when

@@ -152,6 +152,18 @@ def extractor_with_patterns(
     unknown = [p for p in variant.removed if p not in base]
     if unknown:
         raise ValueError(f"cannot remove patterns not in OCRConfig.room_name_patterns: {unknown}")
+    # Symmetric with the check above. Adding a pattern the code already has
+    # leaves the variant identical to the baseline, so the report shows "no
+    # change" for a pattern that was never actually tested -- which is how a
+    # working UNIT TYPE pattern was once measured as inert and reverted
+    # (2026-10-16). To measure a pattern already in code, use --without on
+    # it, or --run-lacks when the run predates it.
+    present = [p for p in variant.added if p in base]
+    if present:
+        raise ValueError(
+            f"cannot add patterns already in OCRConfig.room_name_patterns: {present} "
+            f"-- the variant would equal the baseline"
+        )
     patterns = [p for p in base if p not in variant.removed] + list(variant.added)
     return MEPTextExtractor(dataclasses.replace(pipeline_config.ocr, room_name_patterns=patterns))
 

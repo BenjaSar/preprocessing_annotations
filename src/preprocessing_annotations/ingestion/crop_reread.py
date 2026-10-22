@@ -16,13 +16,15 @@ MEPTextExtractor.find_room_candidates.
 import dataclasses
 import re
 from difflib import SequenceMatcher
-from typing import Any, Callable, Iterable, List, Sequence, Tuple
+from typing import Any, Callable, Iterable, List, Optional, Sequence, Tuple
 
 from ..config import CropRereadConfig
 from ..vlm.read import CropTextReader
 from .ocr_extractor import TextDetection
 
 PixelBox = Tuple[int, int, int, int]
+# (x, y, width, height), the RoomCandidate.bbox convention.
+LabelBox = Tuple[float, float, float, float]
 
 
 @dataclasses.dataclass(frozen=True)
@@ -47,19 +49,37 @@ def _similarity(a: str, b: str) -> float:
     return SequenceMatcher(None, a, b).ratio()
 
 
+def _centre(quad: Sequence[Sequence[float]]) -> Tuple[float, float]:
+    return (
+        sum(p[0] for p in quad) / len(quad),
+        sum(p[1] for p in quad) / len(quad),
+    )
+
+
+def _inside(point: Tuple[float, float], box: LabelBox) -> bool:
+    x, y, width, height = box
+    return x <= point[0] <= x + width and y <= point[1] <= y + height
+
+
 class RereadSelector:
     """Picks detections whose text is not a room label on its own but is a
-    room keyword's substring or close to one."""
+    room keyword's substring or close to one.
+
+    `label_boxes`, when given, returns the room labels the page's OCR text
+    already forms (merged across tokens); detections centred inside one are
+    never picked, so a re-read cannot break a label the merge already built."""
 
     def __init__(
         self,
         is_room_label: Callable[[str], bool],
         keywords: Iterable[str],
         config: CropRereadConfig,
+        label_boxes: Optional[Callable[[Sequence[TextDetection]], Sequence[LabelBox]]] = None,
     ):
         self._is_room_label = is_room_label
         self._keywords = sorted(keywords)
         self._config = config
+        self._label_boxes = label_boxes
 
     def selects(self, text: str) -> bool:
         words = _words(text)
@@ -73,7 +93,11 @@ class RereadSelector:
         )
 
     def select(self, detections: Sequence[TextDetection]) -> List[int]:
-        return [i for i, d in enumerate(detections) if self.selects(d.text)]
+        labels = self._label_boxes(detections) if self._label_boxes is not None else ()
+        return [
+            i for i, d in enumerate(detections)
+            if self.selects(d.text) and not any(_inside(_centre(d.bbox), b) for b in labels)
+        ]
 
 
 def crop_box(

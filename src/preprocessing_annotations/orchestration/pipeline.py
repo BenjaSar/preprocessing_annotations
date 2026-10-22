@@ -13,19 +13,22 @@ import logging
 import os
 import sys
 import time
+from collections import Counter
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 
 from ..config import PipelineConfig
-from ..ingestion.pdf_extractor import PDFExtractor, PageTypeClassifier
+from ..ingestion.pdf_extractor import PDFExtractor, PageTypeClassifier, page_source
 from ..ingestion.ocr_extractor import MEPTextExtractor, RoomCandidate, TextDetection
 from ..ingestion.two_pass_ocr_extractor import TwoPassOCRExtractor
 from ..ingestion.crop_reread import Reread
 from ..vlm.read import UnslothCropTextReader
 from .crop_reread_step import CropRereadStep
+from ..ingestion.vector_walls import VectorWallError, VectorWallReader
+from .room_extent_step import RoomExtentStep
 from ..vlm.vlm_annotator import VLMAnnotator
 from ..vlm.semantic_reconciler import SemanticReconciler
 from ..vlm.vlm_backend import VLMFactory, UnslothQwenBackend
@@ -183,11 +186,10 @@ class AnnotationPipeline:
         if img_path is None or self._input_path is None:
             return None
         try:
-            import re
-            stem = img_path.stem  # e.g. "326 ROCKAWAY - AVI-ON LAYOUT_page001"
-            pdf_stem = re.sub(r"_page\d+$", "", stem)
-            if not pdf_stem or pdf_stem == stem:
+            source = page_source(img_path.stem)  # e.g. "326 ROCKAWAY - AVI-ON LAYOUT_page001"
+            if source is None:
                 return None  # Not a page-extracted image
+            pdf_stem = source[0]
 
             # Look for the PDF in the input path (file or directory)
             candidate = (
@@ -232,17 +234,18 @@ class AnnotationPipeline:
         if not self.config.use_pdf_text_layer:
             return None
 
-        pdf_path = self._source_pdf_for(img_path)
+        source = self._source_page_for(img_path)
+        if source is None:
+            return None
+        return self.pdf_extractor.extract_text_layer(*source) or None
+
+    def _source_page_for(self, path: Path) -> Optional[Tuple[Path, int]]:
+        """(source PDF, page index) of a page image or its annotation file
+        (only the ``{pdf_stem}_page{N:03d}`` stem is used), or None."""
+        pdf_path = self._source_pdf_for(path)
         if pdf_path is None:
             return None
-
-        import re
-        match = re.search(r"_page(\d+)$", img_path.stem)
-        if not match:
-            return None
-        page_index = int(match.group(1))
-
-        return self.pdf_extractor.extract_text_layer(pdf_path, page_index) or None
+        return pdf_path, page_source(path.stem)[1]
 
     @property
     def ocr_extractor(self) -> TwoPassOCRExtractor:
@@ -1078,6 +1081,9 @@ class AnnotationPipeline:
             "issue_details": [],
         }
 
+        room_extent_step = self._room_extent_step()
+        room_extent_counts: Counter = Counter()
+
         for ann_path in sorted(annotations_dir.glob("*.json")):
             try:
                 with open(ann_path) as f:
@@ -1273,6 +1279,10 @@ class AnnotationPipeline:
                     new_rr, new_mappings, **self._confidence_weight_kwargs()
                 )
                 annotation["roomsRecognized"] = new_rr
+                if room_extent_step is not None:
+                    self._attach_room_extents(
+                        room_extent_step, ann_path, annotation, room_extent_counts
+                    )
 
                 if not is_sft_ready and room_count == 0 and localization_failed:
                     # FIX-B: rooms WERE detected but all mislocalized (boxes over
@@ -1351,6 +1361,10 @@ class AnnotationPipeline:
             f"  Total issues found: {quality_summary['total_issues']}\n"
             f"  Room regions extracted: {quality_summary['regions_extracted']}"
         )
+
+        if room_extent_step is not None:
+            quality_summary["room_extent"] = dict(room_extent_counts)
+            logger.info(f"  Room extents: {dict(room_extent_counts)}")
 
         # Save post-processing summary
         summary_path = output_dir / "post_processing_summary.json"
@@ -1571,6 +1585,33 @@ class AnnotationPipeline:
             UnslothCropTextReader(self.vlm_annotator),
             self.config.crop_reread,
         )
+
+    def _room_extent_step(self) -> Optional[RoomExtentStep]:
+        """The vector-wall extent step, or None when use_vector_room_extent is off."""
+        if not self.config.use_vector_room_extent:
+            return None
+        logger.info("  Room extents from PDF vector walls: active (%s)", asdict(self.config.room_extent))
+        return RoomExtentStep(VectorWallReader(self.config.room_extent))
+
+    def _attach_room_extents(
+        self, step: RoomExtentStep, ann_path: Path, annotation: Dict[str, Any], counts: Counter,
+    ) -> None:
+        """Add coordinates.extent to this page's roomsRecognized; tally the outcome."""
+        source = self._source_page_for(ann_path)
+        if source is None:
+            counts["pages_without_source_pdf"] += 1
+            return
+        size = annotation["image_size"]
+        try:
+            attached = step.attach(
+                annotation["roomsRecognized"], *source, (size["width"], size["height"])
+            )
+        except VectorWallError as error:
+            logger.warning(f"    {ann_path.name}: no room extents -- {error}")
+            counts["pages_unreadable"] += 1
+            return
+        counts["rooms_with_extent"] += attached
+        counts["pages_with_extent"] += attached > 0
 
     def _assemble_ocr_candidates(
         self,
@@ -2629,6 +2670,7 @@ class AnnotationPipeline:
                 "preprocess": self.config.ocr.preprocess,
                 "room_name_patterns": list(self.config.ocr.room_name_patterns),
                 "room_number_pattern": self.config.ocr.room_number_pattern,
+                "room_name_placeholder_pattern": self.config.ocr.room_name_placeholder_pattern,
             },
             "vlm": {
                 "backend": self.config.vlm.backend,
@@ -2669,6 +2711,7 @@ class AnnotationPipeline:
                 "crop_reread_active": self._crop_reread_skipped is None,
                 "crop_reread_skip_reason": self._crop_reread_skipped,
                 "use_pdf_text_layer": self.config.use_pdf_text_layer,
+                "use_vector_room_extent": self.config.use_vector_room_extent,
                 "use_window_elongation_filter": self.config.use_window_elongation_filter,
                 "exempt_sam_expanded_from_ink_filter": self.config.exempt_sam_expanded_from_ink_filter,
                 "block_single_letter_abbreviations": self.config.block_single_letter_abbreviations,
@@ -2683,6 +2726,7 @@ class AnnotationPipeline:
             },
             "room_filter": asdict(self.config.room_filter),
             "crop_reread": asdict(self.config.crop_reread),
+            "room_extent": asdict(self.config.room_extent),
             "attachment": asdict(self.config.attachment),
             "confidence_weights": {
                 "detection": self.config.confidence_weights.detection,
@@ -3089,10 +3133,17 @@ Examples:
              "wherever the run has an unsloth VLM backend; this turns it off.",
     )
     parser.add_argument(
-        "--no-ocr-vlm-fallback",
+        "--use-vector-room-extent",
         action="store_true",
-        help="Skip two-pass OCR's Pass 2 (VLM fallback for low-confidence "
-             "Pass-1 candidates). Default: Pass 2 runs where it triggers.",
+        help="Pilot: add coordinates.extent (room outline from the PDF's own "
+             "vector wall layers, RoomExtentConfig) beside each room's label box.",
+    )
+    parser.add_argument(
+        "--ocr-vlm-fallback",
+        action="store_true",
+        help="Run two-pass OCR's Pass 2 (VLM fallback for low-confidence "
+             "Pass-1 candidates). Off by default: its boxes are not in page "
+             "coordinates -- see PipelineConfig.use_ocr_vlm_fallback.",
     )
     parser.add_argument(
         "--use-page-type",
@@ -3171,8 +3222,9 @@ Examples:
     config.use_yolo_objects = args.use_yolo_objects
     config.use_sam3_exemplar = args.use_sam3_exemplar
     config.use_page_type = args.use_page_type
-    config.use_ocr_vlm_fallback = not args.no_ocr_vlm_fallback
+    config.use_ocr_vlm_fallback = args.ocr_vlm_fallback
     config.use_crop_reread = not args.no_crop_reread
+    config.use_vector_room_extent = args.use_vector_room_extent
     _warn_if_sam3_exemplar_orphaned(config)
     _warn_if_yolo_objects_ocr_only(config)
     if args.corroboration_weight is not None:

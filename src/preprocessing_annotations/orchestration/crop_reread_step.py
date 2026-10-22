@@ -44,10 +44,21 @@ def reread_selector(
 ) -> RereadSelector:
     """Room labels per `extractor`'s patterns; room keywords = the semantic
     filter's vocabulary, so a fragment is judged against the same words the
-    filter later accepts."""
+    filter later accepts. With skip_tokens_in_room_labels, labels the
+    extractor already merges from several tokens are left alone."""
     return RereadSelector(
-        extractor.matches_room_label, SemanticRoomValidator.VALID_ROOM_KEYWORDS, config
+        extractor.matches_room_label,
+        SemanticRoomValidator.VALID_ROOM_KEYWORDS,
+        config,
+        _room_name_boxes(extractor) if config.skip_tokens_in_room_labels else None,
     )
+
+
+def _room_name_boxes(extractor: MEPTextExtractor):
+    """Boxes of the room-name candidates `extractor` builds from detections."""
+    def boxes(detections: Sequence[TextDetection]) -> List[Tuple[float, float, float, float]]:
+        return [c.bbox for c in extractor.find_room_candidates(list(detections)) if c.room_name]
+    return boxes
 
 
 def _page_in_ocr_space(image_path, size_of_record: Optional[Tuple[int, int]] = None):

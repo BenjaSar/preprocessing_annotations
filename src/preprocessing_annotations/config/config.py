@@ -178,6 +178,19 @@ class OCRConfig:
     # Room number pattern (regex)
     room_number_pattern: str = r"^(\d{3}[A-Z]?|\d{2,3})$"
 
+    # Placeholder marks a drawing prints around a room name it has not fixed
+    # yet, e.g. "??? CLASSROOM ???" / "???STORAGE???" (BP-1 Lake Shore High
+    # School Electrical, viewed at 3x: the sheet itself prints them, and OCR
+    # reads them at .90-1.0 confidence). room_name_patterns are anchored, so
+    # the name only matches once these are removed. Removed for room-candidate
+    # matching only -- the persisted OCR text keeps what the sheet says.
+    # Measured (sprint1_verify56 replay, 48 room-GT pages): GT rooms located
+    # 853 -> 854, precision .9350 unchanged, no document loses recall; the 6
+    # texts carrying these marks are all in that one document, and
+    # sprint1_verify55's 136 corpus_batch2 pages have none, so nothing else
+    # changes.
+    room_name_placeholder_pattern: str = r"\?+"
+
     # Room name patterns to detect
     # Room name patterns to detect.
     # CRITICAL: All patterns must be anchored (^...$) so they match the
@@ -295,6 +308,24 @@ class OCRConfig:
             # or compound label.  The [O0] group handles the common PaddleOCR
             # confusion between digit-zero and letter-O in "0BR" / "OBR".
             r"^TYPE-[A-Z]\d+(\.\d+)?(\s+[O0-4]BR)?$",
+            # F2 (2026-10-16): the "UNIT TYPE" spelling of the same code --
+            # the pattern above covers "TYPE-A1" but not "UNIT TYPE-A". OCR
+            # read these on sprint1_verify55 "1614 W. Temple - Plans - CD Set
+            # Electrical" and the semantic filter accepts them (-> RESIDENTIAL
+            # UNIT); candidate generation was the only block.
+            #
+            # Clean spellings only. Those sheets also carry OCR mangles (UNE /
+            # UNF / UNEE / UNFE TYPE, UNITTYPE-D2); regexing them would be
+            # fuzzy matching in a pattern list, the failure mode the
+            # single-letter abbreviation gate exists to stop. Mangles are crop
+            # re-read's job.
+            #
+            # Measured with the code LACKING this pattern (an earlier run with
+            # it already in config compared it against itself and wrongly read
+            # 0 change): verify54 (room GT) identical 976 / 821 / P .9334 /
+            # R .5484, 0 pages changed -- 0 occurrences there, so GT cannot
+            # move. verify55: +12 final rooms on 4 pages, 0 lost.
+            r"^UNIT\s+TYPE(\s*-\s*[A-Z]?\d*(\.\d+)?)?$",
             # --- Residential abbreviations (full-token only) ---
             r"^(BR|BD|BDRM|MBR|MSTR)\s*\d?$",    # bedroom
             r"^([O0]BR|1BR|2BR|3BR|4BR)$",         # unit type (O/0 tolerant)
@@ -502,6 +533,10 @@ class VLMConfig:
     # Crop re-read (ingestion/crop_reread.py) budget: a JSON array holding
     # one short label string, smaller than the page-type object above.
     crop_text_max_new_tokens: int = 64
+
+    # Label anchoring (ingestion/label_anchor.py) budget: a JSON array of four
+    # integers, shorter still than the crop-text string above.
+    room_label_box_max_new_tokens: int = 32
 
     # Room token budget for Thinking-variant Unsloth checkpoints only.
     # Verified 2026-07-24 (t7_stochastic run, qwen3-vl-8b-thinking): the
@@ -767,12 +802,79 @@ class CropRereadConfig:
     crop_padding_box_heights: crop margin around the detection, in multiples
       of its box height, so a truncated word's missing glyphs are in view.
       An experiment parameter, not a tuned value.
+    skip_tokens_in_room_labels: do not re-read a fragment whose centre lies
+      inside a room-name candidate the OCR text already forms. Root cause it
+      fixes (2026-10-19, verify54): "SPECIAL" / "EDUCATION" stacked on two
+      lines are merged into one room label by find_room_candidates, but each
+      line was re-read with the other in view ("SPECIAL EDUCATION -",
+      "SPECIAL EDUCATION - 128"), so the merge no longer formed the label --
+      2 special_education GT rooms lost, the in-sample recall drop in
+      bp_1_kennedy_middle_school_electrical_pages. Measured by replaying the
+      verify54 probe (116 of 677 re-reads skipped): located 857 -> 853,
+      precision .9342 -> .9350, documents losing recall vs no re-read
+      [kennedy] -> none; leave-one-document-out still picks re-reading
+      over no re-read in 10/10 folds.
     """
 
     min_text_letters: int = 3
     keyword_similarity_min: float = 0.8
     consistency_min: float = 0.7
     crop_padding_box_heights: float = 1.0
+    skip_tokens_in_room_labels: bool = True
+
+
+@dataclass
+class RoomLabelAnchorConfig:
+    """ingestion/label_anchor.py: a room-extent box re-expressed as the box of
+    the room's printed name, so one room list carries one box convention.
+
+    Gap it probes: `vlm_only` rooms carry wall-to-wall boxes while every other
+    room carries a label box (annotation_schema.box_convention_of). Deleting
+    the wall-to-wall ones was measured and rejected on 2026-10-21 (it removes
+    116 of sprint1_verify55's 533 corpus_batch2 rooms, 110 with no other room
+    in the same place), so the open route is to narrow them instead.
+
+    crop_padding_frac: how far outside the room's own box to crop, as a
+      fraction of its longest side, so a name printed just over the box edge
+      is still in view. An experiment parameter, not a tuned value -- this
+      config exists for eval/room_label_anchor_probe.py and nothing in the
+      pipeline reads it yet.
+    """
+
+    crop_padding_frac: float = 0.1
+
+
+@dataclass
+class RoomExtentConfig:
+    """ingestion/vector_walls.py: full-room extents from a PDF's own vector
+    wall geometry, a second output beside the label box.
+
+    Gap: no room box in this project reaches IoU >= .5 with its GT room
+    (verify54, 48 GT pages) -- room boxes are label-scale, and every raster
+    technique tried failed against GT (wall bands, SAM, CubiCasa).
+
+    CAD-exported PDFs keep walls, doors and glazing on named drawing layers.
+    Segments on layers matching `layer_pattern` and not `excluded_layer_pattern`
+    are polygonized into faces; a room takes the smallest face containing its
+    label centre, and only when no other label of the page lands in that face
+    (a shared face = rooms merged through an unclosed opening).
+
+    Measured 2026-10-20 with this code (eval/room_extent_eval.py on
+    sprint1_verify54's final rooms, report room_extent_eval_sprint1_verify54.json):
+    283 of 954 rooms on 30 of 50 pages get an extent; on the 48 GT pages
+    280 extents, 253 reach box IoU >= .5 with a GT room (extent recall
+    253/1497 vs 0 for label boxes), 251 polygon IoU >= .5. Keep the label
+    box as the room's location: swapping in the extent box would move 12
+    rooms' centres out of their GT room (796 -> 784 located). Pages with any
+    matching layer: test_input 32/58, corpus_batch2 38/150 (+3 pages PyMuPDF
+    cannot read), track2 7/16. Both patterns were chosen on the GT corpus
+    itself (in-sample): walls only located 516 GT rooms by the best face per
+    room, adding DOOR|GLAZ raised that to 721. "FLAT" and scanned PDFs carry
+    no layers and get no extent.
+    """
+
+    layer_pattern: str = r"WALL|PART|DOOR|GLAZ"
+    excluded_layer_pattern: str = r"PATT|HTCH|ABOVE"
 
 
 @dataclass
@@ -1868,6 +1970,27 @@ class RoomFilterConfig:
     # covers at least this fraction of the image. 0.0 drops every vlm_only room.
     vlm_uncorroborated_area_frac: float = 0.0167
 
+    # automation/duplicate_boxes.py: drop a room-extent (vlm_only) box when a
+    # label box of the same room type sits inside it -- one room reported
+    # twice, once wall-to-wall and once around its label. Only the redundant
+    # big box goes; a room-extent box that is the sole record of its room is
+    # kept, which is why this is not the same as
+    # vlm_uncorroborated_area_frac=0 (that one drops every vlm_only room and
+    # was rejected 2026-10-21: on sprint1_verify55's 136 corpus_batch2 pages
+    # it deletes 116 rooms, 110 of them with no other room in the same place).
+    #
+    # Default True since 2026-10-21. Measured by replay (rule on vs off):
+    #   sprint1_verify57 / test_input, 48 room-GT pages: 1024 -> 1018 rooms,
+    #   GT rooms located 854 both ways, precision .9350 -> .9346, no document
+    #   loses recall, room-extent boxes 32 -> 26. The precision dip is the
+    #   metric counting a duplicate box as its own correct prediction.
+    #   sprint1_verify55 / corpus_batch2, 136 pages: 533 -> 526 rooms, 7
+    #   removed and 0 gained; every removal viewed at >=2x with both boxes
+    #   drawn, 6 of the 7 visibly holding the label box that replaces them
+    #   (UNIT TYPE - A1, Corridor 102, Conference 103, MANAGER'S OFFICE 120,
+    #   BR 203, a mechanical-room CORRIDOR pair).
+    drop_redundant_room_extent_boxes: bool = True
+
     # Two-pass OCR's VLM fallback turns VLM-detected rooms into OCR candidates
     # carrying the VLM's own box and self-reported confidence. Such a candidate
     # duplicates its VLM room rather than corroborating it, and let invented
@@ -1985,11 +2108,27 @@ class PipelineConfig:
     # confidence) on pages where it triggers. sprint1_verify54 (replay from
     # saved raw OCR): Pass 2 replaced none of the 1187 Pass-1 candidates; it
     # added 36 VLM-box echoes and 281 candidates whose boxes do not match
-    # their same-name VLM rooms. Pass-1-only replay: located 796 -> 795,
-    # precision .9317 -> .9335. Default True = unchanged behavior pending that
-    # trade-off decision. False skips Pass 2 only; OCR device selection is
-    # unchanged (it depends on the VLM backend being present).
-    use_ocr_vlm_fallback: bool = True
+    # their same-name VLM rooms.
+    #
+    # Default False since 2026-10-20. Its candidates' boxes are not in the
+    # page's coordinate space, so a surviving one is a room drawn in the
+    # wrong place. Measured by replaying each run's own saved OCR with
+    # Pass-1 candidates (crop re-reads applied) plus abbreviation recovery:
+    #   sprint1_verify56 / test_input, 48 room-GT pages: 1015 -> 1013 final
+    #   rooms, GT rooms located 853 both ways, precision .9350 -> .9348 (the
+    #   2 boxes it loses were duplicates of rooms another box already
+    #   located), no document loses recall.
+    #   sprint1_verify55 / corpus_batch2, 136 pages without GT: 566 -> 533
+    #   rooms = 50 removed, 17 gained (a Pass-2 box had displaced them).
+    #   All 50 removed were viewed at >=2x with the box drawn: every one sits
+    #   on blank paper, a schedule/legend table, general notes, a title block
+    #   or a company logo, and none encloses its own room name. Of the 17
+    #   gained, 12 are "UNIT TYPE - x" labels inside real apartments and 3
+    #   more are real rooms; 2 are questionable (a grid bubble, a box next to
+    #   "RESIDENTIAL STORAGE").
+    # True restores Pass 2 (--ocr-vlm-fallback). Either way OCR device
+    # selection is unchanged: it depends on the VLM backend being present.
+    use_ocr_vlm_fallback: bool = False
 
     # C2 (2026-10-15): crop re-read -- a VLM second look at OCR fragments
     # that are not room labels but look like room keywords ("TAIR",
@@ -2030,6 +2169,12 @@ class PipelineConfig:
     use_crop_reread: bool = True
 
     crop_reread: CropRereadConfig = field(default_factory=CropRereadConfig)
+
+    # Room extents from PDF vector walls (RoomExtentConfig). Pilot, off by
+    # default: adds coordinates.extent beside each room's label box and
+    # changes no existing field. Needs the source PDF (_source_pdf_for).
+    use_vector_room_extent: bool = False
+    room_extent: RoomExtentConfig = field(default_factory=RoomExtentConfig)
 
     # E2 (2026-09-09): block single-letter abbreviation expansion ("K" ->
     # KITCHEN, "P" -> PANTRY, "G" -> GARAGE in ABBREVIATION_MAP) in the

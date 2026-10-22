@@ -432,10 +432,19 @@ class MEPTextExtractor:
             re.compile(pattern, re.IGNORECASE)
             for pattern in self.config.room_name_patterns
         ]
+        self._room_name_placeholder_pattern = re.compile(
+            self.config.room_name_placeholder_pattern
+        )
+
+    def strip_room_name_placeholders(self, text: str) -> str:
+        """`text` without the drawing's own placeholder marks around a room
+        name -- see OCRConfig.room_name_placeholder_pattern."""
+        return " ".join(self._room_name_placeholder_pattern.sub(" ", text).split())
 
     def is_room_name(self, text: str) -> bool:
         """True when `text` matches one of OCRConfig.room_name_patterns."""
-        return any(p.search(text) for p in self._room_name_patterns)
+        name = self.strip_room_name_placeholders(text)
+        return any(p.search(name) for p in self._room_name_patterns)
 
     def matches_room_label(self, text: str) -> bool:
         """True when `text` on its own is a room number or a room name."""
@@ -776,7 +785,7 @@ class MEPTextExtractor:
         name_candidates: List[RoomCandidate] = []
 
         for detection in merged_detections:
-            text = detection.text.strip()
+            text = self.strip_room_name_placeholders(detection.text.strip())
 
             is_number = bool(self._room_number_pattern.match(text))
             is_name = self.is_room_name(text)
