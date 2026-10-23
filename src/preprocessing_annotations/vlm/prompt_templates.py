@@ -234,26 +234,6 @@ def build_crop_text_prompt_unsloth() -> str:
     return _CROP_TEXT_PROMPT_UNSLOTH
 
 
-# Label anchoring (ingestion/label_anchor.py): a vlm_only room carries a
-# wall-to-wall box because build_room_prompt_unsloth asks for one, while every
-# OCR-anchored room carries its label's own box. This prompt asks only where
-# the room's printed name sits inside a crop of that room, so the two can be
-# expressed in one convention. Transcription is NOT requested: the room name is
-# already known, and asking for both invites the model to relocate the box to
-# text it prefers.
-_ROOM_LABEL_BOX_PROMPT_UNSLOTH = """This image is a crop of one room on an architectural floor plan.
-The room's printed name is "{room_name}".
-
-Return the bounding box of that printed name inside this crop, as a JSON array of four integers in crop pixel coordinates: [x1, y1, x2, y2].
-Box the text itself only -- not the room, not the walls, not a room number on a separate line.
-If that name is not legibly printed inside this crop, return []."""
-
-
-def build_room_label_box_prompt_unsloth(room_name: str) -> str:
-    """Label-locating prompt for the Unsloth Qwen backend."""
-    return _ROOM_LABEL_BOX_PROMPT_UNSLOTH.format(room_name=room_name)
-
-
 def build_window_prompt() -> str:
     """Window-detection prompt shared by the Claude and Qwen2.5-VL backends."""
     return _WINDOW_PROMPT

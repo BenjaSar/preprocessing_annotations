@@ -244,6 +244,7 @@ def _extend_titleblock_zone(
     titleblock_zones: List[Tuple[int, int, int, int]],
     image_width: int,
     image_height: int,
+    near_edge_only: bool,
 ) -> Tuple[int, int, int, int]:
     """Extend the union of ONE title-block strip's field zones to the page
     edge along the strip's long axis.
@@ -273,8 +274,12 @@ def _extend_titleblock_zone(
     x2 = max(z[2] for z in titleblock_zones)
     y2 = max(z[3] for z in titleblock_zones)
     if (x2 - x1) >= (y2 - y1):
-        return (0, y1, image_width, y2)
-    return (x1, 0, x2, image_height)
+        if not near_edge_only:
+            return (0, y1, image_width, y2)
+        return (0, y1, x2, y2) if x1 <= image_width - x2 else (x1, y1, image_width, y2)
+    if not near_edge_only:
+        return (x1, 0, x2, image_height)
+    return (x1, 0, x2, y2) if y1 <= image_height - y2 else (x1, y1, x2, image_height)
 
 
 def _bbox_distance(a_points: List[List[int]], b_points: List[List[int]]) -> float:
@@ -1401,7 +1406,10 @@ class MEPTextExtractor:
         # strip and gets extended independently; disjoint groups no longer
         # union into one page-spanning zone.
         for group in _group_titleblock_zones(titleblock_zones, CLUSTER_RADIUS):
-            zones.append(_extend_titleblock_zone(group, image_width, image_height))
+            zones.append(_extend_titleblock_zone(
+                group, image_width, image_height,
+                self.config.extend_titleblock_zone_to_near_edge_only,
+            ))
 
         return zones
 

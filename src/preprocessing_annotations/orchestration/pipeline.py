@@ -61,6 +61,7 @@ from ..detection.window_detector import (
 )
 from ..detection.yolo_detector import YoloObjectDetector
 from ..detection.sam3_exemplar_detector import Sam3ExemplarDetector
+from ..detection.door_layer_filter import DoorLayerError, DoorLayerFilter
 from ..detection.attachment import AttachmentPolicy, AttachmentPolicyFactory
 from .run_lock import single_instance
 
@@ -2482,6 +2483,8 @@ class AnnotationPipeline:
                 )
                 yolo_detections = yolo_detections + additional
 
+            yolo_detections = self._drop_wiring_doors(img_path, yolo_detections)
+
             for detection in yolo_detections:
                 # Q3: full detection list (bbox+confidence) now persisted
                 # via _collect_object_detections/data["objectDetections"];
@@ -2506,6 +2509,30 @@ class AnnotationPipeline:
         return ObjectDetectionPass(
             mappings=merge_object_mappings(mappings_sources), unattached=unattached
         )
+
+    def _drop_wiring_doors(
+        self, img_path: Path, detections: List[WindowDetection],
+    ) -> List[WindowDetection]:
+        """Door detections the source PDF's layers show to be wiring
+        (DoorLayerFilterConfig) are removed; unchanged when the flag is off,
+        the source PDF is missing or its drawings are unreadable."""
+        if not self.config.use_door_layer_filter:
+            return detections
+        source = self._source_page_for(img_path)
+        if source is None:
+            return detections
+        from PIL import Image
+        with Image.open(img_path) as image:
+            image_size = image.size
+        try:
+            kept, dropped = DoorLayerFilter(self.config.door_layer_filter).split(
+                detections, *source, image_size
+            )
+        except DoorLayerError as error:
+            logger.warning(f"Door layer filter skipped for {img_path.name}: {error}")
+            return detections
+        logger.info("Door layer filter: %d door detections on wiring dropped for %s", len(dropped), img_path.name)
+        return kept
 
     @staticmethod
     def _collect_object_detections(
@@ -2671,6 +2698,7 @@ class AnnotationPipeline:
                 "room_name_patterns": list(self.config.ocr.room_name_patterns),
                 "room_number_pattern": self.config.ocr.room_number_pattern,
                 "room_name_placeholder_pattern": self.config.ocr.room_name_placeholder_pattern,
+                "extend_titleblock_zone_to_near_edge_only": self.config.ocr.extend_titleblock_zone_to_near_edge_only,
             },
             "vlm": {
                 "backend": self.config.vlm.backend,
@@ -2712,6 +2740,7 @@ class AnnotationPipeline:
                 "crop_reread_skip_reason": self._crop_reread_skipped,
                 "use_pdf_text_layer": self.config.use_pdf_text_layer,
                 "use_vector_room_extent": self.config.use_vector_room_extent,
+                "use_door_layer_filter": self.config.use_door_layer_filter,
                 "use_window_elongation_filter": self.config.use_window_elongation_filter,
                 "exempt_sam_expanded_from_ink_filter": self.config.exempt_sam_expanded_from_ink_filter,
                 "block_single_letter_abbreviations": self.config.block_single_letter_abbreviations,
@@ -2727,6 +2756,7 @@ class AnnotationPipeline:
             "room_filter": asdict(self.config.room_filter),
             "crop_reread": asdict(self.config.crop_reread),
             "room_extent": asdict(self.config.room_extent),
+            "door_layer_filter": asdict(self.config.door_layer_filter),
             "attachment": asdict(self.config.attachment),
             "confidence_weights": {
                 "detection": self.config.confidence_weights.detection,
@@ -3133,6 +3163,13 @@ Examples:
              "wherever the run has an unsloth VLM backend; this turns it off.",
     )
     parser.add_argument(
+        "--no-door-layer-filter",
+        action="store_true",
+        help="Keep door detections that the source PDF's layers show to be "
+             "wiring (detection/door_layer_filter.py). On by default; this "
+             "turns it off.",
+    )
+    parser.add_argument(
         "--use-vector-room-extent",
         action="store_true",
         help="Pilot: add coordinates.extent (room outline from the PDF's own "
@@ -3225,6 +3262,7 @@ Examples:
     config.use_ocr_vlm_fallback = args.ocr_vlm_fallback
     config.use_crop_reread = not args.no_crop_reread
     config.use_vector_room_extent = args.use_vector_room_extent
+    config.use_door_layer_filter = not args.no_door_layer_filter
     _warn_if_sam3_exemplar_orphaned(config)
     _warn_if_yolo_objects_ocr_only(config)
     if args.corroboration_weight is not None:

@@ -191,6 +191,30 @@ class OCRConfig:
     # changes.
     room_name_placeholder_pattern: str = r"\?+"
 
+    # Exclusion zones (ingestion/ocr_extractor.compute_exclusion_zones): a
+    # title-block cluster is extended to the page edge so the untexted logo
+    # beside it is covered. False = extend along BOTH ends of the long axis
+    # (current behaviour); True = only toward the nearer page edge, the side
+    # the logo gap is on.
+    # Why: "KEY PLAN" matches the title-block pattern, and on Bradley Fair p000
+    # it sits in a near-square general-notes block (x 1391-2059, y 127-766 of a
+    # 2200x1700 page); extending both ends made [0, 77, 2200, 816], 43% of the
+    # page, dropping 11 VLM rooms and 2 OCR rooms (bom_zone).
+    # Measured by replay with True (2026-10-22):
+    #   sprint1_verify57 / test_input, 48 room-GT pages: GT rooms located 854
+    #   both ways, no document loses recall, precision .9346 -> .9337 -- the
+    #   one added room is a real "MECHANICAL ROOM 554 SF" label (viewed) whose
+    #   text sits just outside its GT room outline.
+    #   sprint1_verify55 / corpus_batch2, 136 pages: +12 rooms on 8 pages, 0
+    #   lost; all 12 viewed: 7 real labels (Men's Locker 129, Storage 135, Car
+    #   Wash 134, Office 210, Corridor 102, Vestibule 113, Meeting 208), 1
+    #   title-block fragment ("BA"), 4 questionable.
+    #   Bradley Fair itself gains 0: once the zone is gone its VLM rooms are
+    #   dropped by low_ink / geometric / semantic / not_room_scale instead --
+    #   only 4 of its 14 VLM box centres fall in any GT room.
+    # Off by default: the GT precision dip and the one junk room need sign-off.
+    extend_titleblock_zone_to_near_edge_only: bool = False
+
     # Room name patterns to detect
     # Room name patterns to detect.
     # CRITICAL: All patterns must be anchored (^...$) so they match the
@@ -534,10 +558,6 @@ class VLMConfig:
     # one short label string, smaller than the page-type object above.
     crop_text_max_new_tokens: int = 64
 
-    # Label anchoring (ingestion/label_anchor.py) budget: a JSON array of four
-    # integers, shorter still than the crop-text string above.
-    room_label_box_max_new_tokens: int = 32
-
     # Room token budget for Thinking-variant Unsloth checkpoints only.
     # Verified 2026-07-24 (t7_stochastic run, qwen3-vl-8b-thinking): the
     # reasoning preamble alone exhausted the 1024-token default with zero
@@ -824,27 +844,6 @@ class CropRereadConfig:
 
 
 @dataclass
-class RoomLabelAnchorConfig:
-    """ingestion/label_anchor.py: a room-extent box re-expressed as the box of
-    the room's printed name, so one room list carries one box convention.
-
-    Gap it probes: `vlm_only` rooms carry wall-to-wall boxes while every other
-    room carries a label box (annotation_schema.box_convention_of). Deleting
-    the wall-to-wall ones was measured and rejected on 2026-10-21 (it removes
-    116 of sprint1_verify55's 533 corpus_batch2 rooms, 110 with no other room
-    in the same place), so the open route is to narrow them instead.
-
-    crop_padding_frac: how far outside the room's own box to crop, as a
-      fraction of its longest side, so a name printed just over the box edge
-      is still in view. An experiment parameter, not a tuned value -- this
-      config exists for eval/room_label_anchor_probe.py and nothing in the
-      pipeline reads it yet.
-    """
-
-    crop_padding_frac: float = 0.1
-
-
-@dataclass
 class RoomExtentConfig:
     """ingestion/vector_walls.py: full-room extents from a PDF's own vector
     wall geometry, a second output beside the label box.
@@ -875,6 +874,34 @@ class RoomExtentConfig:
 
     layer_pattern: str = r"WALL|PART|DOOR|GLAZ"
     excluded_layer_pattern: str = r"PATT|HTCH|ABOVE"
+
+
+@dataclass
+class DoorLayerFilterConfig:
+    """detection/door_layer_filter.py: door detections that are wiring arcs.
+
+    Gap: on CAD lighting plans YOLO reads the curved wiring runs between
+    fixtures as door swings (verify56/57 door FPs, Kennedy elec p001 7/7).
+
+    A door detection is dropped only when its page has geometry on a layer
+    matching `door_layer_pattern`, its box touches none of it, and it touches
+    geometry on a layer matching `wiring_layer_pattern` (drawing bounding
+    boxes, PyMuPDF get_drawings). Pages without a door layer are untouched.
+
+    Measured 2026-10-22, every box viewed at >= 2x with the box drawn.
+    sprint1_verify57 (test_input): 77 attached door detections sit on
+    door-layer pages but off the door layer: 71 wiring/fixture FPs, 3 real
+    doors (drawn on A-WALL / EQ-SPCQ layers), 3 ambiguous; the filter drops
+    69, all FPs, and keeps the 6 real/ambiguous. It also drops 195
+    unattached detections (sample of 27 viewed: 27 FPs). Out of sample,
+    sprint1_verify55's corpus_batch2 pages (wiring layers named "E-Wire-Std",
+    "E_WIRE"): 14 attached dropped, 14 FPs; 35 unattached dropped, 34 FPs +
+    1 ambiguous (dashed swing). Patterns were chosen on test_input; the
+    wiring pattern was widened from "WIRING" after corpus_batch2's names.
+    """
+
+    door_layer_pattern: str = r"DOOR"
+    wiring_layer_pattern: str = r"WIR"
 
 
 @dataclass
@@ -2175,6 +2202,13 @@ class PipelineConfig:
     # changes no existing field. Needs the source PDF (_source_pdf_for).
     use_vector_room_extent: bool = False
     room_extent: RoomExtentConfig = field(default_factory=RoomExtentConfig)
+
+    # Drop door detections the PDF's own layers show to be wiring
+    # (DoorLayerFilterConfig). Needs the source PDF (_source_pdf_for); pages
+    # without one, or without a door layer, keep every detection.
+    # On by default: 0 real doors in 145 viewed drops (DoorLayerFilterConfig).
+    use_door_layer_filter: bool = True
+    door_layer_filter: DoorLayerFilterConfig = field(default_factory=DoorLayerFilterConfig)
 
     # E2 (2026-09-09): block single-letter abbreviation expansion ("K" ->
     # KITCHEN, "P" -> PANTRY, "G" -> GARAGE in ABBREVIATION_MAP) in the
