@@ -1838,38 +1838,23 @@ class AnnotationPipeline:
             return vlm.detect_rooms(img_path)
 
         full_w, full_h = full_img.size
-        if max(full_w, full_h) <= self.config.tile_trigger_px:
-            logger.debug(
-                f"Tiling skipped: {full_w}x{full_h} <= trigger {self.config.tile_trigger_px}px"
-            )
-            return vlm.detect_rooms(img_path)
-
         try:
             from ..ingestion.tile_splitter import TileSplitter
         except ImportError:
             logger.warning("tile_splitter not importable — falling back to full-image")
             return vlm.detect_rooms(img_path)
 
-        # Adaptive grid: derive tile count from image size so each tile is about
-        # tile_target_px, capped at tile_cols x tile_rows. Finer grid on dense
-        # floors improves VLM room localization. tile_target_px=0 → fixed grid.
-        if self.config.tile_target_px > 0:
-            cols = max(2, min(self.config.tile_cols,
-                              round(full_w / self.config.tile_target_px)))
-            rows = max(2, min(self.config.tile_rows,
-                              round(full_h / self.config.tile_target_px)))
-        else:
-            cols, rows = self.config.tile_cols, self.config.tile_rows
+        splitter = TileSplitter.for_page(full_w, full_h, self.config)
+        if splitter is None:
+            logger.debug(
+                f"Tiling skipped: {full_w}x{full_h} <= trigger {self.config.tile_trigger_px}px"
+            )
+            return vlm.detect_rooms(img_path)
 
-        splitter = TileSplitter(
-            cols=cols,
-            rows=rows,
-            overlap_pct=self.config.tile_overlap_pct,
-        )
         tiles = splitter.split(full_img)
         logger.info(
             f"{img_path.name}: tiling {full_w}x{full_h} -> "
-            f"{len(tiles)} tiles ({cols}x{rows}, "
+            f"{len(tiles)} tiles ({splitter.cols}x{splitter.rows}, "
             f"overlap={self.config.tile_overlap_pct:.0%})"
         )
 

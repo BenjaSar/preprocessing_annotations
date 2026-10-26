@@ -769,6 +769,40 @@ class RoomGtEvalConfig:
 
 
 @dataclass
+class SFTDatasetConfig:
+    """Phase 0 decisions (2026-10-26) for the Qwen3-VL / unsloth SFT dataset.
+    Fixed before the exporter exists so every later target is built one way.
+
+    box_convention (D1): train on one box convention only, the label box
+      (annotation_schema.LABEL_BOX). The only one with volume: 992 of 1018
+      rooms on sprint1_verify57 are label boxes, 26 room_extent. Mixing them
+      under one prompt is an incoherent target (median box/GT-room area .013
+      vs .348, annotation_schema.py). The SFT prompt therefore asks for the
+      label box; the production prompt's "wall to wall" instruction
+      (prompt_templates.build_room_prompt_unsloth) is not edited.
+
+    Coordinate space (D2) has no field on purpose: an example is the view
+      inference gives the model. Pages over PipelineConfig.tile_trigger_px go
+      to the VLM as tiles (48/50 sprint1_verify57 pages, 78/88 corpus_batch2),
+      boxes in that tile's pixels; the grid comes from TileSplitter.for_page,
+      shared with the pipeline. Smaller pages go whole, in page pixels below
+      VLMConfig.unsloth_detection_max_dim_px, so no resize applies.
+
+    gt_category_map_sha256 (D3): the GT category map (RoomGtEvalConfig.
+      gt_category_map_path) is frozen unreviewed for v1, so the zero-shot
+      baseline and every fine-tuned model are scored against one map. It
+      maps GT categories for scoring only; training labels come from
+      taxonomy.py. Reviewing the map later means re-scoring the baseline and
+      updating this hash together.
+    """
+
+    box_convention: str = "label"
+    gt_category_map_sha256: str = (
+        "54b1ca7b050d46e520efc3d510a774b5f9035e6fdb651ea4554b673bb0a7fe6a"
+    )
+
+
+@dataclass
 class MissedRoomOcrConfig:
     """eval/missed_room_ocr.py: why a GT room never got a room candidate.
 
