@@ -187,6 +187,74 @@ Rules:
 - Return ONLY valid JSON array. No markdown. No code fences. No text outside the JSON array."""
 
 
+def build_room_prompt_sft_label(img_width: int, img_height: int, max_rooms: int) -> str:
+    """Room-detection prompt for the Qwen3-VL SFT dataset (label boxes).
+
+    Deliberately separate from build_room_prompt_unsloth, which asks for a
+    wall-to-wall box. The SFT targets are label boxes (D1,
+    SFTDatasetConfig.box_convention): 992 of 1018 rooms on sprint1_verify57
+    carry that convention against 26 room_extent ones, so it is the only
+    target with volume. Training the production prompt's wording against
+    label-scale boxes would teach the model to answer "the entire room" with
+    a box around the text, so the task is restated instead -- and production
+    inference keeps its own prompt untouched.
+
+    Same output shape as the production prompt, because an SFT target must
+    round-trip through UnslothQwenBackend._parse_room_response unchanged.
+
+    Args:
+        img_width: Width of the image the model is shown (a tile, usually).
+        img_height: Height of that image.
+        max_rooms: Cap on rooms per answer.
+    """
+    return f"""You are a floor plan annotation expert. The image is {img_width}x{img_height} pixels.
+
+TASK: Find the text label of every room or space in this floor plan view.
+
+For each room label output:
+  - room_type: the room's class, e.g. PRIVATE OFFICE, CORRIDOR, STORAGE ROOM, RESTROOM, STAIRWELL, OTHER
+  - room_name: exact label text as printed on the plan
+  - bbox: [x1, y1, x2, y2] in INTEGER PIXELS (top-left origin).
+    x values in [0, {img_width}], y values in [0, {img_height}].
+  - confidence: 0.0-1.0
+
+CRITICAL — the bbox encloses the LABEL TEXT ONLY, tightly, like an OCR word
+box. Do NOT draw the box around the room itself or out to its walls.
+
+INCLUDE: labels of rooms and spaces inside the floor plan.
+EXCLUDE: legends, title blocks, BOM tables, schedules, notes, panel labels,
+and any text in the margins.
+
+Rules:
+- Only rooms whose label is visible in this image.
+- Do NOT fabricate rooms.
+- Maximum {max_rooms} rooms.
+- bbox must have positive width and height (x2 > x1, y2 > y1).
+- Return ONLY valid JSON array. No markdown. No code fences. No text outside the JSON array."""
+
+
+# Room prompts the Unsloth backend can send, by VLMConfig.unsloth_room_prompt.
+# A fine-tuned adapter must be asked with the prompt it was trained on: the
+# SFT dataset uses build_room_prompt_sft_label (label boxes), the base model's
+# production default is build_room_prompt_unsloth (wall-to-wall room boxes).
+# Scoring an adapter under the other prompt measures its reaction to an unseen
+# instruction asking for a different box, not what training taught it.
+ROOM_PROMPT_BUILDERS = {
+    "production": build_room_prompt_unsloth,
+    "sft_label": build_room_prompt_sft_label,
+}
+
+
+def room_prompt_builder(name: str):
+    """The room-prompt builder registered under `name`; unknown names raise."""
+    try:
+        return ROOM_PROMPT_BUILDERS[name]
+    except KeyError:
+        raise ValueError(
+            f"unknown room prompt {name!r}; have {sorted(ROOM_PROMPT_BUILDERS)}"
+        ) from None
+
+
 # AV-6 (2026-09-23): page-type triage categories and prompt. Confirmed
 # gap: the zero-room-output population mixes genuine floor plans with
 # non-architectural document pages (schedules, compliance certificates,
@@ -364,6 +432,7 @@ PROMPT_VERSIONS = {
     "build_window_prompt": _hash(_WINDOW_PROMPT),
     "build_window_prompt_unsloth": _hash(_UNSLOTH_WINDOW_PROMPT),
     "build_room_prompt_unsloth": _hash(_inspect.getsource(build_room_prompt_unsloth)),
+    "build_room_prompt_sft_label": _hash(_inspect.getsource(build_room_prompt_sft_label)),
     "build_door_prompt_unsloth": _hash(_inspect.getsource(build_door_prompt_unsloth)),
     "build_room_prompt_mep": _hash(_inspect.getsource(build_room_prompt_mep)),
     "build_page_type_prompt_unsloth": _hash(_PAGE_TYPE_PROMPT_UNSLOTH),

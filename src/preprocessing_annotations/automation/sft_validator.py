@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Tuple, Optional
 from PIL import Image
 import io
 import logging
+import math
 
 from .duplicate_boxes import split_redundant_room_extents
 
@@ -1136,6 +1137,15 @@ def _adopt_ocr_geometry(target: Dict, ocr_room: Dict, ocr_name: str,
         target.pop("segmentation", None)
 
 
+def _center_distance(bbox1: List, bbox2: List) -> float:
+    """Distance between two xywh boxes' centres, or inf if either is unusable."""
+    if len(bbox1) < 4 or len(bbox2) < 4:
+        return float("inf")
+    x1, y1, w1, h1 = bbox1[:4]
+    x2, y2, w2, h2 = bbox2[:4]
+    return math.hypot((x1 + w1 / 2) - (x2 + w2 / 2), (y1 + h1 / 2) - (y2 + h2 / 2))
+
+
 def _merge_vlm_and_ocr(
     vlm_rooms: List[Dict], ocr_rooms: List[Dict], proximity_px: int
 ) -> MergeResult:
@@ -1167,18 +1177,38 @@ def _merge_vlm_and_ocr(
         merged.append(r)
         logger.debug(f"Added VLM room: {r.get('name', r.get('room_name', 'UNNAMED'))}")
 
+    # Only these first entries are VLM rooms. The loop below appends OCR rooms
+    # to `merged`, and matching against those too made this function collapse
+    # neighbouring OCR labels into each other -- it is a VLM<->OCR merge, and
+    # OCR-to-OCR duplicates are resolved later (_resolve_bbox_overlaps,
+    # _dedup_nested_same_type) with rules meant for that job.
+    #
+    # Measured on BP-1 Masonic Heights Electrical page002, a row of five
+    # 16px-tall labels 58px apart (CLOSET + 4x TOILET): with room-scale VLM
+    # boxes a big CLASSROOM box matches first and every label survives via
+    # FM-1, which hid this. With the SFT-tuned model's label-scale boxes no VLM
+    # box is proximal at all, the scan reached the already-appended TOILETs,
+    # and FM-2 merged pairs of them -- two real rooms lost. Both runs had
+    # byte-identical OCR candidates, so the loss was entirely this scan.
+    vlm_room_count = len(merged)
+
     # Process OCR rooms
     for ocr_room in ocr_rooms:
         ocr_name = ocr_room.get("name") or ocr_room.get("room_name", "")
         ocr_bbox = ocr_room.get("bbox", [])
 
-        # Check if this OCR room overlaps with any VLM room
+        # Check if this OCR room overlaps with any VLM room. Nearest proximal
+        # box, not the first in list order: with several proximal VLM boxes the
+        # list order is arbitrary, and the nearest one is the defensible match.
         matched_vlm = None
-        for i, vlm_room in enumerate(merged):
-            vlm_bbox = vlm_room.get("bbox", [])
-            if _bbox_distance(ocr_bbox, vlm_bbox, threshold=proximity_px):
-                matched_vlm = i
-                break
+        best_distance = None
+        for i in range(vlm_room_count):
+            vlm_bbox = merged[i].get("bbox", [])
+            if not _bbox_distance(ocr_bbox, vlm_bbox, threshold=proximity_px):
+                continue
+            distance = _center_distance(ocr_bbox, vlm_bbox)
+            if best_distance is None or distance < best_distance:
+                matched_vlm, best_distance = i, distance
 
         if matched_vlm is not None:
             # CRITICAL FIX #3: Preserve compound names from OCR

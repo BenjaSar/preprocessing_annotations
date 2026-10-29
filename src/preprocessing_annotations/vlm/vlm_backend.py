@@ -1124,14 +1124,30 @@ class UnslothQwenBackend(VLMBackend):
                 load_in_4bit=True,  # Use pre-quantized 4-bit model
                 use_gradient_checkpointing="unsloth",  # Memory optimization
             )
-            
+
+            # A5: a LoRA adapter from scripts/train_qwen3vl_unsloth.py, so a
+            # fine-tune can be scored by the same harness that scores the base
+            # model (eval/room_gt_eval.py over a pipeline run). Default None
+            # keeps the base model and every run before this unchanged.
+            # Loaded before for_inference so the merged graph is the one
+            # optimized. A missing or incompatible adapter raises rather than
+            # falling back: a run that silently scored the base model while
+            # reporting an adapter would be worse than no run at all.
+            adapter_path = self.config.unsloth_adapter_path
+            if adapter_path is not None:
+                adapter_path = Path(adapter_path)
+                if not adapter_path.exists():
+                    raise FileNotFoundError(f"adapter not found: {adapter_path}")
+                logger.info(f"Loading LoRA adapter: {adapter_path}")
+                self.model.load_adapter(str(adapter_path))
+
             # Enable inference mode optimization
             FastVisionModel.for_inference(self.model)
-            
+
             self.initialized = True
             logger.info(
                 f"Unsloth Qwen backend initialized: model={model_key}, "
-                f"device={self.device}"
+                f"adapter={adapter_path}, device={self.device}"
             )
         
         except ImportError as e:
@@ -1353,8 +1369,11 @@ class UnslothQwenBackend(VLMBackend):
          Args:
              img_width: Actual image width in pixels (after any resizing).
              img_height: Actual image height in pixels (after any resizing).
+
+         Which prompt is VLMConfig.unsloth_room_prompt: an adapter has to be
+         asked the way it was trained (prompt_templates.ROOM_PROMPT_BUILDERS).
          """
-         return prompt_templates.build_room_prompt_unsloth(
+         return prompt_templates.room_prompt_builder(self.config.unsloth_room_prompt)(
              img_width, img_height, self.config.max_rooms
          )
 

@@ -1,0 +1,486 @@
+{
+  "run_dir": "../../sprint1_verify57",
+  "room_label_anchor": {
+    "crop_padding_frac": 0.1
+  },
+  "coverage": {
+    "pages": 50,
+    "rooms": 1018,
+    "room_extent_boxes": 26,
+    "anchored": 19,
+    "anchored_box_holds_its_name": 3
+  },
+  "localization": {
+    "as_run": {
+      "predictions": 225,
+      "predictions_center_in_gt": 205,
+      "predictions_iou_match": 0,
+      "gt_rooms": 252,
+      "gt_rooms_located": 172,
+      "gt_rooms_iou_matched": 0,
+      "prediction_best_iou_sum": 8.80931139868775,
+      "gt_best_iou_sum": 10.017471558702397,
+      "label_precision": 0.9111111111111111,
+      "label_recall": 0.6825396825396826,
+      "label_f1": 0.7804338202744576,
+      "label_fdr": 0.0888888888888889,
+      "label_fnr": 0.31746031746031744,
+      "extent_precision": 0.0,
+      "extent_recall": 0.0,
+      "extent_f1": 0.0,
+      "mean_iou_per_prediction": 0.03915249510527889,
+      "mean_iou_per_gt_room": 0.039751871264692054
+    },
+    "anchored": {
+      "predictions": 225,
+      "predictions_center_in_gt": 206,
+      "predictions_iou_match": 0,
+      "gt_rooms": 252,
+      "gt_rooms_located": 174,
+      "gt_rooms_iou_matched": 0,
+      "prediction_best_iou_sum": 5.12610939250107,
+      "gt_best_iou_sum": 5.285612219041658,
+      "label_precision": 0.9155555555555556,
+      "label_recall": 0.6904761904761905,
+      "label_f1": 0.7872438558344864,
+      "label_fdr": 0.08444444444444443,
+      "label_fnr": 0.30952380952380953,
+      "extent_precision": 0.0,
+      "extent_recall": 0.0,
+      "extent_f1": 0.0,
+      "mean_iou_per_prediction": 0.02278270841111587,
+      "mean_iou_per_gt_room": 0.020974651662863723
+    }
+  },
+  "extent_size": {
+    "as_run": {
+      "located": 205,
+      "oversize": 1,
+      "oversize_rate": 0.004878048780487805,
+      "median_area_ratio": 0.00992159741197088,
+      "p90_area_ratio": 0.15481900226716164,
+      "max_area_ratio": 1.1750472437092667
+    },
+    "anchored": {
+      "located": 206,
+      "oversize": 0,
+      "oversize_rate": 0.0,
+      "median_area_ratio": 0.00918339234699245,
+      "p90_area_ratio": 0.0653724572355896,
+      "max_area_ratio": 0.44628278114511283
+    }
+  },
+  "per_document_located": {
+    "326_rockaway_avi_on_layout": {
+      "as_run": 19,
+      "anchored": 20
+    },
+    "bp_1_kennedy_middle_school_avi_on_layout_flat": {
+      "as_run": 32,
+      "anchored": 32
+    },
+    "bp_1_kennedy_middle_school_electrical_pages": {
+      "as_run": 19,
+      "anchored": 20
+    },
+    "bp_1_lake_shore_high_school_electrical_pages": {
+      "as_run": 54,
+      "anchored": 54
+    },
+    "bp_1_masonic_heights_elementary_avi_on_layout_flat": {
+      "as_run": 17,
+      "anchored": 17
+    },
+    "bp_1_violet_elementary_school_avi_on_layout_flat": {
+      "as_run": 15,
+      "anchored": 15
+    },
+    "bp_1_violet_elementary_school_electrical_pages": {
+      "as_run": 16,
+      "anchored": 16
+    }
+  },
+  "anchors": [
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page003",
+      "room_name": "ELEV",
+      "room_bbox": [
+        1459,
+        936,
+        134,
+        301
+      ],
+      "label_bbox": [
+        1495,
+        1162,
+        40,
+        18
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page003",
+      "room_name": "ELEV",
+      "room_bbox": [
+        1666,
+        936,
+        134,
+        301
+      ],
+      "label_bbox": [
+        1693,
+        1101,
+        28,
+        15
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page003",
+      "room_name": "TYPE-C6.1",
+      "room_bbox": [
+        1160,
+        826,
+        136,
+        411
+      ],
+      "label_bbox": [
+        1139,
+        839,
+        55,
+        26
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page006",
+      "room_name": "MECHANICAL ROOM",
+      "room_bbox": [
+        1355,
+        939,
+        583,
+        298
+      ],
+      "label_bbox": [
+        1510,
+        967,
+        100,
+        18
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page006",
+      "room_name": "ELEV #2",
+      "room_bbox": [
+        1706,
+        871,
+        152,
+        366
+      ],
+      "label_bbox": [
+        1691,
+        1129,
+        32,
+        19
+      ]
+    },
+    {
+      "page": "326 ROCKAWAY - AVI-ON LAYOUT_page006",
+      "room_name": "ELEV #4",
+      "room_bbox": [
+        1860,
+        938,
+        174,
+        299
+      ],
+      "label_bbox": [
+        1830,
+        1205,
+        35,
+        12
+      ]
+    },
+    {
+      "page": "BP-1 Kennedy Middle School  - AVI-ON LAYOUT FLAT_page001",
+      "room_name": "CLASSROOM-121",
+      "room_bbox": [
+        778,
+        2703,
+        313,
+        243
+      ],
+      "label_bbox": null
+    },
+    {
+      "page": "BP-1 Kennedy Middle School  - AVI-ON LAYOUT FLAT_page001",
+      "room_name": "CLASSROOM - 127",
+      "room_bbox": [
+        1717,
+        2217,
+        211,
+        306
+      ],
+      "label_bbox": [
+        1694,
+        2303,
+        25,
+        79
+      ]
+    },
+    {
+      "page": "BP-1 Kennedy Middle School  - AVI-ON LAYOUT FLAT_page001",
+      "room_name": "CORRIDOR",
+      "room_bbox": [
+        1717,
+        2713,
+        211,
+        306
+      ],
+      "label_bbox": [
+        1713,
+        2682,
+        68,
+        24
+      ]
+    },
+    {
+      "page": "BP-1 Kennedy Middle School  - AVI-ON LAYOUT FLAT_page003",
+      "room_name": "CORRIDOR",
+      "room_bbox": [
+        965,
+        3321,
+        224,
+        430
+      ],
+      "label_bbox": [
+        922,
+        3552,
+        47,
+        68
+      ]
+    },
+    {
+      "page": "BP-1 Kennedy Middle School Electrical Pages_page000",
+      "room_name": "SCIENCE CLASSROOM - 111",
+      "room_bbox": [
+        1639,
+        1517,
+        313,
+        159
+      ],
+      "label_bbox": null
+    },
+    {
+      "page": "BP-1 Kennedy Middle School Electrical Pages_page001",
+      "room_name": "CLASSROOM - 125",
+      "room_bbox": [
+        2048,
+        778,
+        283,
+        236
+      ],
+      "label_bbox": null
+    },
+    {
+      "page": "BP-1 Kennedy Middle School Electrical Pages_page001",
+      "room_name": "CORRIDOR",
+      "room_bbox": [
+        1769,
+        1725,
+        331,
+        156
+      ],
+      "label_bbox": [
+        1735,
+        1693,
+        65,
+        18
+      ]
+    },
+    {
+      "page": "BP-1 Kennedy Middle School Electrical Pages_page001",
+      "room_name": "CLASSROOM - 125",
+      "room_bbox": [
+        1769,
+        2125,
+        331,
+        156
+      ],
+      "label_bbox": null
+    },
+    {
+      "page": "BP-1 Lake Shore High School Electrical Pages_page000",
+      "room_name": "CORRIDOR",
+      "room_bbox": [
+        2026,
+        1350,
+        717,
+        171
+      ],
+      "label_bbox": [
+        1979,
+        1567,
+        81,
+        14
+      ]
+    },
+    {
+      "page": "BP-1 Lake Shore High School Electrical Pages_page000",
+      "room_name": "CLASSROOM 131B",
+      "room_bbox": [
+        2256,
+        1583,
+        231,
+        251
+      ],
+      "label_bbox": [
+        2314,
+        1758,
+        85,
+        20
+      ]
+    },
+    {
+      "page": "BP-1 Lake Shore High School Electrical Pages_page001",
+      "room_name": "CLASSROOM",
+      "room_bbox": [
+        1323,
+        1628,
+        286,
+        239
+      ],
+      "label_bbox": [
+        1413,
+        1877,
+        69,
+        12
+      ]
+    },
+    {
+      "page": "BP-1 Lake Shore High School Electrical Pages_page002",
+      "room_name": "STAIR",
+      "room_bbox": [
+        1024,
+        609,
+        348,
+        221
+      ],
+      "label_bbox": null
+    },
+    {
+      "page": "BP-1 Lake Shore High School Electrical Pages_page002",
+      "room_name": "CLASSROOM",
+      "room_bbox": [
+        2447,
+        1458,
+        260,
+        159
+      ],
+      "label_bbox": [
+        2529,
+        1505,
+        94,
+        24
+      ]
+    },
+    {
+      "page": "BP-1 Lake Shore High School Electrical Pages_page007",
+      "room_name": "CLASSROOM",
+      "room_bbox": [
+        1939,
+        2016,
+        311,
+        155
+      ],
+      "label_bbox": [
+        1999,
+        2030,
+        113,
+        11
+      ]
+    },
+    {
+      "page": "BP-1 Lake Shore High School Electrical Pages_page007",
+      "room_name": "STAIR C201",
+      "room_bbox": [
+        1863,
+        2198,
+        295,
+        250
+      ],
+      "label_bbox": null
+    },
+    {
+      "page": "BP-1 Masonic Heights Elementary - AVI-ON LAYOUT FLAT_page003",
+      "room_name": "CLASSROOM 7",
+      "room_bbox": [
+        1350,
+        1391,
+        225,
+        290
+      ],
+      "label_bbox": [
+        1329,
+        1647,
+        27,
+        40
+      ]
+    },
+    {
+      "page": "BP-1 Violet Elementary School  - AVI-ON LAYOUT FLAT_page003",
+      "room_name": "CLASSROOM",
+      "room_bbox": [
+        500,
+        1490,
+        207,
+        300
+      ],
+      "label_bbox": null
+    },
+    {
+      "page": "BP-1 Violet Elementary School Electrical Pages_page003",
+      "room_name": "CLASSROOM6",
+      "room_bbox": [
+        2465,
+        487,
+        377,
+        223
+      ],
+      "label_bbox": [
+        2606,
+        512,
+        96,
+        15
+      ]
+    },
+    {
+      "page": "BP-1 Violet Elementary School Electrical Pages_page003",
+      "room_name": "CLASSROOM",
+      "room_bbox": [
+        2512,
+        1383,
+        340,
+        121
+      ],
+      "label_bbox": [
+        2701,
+        1370,
+        82,
+        13
+      ]
+    },
+    {
+      "page": "BP-1 Violet Elementary School Electrical Pages_page003",
+      "room_name": "CLASSROOM",
+      "room_bbox": [
+        2766,
+        1691,
+        214,
+        258
+      ],
+      "label_bbox": [
+        2831,
+        1956,
+        54,
+        13
+      ]
+    }
+  ]
+}

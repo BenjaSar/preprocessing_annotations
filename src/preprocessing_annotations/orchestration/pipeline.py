@@ -51,7 +51,11 @@ from ..automation.sft_validator import (
     dropped_page_record,
     has_room_name_candidate,
 )
-from ..automation.taxonomy import normalize_to_mandatory, get_extended_type
+from ..automation.taxonomy import (
+    get_extended_type,
+    normalize_to_mandatory,
+    resolve_context_dependent_types,
+)
 from ..automation.abbreviation_ocr_recovery import (
     AbbreviationOCRRecovery, ResidentialAbbreviationRecovery
 )
@@ -78,6 +82,36 @@ class PipelineError(Exception):
     """Raised when pipeline execution fails."""
 
     pass
+
+
+def _retype_context_dependent_rooms(
+    annotation: Dict[str, Any], rooms: List[dict], rooms_recognized: List[dict]
+) -> None:
+    """Resolve this page's context-dependent labels, in place, in both lists.
+
+    `rooms` and `roomsRecognized` describe the same rooms in the same order
+    under different key names, and different consumers read each (COCO export
+    reads `rooms`, the SFT exporter and room GT eval read `roomsRecognized`),
+    so a class fixed in one and not the other would make a page disagree with
+    itself. The decision itself lives in taxonomy.resolve_context_dependent_types.
+    """
+    if not rooms_recognized:
+        return
+    names = [room.get("name") or room.get("room_name") or "" for room in rooms_recognized]
+    resolved = resolve_context_dependent_types(
+        names, [room.get("type") or "" for room in rooms_recognized]
+    )
+    for index, room_type in enumerate(resolved):
+        if room_type == rooms_recognized[index].get("type"):
+            continue
+        logger.info(
+            "%s: '%s' re-typed %s -> %s from the page's other labels",
+            annotation.get("image_file", "?"), names[index],
+            rooms_recognized[index].get("type"), room_type,
+        )
+        rooms_recognized[index]["type"] = room_type
+        if index < len(rooms):
+            rooms[index]["type"] = room_type
 
 
 class AnnotationPipeline:
@@ -462,7 +496,10 @@ class AnnotationPipeline:
         _mlflow_run_id = start_run(self.config.mlflow)
         if _mlflow_run_id:
             log_params(self._build_config_dict())
-            log_tags({"experiment_name": self.config.mlflow.experiment_name})
+            log_tags({
+                "experiment_name": self.config.mlflow.experiment_name,
+                "run_kind": "pipeline",
+            })
 
         # Per-run accumulator for object-detection corroboration signal
         # (_apply_object_attributes below); logged as an MLflow metric at
@@ -1279,6 +1316,12 @@ class AnnotationPipeline:
                 new_rr = self._apply_object_attributes(
                     new_rr, new_mappings, **self._confidence_weight_kwargs()
                 )
+                # A label like "LAB" means different rooms in a school and in
+                # a clinic; taxonomy sees only the text. Resolve those from
+                # the page's other labels, once, on the final list -- the one
+                # place every build path converges (taxonomy.py).
+                _retype_context_dependent_rooms(annotation, surviving_rooms, new_rr)
+
                 annotation["roomsRecognized"] = new_rr
                 if room_extent_step is not None:
                     self._attach_room_extents(
@@ -2690,7 +2733,23 @@ class AnnotationPipeline:
                 "model": self.config.vlm.active_model,
                 "qwen_model": self.config.vlm.qwen_model,
                 "unsloth_model": self.config.vlm.unsloth_model,
+                "unsloth_adapter_path": (
+                    str(self.config.vlm.unsloth_adapter_path)
+                    if self.config.vlm.unsloth_adapter_path is not None else None
+                ),
+                "unsloth_room_prompt": self.config.vlm.unsloth_room_prompt,
                 "max_tokens": self.config.vlm.max_tokens,
+                # Generation settings decide what the VLM answered, and they
+                # default from VLM_* env vars (VLMConfig) -- so without them
+                # here a run's own artifacts cannot say how it was decoded.
+                # do_sample False makes the rest inert (vlm_backend.py).
+                "do_sample": self.config.vlm.do_sample,
+                "seed": self.config.vlm.seed,
+                "temperature": self.config.vlm.temperature,
+                "top_p": self.config.vlm.top_p,
+                "top_k": self.config.vlm.top_k,
+                "presence_penalty": self.config.vlm.presence_penalty,
+                "repetition_penalty": self.config.vlm.repetition_penalty,
             },
             "sam": {
                 "model_type": self.config.sam.model_type,
@@ -3046,6 +3105,24 @@ Examples:
              "qwen3-vl-4b-thinking, qwen3-vl-8b-thinking",
     )
     parser.add_argument(
+        "--unsloth-adapter",
+        type=Path,
+        default=None,
+        help="A5: LoRA adapter directory (scripts/train_qwen3vl_unsloth.py's "
+             "--out) to load on top of the 'unsloth' backend's model. Default: "
+             "none, i.e. the base model. The adapter must have been trained on "
+             "the same --unsloth-model.",
+    )
+    parser.add_argument(
+        "--unsloth-room-prompt",
+        choices=sorted(prompt_templates.ROOM_PROMPT_BUILDERS),
+        default=None,
+        help="Room prompt for the 'unsloth' backend. Default: 'production' (the "
+             "base model's wall-to-wall prompt). Use 'sft_label' with an "
+             "--unsloth-adapter trained by scripts/train_qwen3vl_unsloth.py -- "
+             "an adapter must be asked the way it was trained.",
+    )
+    parser.add_argument(
         "--use-sam", action="store_true", help="Use SAM for boundary refinement"
     )
     parser.add_argument(
@@ -3097,7 +3174,8 @@ Examples:
     parser.add_argument(
         "--enable-mlflow",
         action="store_true",
-        help="Enable MLflow run tracking for this run (default: off). "
+        help="Enable MLflow run tracking for this run (default: off; "
+             "MLFLOW_ENABLED=1 enables it without the flag). "
              "Requires an MLflow tracking server reachable at "
              "--mlflow-tracking-uri (default: http://127.0.0.1:5000 or "
              "$MLFLOW_TRACKING_URI). If mlflow is not installed or the "
@@ -3252,7 +3330,9 @@ Examples:
     _warn_if_yolo_objects_ocr_only(config)
     if args.corroboration_weight is not None:
         config.confidence_weights.corroboration = args.corroboration_weight
-    config.mlflow.enabled = args.enable_mlflow
+    # `or`, not assignment: the store_true flag defaults to False and would
+    # otherwise overwrite an MLFLOW_ENABLED=1 default from the environment.
+    config.mlflow.enabled = config.mlflow.enabled or args.enable_mlflow
     if args.mlflow_tracking_uri is not None:
         config.mlflow.tracking_uri = args.mlflow_tracking_uri
     if args.eval_gt_dir is not None:
@@ -3273,6 +3353,10 @@ Examples:
     config.vlm.qwen_model = args.qwen_model
     if args.unsloth_model is not None:
         config.vlm.unsloth_model = args.unsloth_model
+    if args.unsloth_adapter is not None:
+        config.vlm.unsloth_adapter_path = args.unsloth_adapter
+    if args.unsloth_room_prompt is not None:
+        config.vlm.unsloth_room_prompt = args.unsloth_room_prompt
 
     if args.dpi:
         config.pdf.dpi = args.dpi

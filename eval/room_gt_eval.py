@@ -38,6 +38,7 @@ import numpy as np
 from shapely.geometry import Point, Polygon, box
 
 from preprocessing_annotations.config import AttachmentConfig, RoomGtEvalConfig
+from preprocessing_annotations.export.group_split import document_key
 from preprocessing_annotations.detection.attachment import (
     AttachmentPolicy,
     AttachmentPolicyFactory,
@@ -444,6 +445,7 @@ class _ScoredPage:
     gts: List[Polygon]
     gt_categories: List[str] = field(default_factory=list)
     detections: List[WindowDetection] = field(default_factory=list)
+    key: str = ""
 
 
 def _join_pages(
@@ -455,11 +457,24 @@ def _join_pages(
     returned separately (reported, never silently dropped)."""
     categories = gt_categories or {}
     pages = [
-        _ScoredPage(rooms[key], gts, categories.get(key, []), detections.get(key, []))
+        _ScoredPage(
+            rooms[key], gts, categories.get(key, []), detections.get(key, []), key
+        )
         for key, gts in gt.items() if key in rooms
     ]
     missing = sorted(key for key in gt if key not in rooms)
     return pages, missing
+
+
+def _score_per_document(
+    pages: Sequence["_ScoredPage"], config: RoomGtEvalConfig
+) -> Dict[str, LocalizationScore]:
+    """Localization scored per source document, pages of one document pooled."""
+    per_document: Dict[str, LocalizationScore] = {}
+    for page in pages:
+        score = per_document.setdefault(document_key(page.key), LocalizationScore())
+        score_localization(boxes_of(page.rooms), page.gts, config.gt_iou_threshold, score)
+    return per_document
 
 
 def _attachment_configs(
@@ -524,6 +539,14 @@ def evaluate(
         "detections_scored": sum(len(p.detections) for p in pages),
         "iou_threshold": config.gt_iou_threshold,
         "localization": localization.to_dict(),
+        # Per document, not just overall: a change that lifts the total while
+        # gutting one building is not an improvement, and the SFT gate's
+        # "no document loses recall" clause needs this granularity. Document,
+        # not page, because pages of one drawing set are not independent.
+        "per_document": {
+            document: score.to_dict()
+            for document, score in sorted(_score_per_document(pages, config).items())
+        },
         "extent_size": {
             "max_box_to_gt_area_ratio": config.max_box_to_gt_area_ratio,
             **extent.to_dict(),

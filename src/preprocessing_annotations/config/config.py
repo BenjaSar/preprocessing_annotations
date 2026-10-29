@@ -413,6 +413,15 @@ class OCRConfig:
             r"^MAIL\s*/\s*IDF$",
             r"^TEACHERS?\s+LOUNGE$",
             r"^ADA\s+RESTROOM$",
+            # Cultivation labels (BLOOM / VEG) deliberately have NO pattern
+            # here. Tried 2026-10-27 and reverted the same day: the patterns
+            # do build candidates from track2_v2's OCR ("BLOOM", "VEG",
+            # "VEG RM"), but SemanticRoomValidator rejects those bare forms
+            # as too-generic-alone compounds, so eval/candidate_replay.py
+            # measured room_count_changes {} on all 14 pages -- zero rooms
+            # gained. Adding them back only re-adds dead config; the real
+            # blocker is that gate plus _same_label's exact-equality match
+            # (OCR "BLOOM" never corroborates the VLM's "BLOOM RM 1").
         ]
     )
 
@@ -523,6 +532,22 @@ class VLMConfig:
     # for spatial-reasoning experiments.
     # Override via --unsloth-model CLI flag.
     unsloth_model: str = "qwen3-vl-8b"
+
+    # A5: LoRA adapter directory written by scripts/train_qwen3vl_unsloth.py,
+    # loaded on top of unsloth_model (UnslothQwenBackend.initialize). None =
+    # the base model, which is what every run so far measured. Set it to score
+    # a fine-tune through the pipeline's own harness, so a trained model and
+    # its baseline are compared by the same code path rather than by training
+    # loss. The adapter must come from the same unsloth_model it is loaded
+    # onto; a missing path raises instead of quietly scoring the base model.
+    unsloth_adapter_path: Optional[Path] = None
+
+    # Room prompt the unsloth backend sends (prompt_templates.ROOM_PROMPT_BUILDERS).
+    # "production" = the base model's wall-to-wall prompt, what every run
+    # before 2026-10-28 used. An adapter from scripts/train_qwen3vl_unsloth.py
+    # was trained on "sft_label" and must be scored with it: asked the other
+    # way, it receives an instruction it never saw, for a different box.
+    unsloth_room_prompt: str = "production"
 
     # Generation parameters for local VLM backends (qwen, unsloth).
     # Defaults match Qwen3-VL Thinking recommended sampling values. With the
@@ -800,6 +825,54 @@ class SFTDatasetConfig:
     gt_category_map_sha256: str = (
         "54b1ca7b050d46e520efc3d510a774b5f9035e6fdb651ea4554b673bb0a7fe6a"
     )
+
+    # eval/split_integrity.py: two documents whose pages differ by less than
+    # this mean absolute pixel difference (grayscale, both pages resized to
+    # duplicate_thumbnail_px) are the same drawing, and must not sit in two
+    # splits. Measured 2026-10-27 on corpus_batch2_input: the three
+    # layered/flattened pairs score .0028 (ANIMAL CLINIC) and .0001 (Coast
+    # Central), while 40 random unrelated page pairs score median .069,
+    # minimum .035. This default sits in that empty gap -- an order of
+    # magnitude above the copies, half the closest unrelated pair.
+    #
+    # Detects pixel copies only. The same sheet rotated (ROCKWOOD-CORTEC
+    # layered vs FLAT) and two sheets of one project (E206/E215 parking
+    # garage, .025) are below the bar and stay a human call from the title
+    # block, as scripts/make_split_group_map.py says. Room-name overlap was
+    # measured as an alternative and rejected: unrelated documents reach
+    # Jaccard .40-.44 against a .043 median over 378 pairs.
+    duplicate_page_max_abs_diff: float = 0.015
+    duplicate_thumbnail_px: Tuple[int, int] = (512, 384)
+
+    # D5: a tile with no room is a negative example -- most are genuinely
+    # empty (109 of 119 empty tiles on the 48 GT pages hold no GT room), and
+    # they are what stops legend and title-block text being read as rooms.
+    # They are capped because corpora differ wildly in how empty they are:
+    # 30% of tiles on the GT pages, 69% on corpus_batch2_output, 79% on
+    # track2_v2. Training on an unbalanced share teaches the model to answer
+    # with an empty list. The cap is the GT-page share, the one corpus whose
+    # emptiness was checked against real room polygons.
+    #
+    # Within the cap, tiles that lie inside a page's exclusion zones are
+    # taken first -- those are the known legend/title-block regions, the
+    # negatives worth the most -- then a seeded sample of the rest, so the
+    # dataset is reproducible.
+    max_empty_tile_fraction: float = 119 / 400
+    empty_tile_sample_seed: int = 42
+
+    # D9: drop a room from the SFT targets when PaddleOCR's own text
+    # confidence for its label (confidence_detail.ocr) is below this. The SFT
+    # prompt asks for "exact label text as printed", so a misread string is
+    # trained verbatim -- measured on track2_v2's Rally Palmhurst page, the
+    # drawing reads OFFICE 03 / 02 / 01 and the pipeline recorded OFFICE-08,
+    # OFFICE-02 and OFFICE (OCR read "-FICE.0" at .88).
+    #
+    # Default 0.0 keeps every room: the box is correct even when the string
+    # is not, and no measurement yet says which trade is better. Price a
+    # floor with eval/sft_name_noise.py before raising it, and remember the
+    # confidences are PaddleOCR's self-reported ones, not accuracy -- there
+    # is no ground truth for label strings in this project.
+    min_name_ocr_confidence: float = 0.0
 
 
 @dataclass
@@ -1975,15 +2048,22 @@ def _get_mlflow_tracking_uri() -> str:
     return os.getenv("MLFLOW_TRACKING_URI", "http://127.0.0.1:5000")
 
 
+def _get_mlflow_enabled() -> bool:
+    val = os.getenv("MLFLOW_ENABLED", "false")
+    return val.lower() in ("true", "1", "yes")
+
+
 @dataclass
 class MlflowConfig:
     """Self-hosted MLflow run tracking. Diagnostic layer only -- disabled
-    by default, and every call site that consumes this config must no-op
-    (never raise) if mlflow isn't installed or the tracking server is
-    unreachable. See orchestration/mlflow_tracking.py for the guard.
+    by default (opt in per run with --enable-mlflow, or for a whole chain of
+    runs with MLFLOW_ENABLED=1), and every call site that consumes this
+    config must no-op (never raise) if mlflow isn't installed or the
+    tracking server is unreachable. See orchestration/mlflow_tracking.py
+    for the guard.
     """
 
-    enabled: bool = False
+    enabled: bool = field(default_factory=_get_mlflow_enabled)
     tracking_uri: str = field(default_factory=_get_mlflow_tracking_uri)
     experiment_name: str = "floorplan-annotation-pipeline"
 

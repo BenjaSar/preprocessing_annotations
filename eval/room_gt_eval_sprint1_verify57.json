@@ -1,0 +1,169 @@
+{
+  "run_dir": "../../sprint1_verify57",
+  "gt_coco_path": "/home/ubuntu/floorplan_classifier/VLM/gt_segmentation/result.json",
+  "pages_scored": 48,
+  "gt_pages_missing_from_run": [],
+  "detections_scored": 2190,
+  "iou_threshold": 0.5,
+  "localization": {
+    "predictions": 1015,
+    "predictions_center_in_gt": 949,
+    "predictions_iou_match": 0,
+    "gt_rooms": 1497,
+    "gt_rooms_located": 854,
+    "gt_rooms_iou_matched": 0,
+    "prediction_best_iou_sum": 39.51560317237211,
+    "gt_best_iou_sum": 40.57659955670943,
+    "label_precision": 0.9349753694581281,
+    "label_recall": 0.5704742818971276,
+    "label_f1": 0.7085981281445864,
+    "label_fdr": 0.06502463054187191,
+    "label_fnr": 0.42952571810287243,
+    "extent_precision": 0.0,
+    "extent_recall": 0.0,
+    "extent_f1": 0.0,
+    "mean_iou_per_prediction": 0.03893162874125331,
+    "mean_iou_per_gt_room": 0.0271052769249896
+  },
+  "extent_size": {
+    "max_box_to_gt_area_ratio": 1.0,
+    "located": 949,
+    "oversize": 1,
+    "oversize_rate": 0.001053740779768177,
+    "median_area_ratio": 0.014591368297789765,
+    "p90_area_ratio": 0.14261453594396967,
+    "max_area_ratio": 1.1750472437092667
+  },
+  "category": {
+    "gt_category_map_path": "/home/ubuntu/floorplan_classifier/VLM/gt_segmentation/gt_category_map.json",
+    "category_map_reviewed": false,
+    "correct": 897,
+    "wrong": 52,
+    "excluded_unmapped": 0,
+    "excluded_untyped": 0,
+    "accuracy": 0.9452054794520548,
+    "top_confusions": [
+      {
+        "gt_class": "CLASSROOM",
+        "predicted": "CLOSET",
+        "rooms": 9
+      },
+      {
+        "gt_class": "CORRIDOR",
+        "predicted": "TOILET",
+        "rooms": 8
+      },
+      {
+        "gt_class": "TOILET",
+        "predicted": "RESTROOM",
+        "rooms": 6
+      },
+      {
+        "gt_class": "CLASSROOM",
+        "predicted": "CORRIDOR",
+        "rooms": 4
+      },
+      {
+        "gt_class": "CORRIDOR",
+        "predicted": "STORAGE ROOM",
+        "rooms": 3
+      },
+      {
+        "gt_class": "OTHER",
+        "predicted": "STORAGE ROOM",
+        "rooms": 3
+      },
+      {
+        "gt_class": "JANITOR CLOSET",
+        "predicted": "CLOSET",
+        "rooms": 2
+      },
+      {
+        "gt_class": "OTHER",
+        "predicted": "CORRIDOR",
+        "rooms": 2
+      },
+      {
+        "gt_class": "CLASSROOM",
+        "predicted": "STAIRWELL",
+        "rooms": 2
+      },
+      {
+        "gt_class": "CORRIDOR",
+        "predicted": "VESTIBULE",
+        "rooms": 2
+      },
+      {
+        "gt_class": "PRIVATE OFFICE",
+        "predicted": "STORAGE ROOM",
+        "rooms": 2
+      },
+      {
+        "gt_class": "CLASSROOM",
+        "predicted": "CAFETERIA",
+        "rooms": 2
+      },
+      {
+        "gt_class": "TOILET",
+        "predicted": "CLOSET",
+        "rooms": 1
+      },
+      {
+        "gt_class": "PRIVATE OFFICE",
+        "predicted": "CORRIDOR",
+        "rooms": 1
+      },
+      {
+        "gt_class": "STORAGE ROOM",
+        "predicted": "CLOSET",
+        "rooms": 1
+      }
+    ]
+  },
+  "attachment": {
+    "intersection": {
+      "correct": 60,
+      "wrong": 26,
+      "attachable": 1653,
+      "correctly_attached": 60,
+      "precision": 0.6976744186046512,
+      "recall_of_attachable": 0.036297640653357534,
+      "f1": 0.06900517538815412,
+      "fdr": 0.3023255813953488,
+      "fnr": 0.9637023593466425
+    },
+    "nearest_with_cutoff_p50_279px": {
+      "correct": 1005,
+      "wrong": 657,
+      "attachable": 1653,
+      "correctly_attached": 1005,
+      "precision": 0.6046931407942239,
+      "recall_of_attachable": 0.6079854809437386,
+      "f1": 0.6063348416289593,
+      "fdr": 0.39530685920577613,
+      "fnr": 0.3920145190562614
+    },
+    "nearest_with_cutoff_p75_677px": {
+      "correct": 1132,
+      "wrong": 969,
+      "attachable": 1653,
+      "correctly_attached": 1132,
+      "precision": 0.5387910518800572,
+      "recall_of_attachable": 0.6848154869933454,
+      "f1": 0.6030900372935536,
+      "fdr": 0.46120894811994284,
+      "fnr": 0.3151845130066546
+    },
+    "nearest_with_cutoff_p90_1268px": {
+      "correct": 1140,
+      "wrong": 1019,
+      "attachable": 1653,
+      "correctly_attached": 1140,
+      "precision": 0.5280222325150533,
+      "recall_of_attachable": 0.6896551724137931,
+      "f1": 0.5981112277019937,
+      "fdr": 0.4719777674849467,
+      "fnr": 0.31034482758620685
+    }
+  }
+}

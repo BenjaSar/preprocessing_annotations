@@ -12,10 +12,13 @@ so any file importing this module works even without the package installed.
 
 from __future__ import annotations
 
+import argparse
 import logging
 import time
 from contextlib import contextmanager
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Iterator, Optional
+
+from ..config.config import MlflowConfig
 
 logger = logging.getLogger(__name__)
 
@@ -53,15 +56,15 @@ def start_run(config: Any) -> Optional[str]:
         return None
 
 
-def end_run() -> None:
-    """No-ops if no active run."""
+def end_run(status: str = "FINISHED") -> None:
+    """No-ops if no active run. `status` is an MLflow RunStatus name."""
     global _active_run_id
     if _active_run_id is None:
         return
     try:
         import mlflow
 
-        mlflow.end_run()
+        mlflow.end_run(status=status)
     except Exception as e:
         logger.warning(f"MLflow end_run failed (non-fatal): {e}")
     finally:
@@ -77,6 +80,11 @@ def log_stage_metric(stage: str, key: str, value: float, step: Optional[int] = N
         mlflow.log_metric(key, float(value), step=step)
     except Exception as e:
         logger.warning(f"MLflow log_metric failed for {stage}/{key} (non-fatal): {e}")
+
+
+def log_metrics(stage: str, metrics: Dict[str, float]) -> None:
+    for key, value in metrics.items():
+        log_stage_metric(stage, key, value)
 
 
 def log_params(params: Dict[str, Any]) -> None:
@@ -115,6 +123,70 @@ def log_artifact(path: str) -> None:
         mlflow.log_artifact(path)
     except Exception as e:
         logger.warning(f"MLflow log_artifact failed for {path} (non-fatal): {e}")
+
+
+@contextmanager
+def tracked_run(config: Any, run_kind: str) -> Iterator[Optional[str]]:
+    """One MLflow run around a standalone script (trainer, gate), tagged
+    `run_kind` so these runs can be told apart from pipeline runs in the
+    shared experiment. Yields the run_id, or None when tracking is
+    disabled/unavailable.
+
+    Ends the run FAILED if the block raises -- including SystemExit, which
+    the trainer uses to refuse a truncating token budget -- and re-raises,
+    so a crashed run is never recorded as FINISHED.
+    """
+    run_id = start_run(config)
+    if run_id:
+        log_tags({"run_kind": run_kind})
+    try:
+        yield run_id
+    except BaseException:
+        end_run(status="FAILED")
+        raise
+    else:
+        end_run()
+
+
+@contextmanager
+def non_fatal(what: str) -> Iterator[None]:
+    """Keep a failure while building a payload from breaking the run it
+    observes: the log_* calls guard mlflow errors themselves, but the code
+    that assembles their arguments (a report whose schema drifted, a verdict
+    missing a key) is not covered by them, and it also runs when tracking is
+    off. A warning, not a crash after the adapter is already saved.
+
+    Catches Exception only: SystemExit and KeyboardInterrupt still propagate.
+    """
+    try:
+        yield
+    except Exception as e:
+        logger.warning(f"MLflow {what} failed (non-fatal): {e!r}")
+
+
+def add_mlflow_arguments(parser: argparse.ArgumentParser) -> None:
+    """The pipeline's two MLflow flags, for standalone scripts."""
+    parser.add_argument(
+        "--enable-mlflow", action="store_true",
+        help="Track this run in MLflow (default: off; MLFLOW_ENABLED=1 enables "
+             "it without the flag). If mlflow is not installed or the server "
+             "is unreachable, the run continues unaffected and a warning is logged.",
+    )
+    parser.add_argument(
+        "--mlflow-tracking-uri", default=None,
+        help="Override MlflowConfig.tracking_uri (default: $MLFLOW_TRACKING_URI "
+             "or http://127.0.0.1:5000).",
+    )
+
+
+def mlflow_config_from_args(args: argparse.Namespace) -> MlflowConfig:
+    """Resolve MlflowConfig the way pipeline.main does: the env supplies the
+    default, the flag can only turn tracking on."""
+    config = MlflowConfig()
+    config.enabled = config.enabled or args.enable_mlflow
+    if args.mlflow_tracking_uri is not None:
+        config.tracking_uri = args.mlflow_tracking_uri
+    return config
 
 
 @contextmanager

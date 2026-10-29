@@ -26,7 +26,7 @@ Usage
     extended_type = get_extended_type("CONFERENCE ROOM")  # → "conference_room"
 """
 
-from typing import Dict, List, Set, Optional, NamedTuple
+from typing import Dict, List, NamedTuple, Optional, Sequence, Set
 import logging
 import re
 
@@ -199,6 +199,11 @@ MANDATORY_CLASSES: Dict[str, List[str]] = {
         "SUPPLY ROOM", "ARCHIVES", "FILE ROOM",
         "MECH ROOM",
         "ELEC ROOM",
+        # ZOOM (a dealership's video-call room, OCR pattern ^ZOOM\s*\d*$)
+        # already resolved here through the least-intrusive default. Made
+        # explicit per user directive 2026-10-27 so it does not move if that
+        # default ever changes -- same reasoning as VAULT below.
+        "ZOOM",
         # VAULT per explicit taxonomy directive. Was resolving to STORAGE ROOM
         # only via the unknown-token fallback; made explicit so it does not
         # break silently if the fallback default ever changes.
@@ -250,7 +255,20 @@ MANDATORY_CLASSES: Dict[str, List[str]] = {
     # keyword gate decide that, and they are a separate, paired change.
     "ART CLASSROOM": ["ART CLASSROOM"],
     "CHILDREN'S PLAYROOM": ["CHILDREN'S PLAYROOM"],
-    "CLINIC": ["CLINIC"],
+    # The clinic labels below already had OCR patterns (OCRConfig.
+    # room_name_patterns, added 2026-09-16 with the SHOWROOM/TRIAGE work) but
+    # no entry here, so each one became a candidate and then fell through
+    # normalize_to_mandatory's "least-intrusive default" to STORAGE ROOM.
+    # Measured 2026-10-27 on stored roomsRecognized types: DRAW x10,
+    # EXAM RM x7, TRIAGE x4, NURSE STATION x2, PROCEDURE x1 across
+    # corpus_batch2_v2 + sprint1_verify57 + track2_v2, all typed STORAGE ROOM.
+    # room_type is an SFT training target, so each was teaching a wrong class.
+    # Pattern and taxonomy halves must ship together -- the same pairing bug
+    # as BLOOM/VEG, which had the taxonomy half and no pattern.
+    "CLINIC": [
+        "CLINIC",
+        "EXAM RM", "EXAM ROOM", "TRIAGE", "NURSE STATION", "DRAW", "PROCEDURE",
+    ],
     "FILE ROOM": ["FILE ROOM"],
     # Reviewer's spelling kept as the class name; the standard spelling is a
     # variant so a correctly spelled label still resolves here.
@@ -298,6 +316,11 @@ MANDATORY_CLASSES: Dict[str, List[str]] = {
     # specific mandatory class — per taxonomy decision: CUSTODIAL, LOCKER rooms.
     "OTHER": [
         "OTHER", "CUSTODIAL", "CUSTODIAN OFFICE",
+        # Automotive-dealership spaces, per user directive 2026-10-27. Both
+        # had OCR patterns from the 2026-09-16 dealership vocabulary work and
+        # no entry here, so both resolved to STORAGE ROOM through the
+        # least-intrusive default -- a service bay is not storage.
+        "CAR WASH", "BAYS", "BAY", "DETAIL BAY", "DETAIL BAYS",
         "LOCKER", "LOCKERS", "LOCKER ROOM",
         "BOYS LOCKER", "GIRLS LOCKER", "BOYS LOCKERS", "GIRLS LOCKERS",
         "MENS LOCKER", "WOMENS LOCKER",
@@ -816,6 +839,57 @@ def normalize_to_mandatory(raw: str) -> str:
 
     logger.debug(f"No match for room type: '{raw}' → STORAGE ROOM (fallback)")
     return "STORAGE ROOM"
+
+
+# Labels whose class depends on the drawing they sit in, not on their own
+# text. "LAB" is a science room in a school and a clinical lab in a clinic,
+# and normalize_to_mandatory sees only the label, so it cannot tell them
+# apart. Per user directive (2026-10-27) such a label takes CLINIC when the
+# page's OTHER labels already say the page is clinical. Observed: 4 of 5 LAB
+# labels in the corpora sit on clinical documents (UNMH Cancer Center,
+# ANIMAL CLINIC, MCA CLINIC), 1 on a page of unknown type.
+CONTEXT_DEPENDENT_LABELS: Dict[str, str] = {
+    "LAB": "CLINIC",
+}
+
+
+def resolve_context_dependent_types(
+    names: Sequence[str], types: Sequence[str]
+) -> List[str]:
+    """Re-type a page's context-dependent labels from the company they keep.
+
+    A label in CONTEXT_DEPENDENT_LABELS takes its mapped class only when some
+    OTHER room on the same page already carries that class on its own text --
+    an unambiguous label like EXAM RM or TRIAGE. A page whose only evidence is
+    the ambiguous label itself is left alone, so "LAB" on a school plan stays
+    whatever its own text resolved to.
+
+    Pure and page-local: takes this page's labels and the classes already
+    resolved for them, returns the corrected classes in the same order.
+
+    Args:
+        names: Each room's label text, in page order.
+        types: The class already resolved for each, same length and order.
+
+    Returns:
+        A new list of classes; unchanged where no rule applies.
+    """
+    resolved = list(types)
+    ambiguous = {
+        index: CONTEXT_DEPENDENT_LABELS[(name or "").strip().upper()]
+        for index, name in enumerate(names)
+        if (name or "").strip().upper() in CONTEXT_DEPENDENT_LABELS
+    }
+    if not ambiguous:
+        return resolved
+
+    unambiguous_classes = {
+        resolved[index] for index in range(len(resolved)) if index not in ambiguous
+    }
+    for index, target in ambiguous.items():
+        if target in unambiguous_classes:
+            resolved[index] = target
+    return resolved
 
 
 def get_extended_type(raw: str) -> Optional[str]:
