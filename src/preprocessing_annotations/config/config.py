@@ -109,6 +109,18 @@ class PDFConfig:
     # by their own down-resize.
     min_longest_edge_px: int = 4500
 
+    # Whether PDFExtractor._page_scale actually enforces min_longest_edge_px as
+    # the floor described above. Confirmed 2026-09-16: it did not — the code
+    # only ever capped small sheets down, never raised them, contradicting this
+    # field's own contract (see _page_scale's docstring for the prior CPU-host
+    # memory incident that caused that). Off by default until validated —
+    # measure peak OCR memory on a batch of small-sheet pages with this on
+    # before flipping the default, same bar as use_windows/use_yolo_objects in
+    # PipelineConfig. Landing at the same 4500px ceiling the rest of the corpus
+    # already runs at daily (not beyond it) is why this is expected to be safe,
+    # but that's an inference, not yet a measurement.
+    enforce_min_edge_floor: bool = False
+
     # Output image format
     output_format: str = "PNG"
 
@@ -166,6 +178,43 @@ class OCRConfig:
     # Room number pattern (regex)
     room_number_pattern: str = r"^(\d{3}[A-Z]?|\d{2,3})$"
 
+    # Placeholder marks a drawing prints around a room name it has not fixed
+    # yet, e.g. "??? CLASSROOM ???" / "???STORAGE???" (BP-1 Lake Shore High
+    # School Electrical, viewed at 3x: the sheet itself prints them, and OCR
+    # reads them at .90-1.0 confidence). room_name_patterns are anchored, so
+    # the name only matches once these are removed. Removed for room-candidate
+    # matching only -- the persisted OCR text keeps what the sheet says.
+    # Measured (sprint1_verify56 replay, 48 room-GT pages): GT rooms located
+    # 853 -> 854, precision .9350 unchanged, no document loses recall; the 6
+    # texts carrying these marks are all in that one document, and
+    # sprint1_verify55's 136 corpus_batch2 pages have none, so nothing else
+    # changes.
+    room_name_placeholder_pattern: str = r"\?+"
+
+    # Exclusion zones (ingestion/ocr_extractor.compute_exclusion_zones): a
+    # title-block cluster is extended to the page edge so the untexted logo
+    # beside it is covered. False = extend along BOTH ends of the long axis
+    # (current behaviour); True = only toward the nearer page edge, the side
+    # the logo gap is on.
+    # Why: "KEY PLAN" matches the title-block pattern, and on Bradley Fair p000
+    # it sits in a near-square general-notes block (x 1391-2059, y 127-766 of a
+    # 2200x1700 page); extending both ends made [0, 77, 2200, 816], 43% of the
+    # page, dropping 11 VLM rooms and 2 OCR rooms (bom_zone).
+    # Measured by replay with True (2026-10-22):
+    #   sprint1_verify57 / test_input, 48 room-GT pages: GT rooms located 854
+    #   both ways, no document loses recall, precision .9346 -> .9337 -- the
+    #   one added room is a real "MECHANICAL ROOM 554 SF" label (viewed) whose
+    #   text sits just outside its GT room outline.
+    #   sprint1_verify55 / corpus_batch2, 136 pages: +12 rooms on 8 pages, 0
+    #   lost; all 12 viewed: 7 real labels (Men's Locker 129, Storage 135, Car
+    #   Wash 134, Office 210, Corridor 102, Vestibule 113, Meeting 208), 1
+    #   title-block fragment ("BA"), 4 questionable.
+    #   Bradley Fair itself gains 0: once the zone is gone its VLM rooms are
+    #   dropped by low_ink / geometric / semantic / not_room_scale instead --
+    #   only 4 of its 14 VLM box centres fall in any GT room.
+    # Off by default: the GT precision dip and the one junk room need sign-off.
+    extend_titleblock_zone_to_near_edge_only: bool = False
+
     # Room name patterns to detect
     # Room name patterns to detect.
     # CRITICAL: All patterns must be anchored (^...$) so they match the
@@ -175,7 +224,7 @@ class OCRConfig:
     room_name_patterns: List[str] = field(
         default_factory=lambda: [
             # --- Commercial / office spaces ---
-            r"^(SUITE|OFFICE|CONFERENCE(\s+ROOM)?|MEETING(\s+ROOM)?)\s*\d*$",
+            r"^(SUITE|OFFICE|CONFERENCE(\s+ROOM)?|MEETING(\s+ROOM)?)[\s-]*\d*$",
             # --- Utility / MEP rooms (require ROOM suffix or exact standalone) ---
             r"^MECHANICAL(\s+ROOM)?$",
             r"^ELECTRICAL(\s+ROOM)?$",
@@ -241,7 +290,7 @@ class OCRConfig:
             r"^(MEN|WOMEN)('?S)?\s+TOILET$",
             # Verified real omitted room labels (user-confirmed present on
             # school floor plans; each currently discarded at the OCR gate).
-            r"^(TEACHER\s+)?WORK\s+(RM|ROOM)$",
+            r"^(TEACHER\s+)?WORK\s*(RM|ROOM)$",
             r"^MAIL\s+(RM|ROOM)$",
             r"^JAN\s+CLOSET$",
             r"^LOUNGE$",
@@ -283,6 +332,24 @@ class OCRConfig:
             # or compound label.  The [O0] group handles the common PaddleOCR
             # confusion between digit-zero and letter-O in "0BR" / "OBR".
             r"^TYPE-[A-Z]\d+(\.\d+)?(\s+[O0-4]BR)?$",
+            # F2 (2026-10-16): the "UNIT TYPE" spelling of the same code --
+            # the pattern above covers "TYPE-A1" but not "UNIT TYPE-A". OCR
+            # read these on sprint1_verify55 "1614 W. Temple - Plans - CD Set
+            # Electrical" and the semantic filter accepts them (-> RESIDENTIAL
+            # UNIT); candidate generation was the only block.
+            #
+            # Clean spellings only. Those sheets also carry OCR mangles (UNE /
+            # UNF / UNEE / UNFE TYPE, UNITTYPE-D2); regexing them would be
+            # fuzzy matching in a pattern list, the failure mode the
+            # single-letter abbreviation gate exists to stop. Mangles are crop
+            # re-read's job.
+            #
+            # Measured with the code LACKING this pattern (an earlier run with
+            # it already in config compared it against itself and wrongly read
+            # 0 change): verify54 (room GT) identical 976 / 821 / P .9334 /
+            # R .5484, 0 pages changed -- 0 occurrences there, so GT cannot
+            # move. verify55: +12 final rooms on 4 pages, 0 lost.
+            r"^UNIT\s+TYPE(\s*-\s*[A-Z]?\d*(\.\d+)?)?$",
             # --- Residential abbreviations (full-token only) ---
             r"^(BR|BD|BDRM|MBR|MSTR)\s*\d?$",    # bedroom
             r"^([O0]BR|1BR|2BR|3BR|4BR)$",         # unit type (O/0 tolerant)
@@ -302,6 +369,59 @@ class OCRConfig:
             r"^PDR$",                                 # powder room
             r"^(CONF|STE|RECP|WC|TLT|RM)$",         # commercial
             r"^(MECH|BSMT|UTL|LNDRY)$",             # building services
+            # --- Automotive-dealership / clinic vocabulary gap (confirmed
+            # 2026-09-15 via real OCR: room text reads correctly but was
+            # dropped here for lacking a matching pattern, leaving the
+            # adjacent room-number tag an orphan with no name to link to —
+            # e.g. "Upper Showroom" verified at conf=0.974 on McDonald
+            # Hyundai page006, still discarded pre-fix) ---
+            r"^(UPPER\s+|LOWER\s+)?SHOWROOM$",
+            r"^ZOOM\s*\d*$",
+            r"^CAFE$",
+            r"^(DETAIL\s+)?BAYS?$",
+            r"^CAR\s+WASH$",
+            r"^EQUIPMENT\s+ROOM$",
+            r"^TRIAGE\s*\d*$",
+            r"^LAB$",
+            r"^DRAW\s*\d*$",
+            r"^NURSE\s+STATION$",
+            r"^EXAM\s+RM\s*\d*$",
+            r"^PROCEDURE\s*\d*$",
+            r"^INTAKE$",
+            r"^CASHIER$",
+            r"^RESIDENTIAL\s+UNIT$",
+            # --- Bank/credit-union branch vocabulary gap (confirmed
+            # 2026-09-16 via real OCR on Rally Palmhurst Credit Union: all
+            # read cleanly, conf 0.92-0.99, but none had a matching pattern) ---
+            r"^CUSTOMER\s*R\.?\s*R\.?$",   # "CUSTOMER R.R.", OCR-merged "CUSTOMERRR"
+            r"^TELLER\s+LINE$",
+            r"^MECH\s*/?\s*ELEC$",         # "MECH/ELEC", "MECH /ELEC"
+            r"^MOTHER('?S)?\s+ROOM$",
+            r"^NIGHT\s+DROP\s*/?\s*ITM$",
+            # --- Candidate-builder gap (2026-10-13): real OCR labels inside
+            # GT rooms that passed the semantic keyword gate but matched no
+            # pattern here (eval/missed_room_ocr.py). Measured with
+            # eval/candidate_replay.py on sprint1_verify54 (in-sample: these
+            # forms come from the same 48 GT pages): located 796 -> 821,
+            # precision .9317 -> .9334, no document lost recall; all 33
+            # matching OCR texts on the 58 pages lie inside GT rooms. STAIR
+            # form also covers merged name+number ("STAIR A101").
+            r"^JANITORS?\s+CLOSET$",
+            r"^STAIR\s+[A-Z0-9]+$",
+            r"^COUNC\.?\s*OFFICE$",
+            r"^MAIN\s+OFFICE$",
+            r"^MAIL\s*/\s*IDF$",
+            r"^TEACHERS?\s+LOUNGE$",
+            r"^ADA\s+RESTROOM$",
+            # Cultivation labels (BLOOM / VEG) deliberately have NO pattern
+            # here. Tried 2026-10-27 and reverted the same day: the patterns
+            # do build candidates from track2_v2's OCR ("BLOOM", "VEG",
+            # "VEG RM"), but SemanticRoomValidator rejects those bare forms
+            # as too-generic-alone compounds, so eval/candidate_replay.py
+            # measured room_count_changes {} on all 14 pages -- zero rooms
+            # gained. Adding them back only re-adds dead config; the real
+            # blocker is that gate plus _same_label's exact-equality match
+            # (OCR "BLOOM" never corroborates the VLM's "BLOOM RM 1").
         ]
     )
 
@@ -413,6 +533,22 @@ class VLMConfig:
     # Override via --unsloth-model CLI flag.
     unsloth_model: str = "qwen3-vl-8b"
 
+    # A5: LoRA adapter directory written by scripts/train_qwen3vl_unsloth.py,
+    # loaded on top of unsloth_model (UnslothQwenBackend.initialize). None =
+    # the base model, which is what every run so far measured. Set it to score
+    # a fine-tune through the pipeline's own harness, so a trained model and
+    # its baseline are compared by the same code path rather than by training
+    # loss. The adapter must come from the same unsloth_model it is loaded
+    # onto; a missing path raises instead of quietly scoring the base model.
+    unsloth_adapter_path: Optional[Path] = None
+
+    # Room prompt the unsloth backend sends (prompt_templates.ROOM_PROMPT_BUILDERS).
+    # "production" = the base model's wall-to-wall prompt, what every run
+    # before 2026-10-28 used. An adapter from scripts/train_qwen3vl_unsloth.py
+    # was trained on "sft_label" and must be scored with it: asked the other
+    # way, it receives an instruction it never saw, for a different box.
+    unsloth_room_prompt: str = "production"
+
     # Generation parameters for local VLM backends (qwen, unsloth).
     # Defaults match Qwen3-VL Thinking recommended sampling values. With the
     # Instruct default model, set the Instruct-recommended values via VLM_*
@@ -436,6 +572,16 @@ class VLMConfig:
     room_max_new_tokens: int = 1024
     door_max_new_tokens: int = 4096
     window_max_new_tokens: int = 4096
+
+    # AV-6 (2026-09-23): page-type triage's own budget -- a short JSON
+    # object ({"page_type": ..., "rationale": ...}), not reusing the
+    # room/door/window budgets (those are sized for numerous bbox
+    # instances; this task emits exactly one small object).
+    page_type_max_new_tokens: int = 128
+
+    # Crop re-read (ingestion/crop_reread.py) budget: a JSON array holding
+    # one short label string, smaller than the page-type object above.
+    crop_text_max_new_tokens: int = 64
 
     # Room token budget for Thinking-variant Unsloth checkpoints only.
     # Verified 2026-07-24 (t7_stochastic run, qwen3-vl-8b-thinking): the
@@ -567,6 +713,331 @@ class ExportConfig:
 
     # Percentage of lowest-confidence images to flag for review
     review_threshold: float = 0.25
+
+    # AV-1 (2026-09-23): also export objectDetections (door/window
+    # geometry) to a standalone COCO file (export/object_exporter.py),
+    # alongside the existing room-geometry coco/ export. Default False:
+    # adding this field changes no existing export's output; STEP 7 only
+    # calls ObjectDetectionCOCOExporter when this is explicitly enabled.
+    export_object_detections: bool = False
+
+    # Forwarded to ObjectDetectionCOCOExporter.export's min_confidence.
+    # Default 0.0 keeps every persisted detection -- no filtering beyond
+    # what the detector/pipeline already applied before persisting
+    # objectDetections.
+    object_detection_min_confidence: float = 0.0
+
+    # COCO train/val/test split (export/group_split.py). The split unit is a
+    # group: one source document by default, or a wider family named in the
+    # group map. Measured on sprint1_verify54: pages of one document correlate
+    # .80-.93, the two PDFs of one building share room names (Jaccard .50-.59),
+    # and two schools of one design family reach .39-.45 (unrelated-document
+    # median .029) -- so a page-level split leaks and a per-PDF split can too.
+    split_ratios: Tuple[float, float, float] = (0.70, 0.15, 0.15)
+    split_seed: int = 42
+    # JSON: {"groups": {"<document>": "<group>"}, "pinned_test_groups": [...]},
+    # written by scripts/make_split_group_map.py and then edited by hand to
+    # merge documents into design families. Pinned groups always land in test
+    # (the room-GT documents are the only room eval set there is, so they must
+    # stay out of any training split). Documents the map does not name are
+    # their own group, so a run on another corpus needs no entry. Set to None
+    # to split by document with nothing pinned.
+    split_group_map_path: Optional[Path] = field(
+        default_factory=lambda: _PROJECT_ROOT / "gt_segmentation" / "split_group_map.json"
+    )
+
+
+@dataclass
+class RoomGtEvalConfig:
+    """AV-8 (2026-10-10): first room-extent ground truth for this
+    project's target domain -- Label Studio COCO polygon export over the
+    48 test_input pages (1497 room polygons, 93 room categories). Images
+    are byte-identical (md5, 48/48) to sprint1_verify50/51's images/; they
+    are NOT the corpus_batch2 pages sprint1_verify52 ran on (0/48 match).
+
+    Scored by eval/room_gt_eval.py: label localization (prediction center
+    inside a GT polygon), extent (bbox IoU), and object->room attachment
+    per AttachmentPolicy.
+    """
+
+    gt_coco_path: Path = field(
+        default_factory=lambda: _PROJECT_ROOT / "gt_segmentation" / "result.json"
+    )
+
+    # Reviewed GT-category -> taxonomy-class map, drafted by
+    # scripts/draft_gt_category_map.py and completed by a human. Needed to
+    # score whether a located room also carries the right class; without it
+    # only the room's position is scored. A category mapped to null is left
+    # out of the category score and reported as excluded.
+    gt_category_map_path: Path = field(
+        default_factory=lambda: _PROJECT_ROOT / "gt_segmentation" / "gt_category_map.json"
+    )
+
+    # Same Accuracy@0.5 convention as EvalConfig.gt_iou_threshold.
+    gt_iou_threshold: float = 0.5
+
+    # Oversize bar: a predicted box bigger than the GT room its center sits
+    # in. Definitional, not tuned -- above ratio 1.0 the box cannot be that
+    # room's extent, it has swallowed neighbours. Configurable because the
+    # pipeline emits two box conventions (label-scale for OCR-anchored
+    # rooms, VLM room-extent for vlm_only ones) and a per-convention bar may
+    # be wanted later. IoU cannot replace this: a too-small and a too-large
+    # box both score 0, so an oversize regression hides behind a flat IoU.
+    max_box_to_gt_area_ratio: float = 1.0
+
+    # NearestWithCutoffAttachmentPolicy has no measured cutoff; the harness
+    # derives candidate cutoffs from the data itself -- these percentiles of
+    # the detection-center -> correct-room-label distance distribution --
+    # instead of guessing pixel values. In-sample by construction: a cutoff
+    # picked from this sweep must be re-checked on held-out pages.
+    attachment_cutoff_percentiles: Tuple[int, ...] = (50, 75, 90)
+
+
+@dataclass
+class SFTDatasetConfig:
+    """Phase 0 decisions (2026-10-26) for the Qwen3-VL / unsloth SFT dataset.
+    Fixed before the exporter exists so every later target is built one way.
+
+    box_convention (D1): train on one box convention only, the label box
+      (annotation_schema.LABEL_BOX). The only one with volume: 992 of 1018
+      rooms on sprint1_verify57 are label boxes, 26 room_extent. Mixing them
+      under one prompt is an incoherent target (median box/GT-room area .013
+      vs .348, annotation_schema.py). The SFT prompt therefore asks for the
+      label box; the production prompt's "wall to wall" instruction
+      (prompt_templates.build_room_prompt_unsloth) is not edited.
+
+    Coordinate space (D2) has no field on purpose: an example is the view
+      inference gives the model. Pages over PipelineConfig.tile_trigger_px go
+      to the VLM as tiles (48/50 sprint1_verify57 pages, 78/88 corpus_batch2),
+      boxes in that tile's pixels; the grid comes from TileSplitter.for_page,
+      shared with the pipeline. Smaller pages go whole, in page pixels below
+      VLMConfig.unsloth_detection_max_dim_px, so no resize applies.
+
+    gt_category_map_sha256 (D3): the GT category map (RoomGtEvalConfig.
+      gt_category_map_path) is frozen unreviewed for v1, so the zero-shot
+      baseline and every fine-tuned model are scored against one map. It
+      maps GT categories for scoring only; training labels come from
+      taxonomy.py. Reviewing the map later means re-scoring the baseline and
+      updating this hash together.
+    """
+
+    box_convention: str = "label"
+    gt_category_map_sha256: str = (
+        "54b1ca7b050d46e520efc3d510a774b5f9035e6fdb651ea4554b673bb0a7fe6a"
+    )
+
+    # eval/split_integrity.py: two documents whose pages differ by less than
+    # this mean absolute pixel difference (grayscale, both pages resized to
+    # duplicate_thumbnail_px) are the same drawing, and must not sit in two
+    # splits. Measured 2026-10-27 on corpus_batch2_input: the three
+    # layered/flattened pairs score .0028 (ANIMAL CLINIC) and .0001 (Coast
+    # Central), while 40 random unrelated page pairs score median .069,
+    # minimum .035. This default sits in that empty gap -- an order of
+    # magnitude above the copies, half the closest unrelated pair.
+    #
+    # Detects pixel copies only. The same sheet rotated (ROCKWOOD-CORTEC
+    # layered vs FLAT) and two sheets of one project (E206/E215 parking
+    # garage, .025) are below the bar and stay a human call from the title
+    # block, as scripts/make_split_group_map.py says. Room-name overlap was
+    # measured as an alternative and rejected: unrelated documents reach
+    # Jaccard .40-.44 against a .043 median over 378 pairs.
+    duplicate_page_max_abs_diff: float = 0.015
+    duplicate_thumbnail_px: Tuple[int, int] = (512, 384)
+
+    # D5: a tile with no room is a negative example -- most are genuinely
+    # empty (109 of 119 empty tiles on the 48 GT pages hold no GT room), and
+    # they are what stops legend and title-block text being read as rooms.
+    # They are capped because corpora differ wildly in how empty they are:
+    # 30% of tiles on the GT pages, 69% on corpus_batch2_output, 79% on
+    # track2_v2. Training on an unbalanced share teaches the model to answer
+    # with an empty list. The cap is the GT-page share, the one corpus whose
+    # emptiness was checked against real room polygons.
+    #
+    # Within the cap, tiles that lie inside a page's exclusion zones are
+    # taken first -- those are the known legend/title-block regions, the
+    # negatives worth the most -- then a seeded sample of the rest, so the
+    # dataset is reproducible.
+    max_empty_tile_fraction: float = 119 / 400
+    empty_tile_sample_seed: int = 42
+
+    # D9: drop a room from the SFT targets when PaddleOCR's own text
+    # confidence for its label (confidence_detail.ocr) is below this. The SFT
+    # prompt asks for "exact label text as printed", so a misread string is
+    # trained verbatim -- measured on track2_v2's Rally Palmhurst page, the
+    # drawing reads OFFICE 03 / 02 / 01 and the pipeline recorded OFFICE-08,
+    # OFFICE-02 and OFFICE (OCR read "-FICE.0" at .88).
+    #
+    # Default 0.0 keeps every room: the box is correct even when the string
+    # is not, and no measurement yet says which trade is better. Price a
+    # floor with eval/sft_name_noise.py before raising it, and remember the
+    # confidences are PaddleOCR's self-reported ones, not accuracy -- there
+    # is no ground truth for label strings in this project.
+    min_name_ocr_confidence: float = 0.0
+
+
+@dataclass
+class MissedRoomOcrConfig:
+    """eval/missed_room_ocr.py: why a GT room never got a room candidate.
+
+    rerender_scale_factor: a GT room with no OCR text at the run's own
+    resolution is re-rendered from its PDF at this multiple of the run's
+    raster scale and OCR'd again. Text found only then is attributed to
+    resolution. An experiment parameter, not a tuned value.
+    """
+
+    rerender_scale_factor: float = 2.0
+
+
+@dataclass
+class CropRereadConfig:
+    """ingestion/crop_reread.py: VLM second look at OCR text fragments.
+
+    Gap (eval/missed_room_ocr_sprint1_verify53.json): 158 GT rooms never get
+    a candidate although OCR reads text inside them, part of it truncated or
+    misread room words ("TAIR", "CLASSRODM"). A detection is re-read when its
+    text fails every room-label pattern yet looks like a room keyword.
+
+    min_text_letters / keyword_similarity_min: selector bounds, swept
+      2026-10-15 via eval/candidate_replay.py --rereads over 7 settings
+      (verify54, 48 scored pages).
+
+      What is validated out-of-sample is re-reading ITSELF, not any one
+      setting: leave-one-document-out it locates 857 GT rooms against the
+      no-reread 821 at precision .9337 vs .9334, and no fold chose the
+      no-reread baseline.
+
+      keyword_similarity_min 0.8 is an IN-SAMPLE pick -- chosen after seeing
+      all 7 full-corpus scores, where it dominated 0.7 (same 857 located,
+      precision .9342 vs .9337, 1034 predictions vs 1041). The folds
+      themselves split (6 consistency_min=0.6 / 3 this / 1 all-defaults), so
+      0.8 won only 3 of 10. Treat it as a starting value; the fixed setting
+      is decided at C3 from a fresh run's own re-reads, not from this sweep.
+      Raising min_text_letters only loses rooms (4 -> 856, 5 -> 852).
+
+      This dataclass serves two roles -- how broadly crop_reread_probe.py
+      reads, and what the selector later accepts -- so a probe run at these
+      defaults can no longer be swept back down to 0.7 (the crops were never
+      read). Probe with an explicit --selector at least as broad as anything
+      to be swept.
+    consistency_min: a re-read replaces the OCR text only when the OCR text
+      is contained in it or this similar to it, so the VLM cannot turn an
+      unrelated token into a room name. Held at 0.7 deliberately: loosening
+      it to 0.6 was the most-chosen setting in the re-pick (6/10 folds) but
+      bought only 2 further located rooms (859 vs 857) and +.0001 precision,
+      which does not justify weakening the one guard that stops a re-read
+      inventing a room name.
+    crop_padding_box_heights: crop margin around the detection, in multiples
+      of its box height, so a truncated word's missing glyphs are in view.
+      An experiment parameter, not a tuned value.
+    skip_tokens_in_room_labels: do not re-read a fragment whose centre lies
+      inside a room-name candidate the OCR text already forms. Root cause it
+      fixes (2026-10-19, verify54): "SPECIAL" / "EDUCATION" stacked on two
+      lines are merged into one room label by find_room_candidates, but each
+      line was re-read with the other in view ("SPECIAL EDUCATION -",
+      "SPECIAL EDUCATION - 128"), so the merge no longer formed the label --
+      2 special_education GT rooms lost, the in-sample recall drop in
+      bp_1_kennedy_middle_school_electrical_pages. Measured by replaying the
+      verify54 probe (116 of 677 re-reads skipped): located 857 -> 853,
+      precision .9342 -> .9350, documents losing recall vs no re-read
+      [kennedy] -> none; leave-one-document-out still picks re-reading
+      over no re-read in 10/10 folds.
+    """
+
+    min_text_letters: int = 3
+    keyword_similarity_min: float = 0.8
+    consistency_min: float = 0.7
+    crop_padding_box_heights: float = 1.0
+    skip_tokens_in_room_labels: bool = True
+
+
+@dataclass
+class RoomExtentConfig:
+    """ingestion/vector_walls.py: full-room extents from a PDF's own vector
+    wall geometry, a second output beside the label box.
+
+    Gap: no room box in this project reaches IoU >= .5 with its GT room
+    (verify54, 48 GT pages) -- room boxes are label-scale, and every raster
+    technique tried failed against GT (wall bands, SAM, CubiCasa).
+
+    CAD-exported PDFs keep walls, doors and glazing on named drawing layers.
+    Segments on layers matching `layer_pattern` and not `excluded_layer_pattern`
+    are polygonized into faces; a room takes the smallest face containing its
+    label centre, and only when no other label of the page lands in that face
+    (a shared face = rooms merged through an unclosed opening).
+
+    Measured 2026-10-20 with this code (eval/room_extent_eval.py on
+    sprint1_verify54's final rooms, report room_extent_eval_sprint1_verify54.json):
+    283 of 954 rooms on 30 of 50 pages get an extent; on the 48 GT pages
+    280 extents, 253 reach box IoU >= .5 with a GT room (extent recall
+    253/1497 vs 0 for label boxes), 251 polygon IoU >= .5. Keep the label
+    box as the room's location: swapping in the extent box would move 12
+    rooms' centres out of their GT room (796 -> 784 located). Pages with any
+    matching layer: test_input 32/58, corpus_batch2 38/150 (+3 pages PyMuPDF
+    cannot read), track2 7/16. Both patterns were chosen on the GT corpus
+    itself (in-sample): walls only located 516 GT rooms by the best face per
+    room, adding DOOR|GLAZ raised that to 721. "FLAT" and scanned PDFs carry
+    no layers and get no extent.
+    """
+
+    layer_pattern: str = r"WALL|PART|DOOR|GLAZ"
+    excluded_layer_pattern: str = r"PATT|HTCH|ABOVE"
+
+
+@dataclass
+class DoorLayerFilterConfig:
+    """detection/door_layer_filter.py: door detections that are wiring arcs.
+
+    Gap: on CAD lighting plans YOLO reads the curved wiring runs between
+    fixtures as door swings (verify56/57 door FPs, Kennedy elec p001 7/7).
+
+    A door detection is dropped only when its page has geometry on a layer
+    matching `door_layer_pattern`, its box touches none of it, and it touches
+    geometry on a layer matching `wiring_layer_pattern` (drawing bounding
+    boxes, PyMuPDF get_drawings). Pages without a door layer are untouched.
+
+    Measured 2026-10-22, every box viewed at >= 2x with the box drawn.
+    sprint1_verify57 (test_input): 77 attached door detections sit on
+    door-layer pages but off the door layer: 71 wiring/fixture FPs, 3 real
+    doors (drawn on A-WALL / EQ-SPCQ layers), 3 ambiguous; the filter drops
+    69, all FPs, and keeps the 6 real/ambiguous. It also drops 195
+    unattached detections (sample of 27 viewed: 27 FPs). Out of sample,
+    sprint1_verify55's corpus_batch2 pages (wiring layers named "E-Wire-Std",
+    "E_WIRE"): 14 attached dropped, 14 FPs; 35 unattached dropped, 34 FPs +
+    1 ambiguous (dashed swing). Patterns were chosen on test_input; the
+    wiring pattern was widened from "WIRING" after corpus_batch2's names.
+    """
+
+    door_layer_pattern: str = r"DOOR"
+    wiring_layer_pattern: str = r"WIR"
+
+
+@dataclass
+class AttachmentConfig:
+    """AV-3 (2026-09-23): which AttachmentPolicy resolves object
+    detections (door/window/fixture) to rooms.
+
+    Default "intersection" -> IntersectionAttachmentPolicy, a thin
+    wrapper around the pre-AV-3 map_detections_to_rooms call -- adding
+    this dataclass and its two pipeline.py call sites changes no
+    behavior until policy is set to something else.
+
+    "nearest_with_cutoff" -> NearestWithCutoffAttachmentPolicy. Status:
+    Prototype First / Insufficient Evidence, not validated against this
+    corpus -- see that class's own docstring. Requires
+    nearest_cutoff_px to be set explicitly; there is no default cutoff,
+    because guessing one was the exact failure mode of the already-
+    rejected plain-nearest-room spike (memory
+    nearest-room-attachment-spike-2026-09-03).
+    """
+
+    policy: str = "intersection"
+    nearest_cutoff_px: Optional[float] = None
+
+    # AV-2: forwarded to map_detections_to_rooms's strict_type_dispatch.
+    # Default False reproduces the pre-AV-2 dispatch chain (unregistered
+    # object class folds into has_windows). See
+    # detection/object_types.py::ObjectTypeRegistry.flag_for.
+    strict_type_dispatch: bool = False
 
 
 @dataclass
@@ -1121,10 +1592,74 @@ class YoloObjectDetectorConfig:
     # (test_pcs door P.35/R.35->P.38/R.37, actually improved; held-out door
     # recall R.61->R.59, flat; Kaggle test flat) AND a real 18% further FP
     # drop on the 8 target pages (301->247; -40% from the original -6
-    # baseline of 414). Clean win, no tradeoff -- promoted.
+    # baseline of 414). Clean win on eval-harness benchmarks -- BUT see the
+    # 9->10 note below: a full-production-scale check (all 48 project
+    # files, not just eval fixtures) later found -9 had a severe,
+    # eval-harness-invisible window regression.
+    #
+    # Promoted 2026-09-07 (9 -> 10): two real bugs found via human QA on a
+    # fresh full-pipeline run (sprint1_verify50), NOT caught by the
+    # eval-harness checks above:
+    #
+    # (a) "Expanded door" bboxes -- root-caused to a genuine NMS gap, not
+    # a training issue: TileSplitter.merge's IoU-based dedup only drops a
+    # candidate whose overlap with an already-kept box exceeds
+    # iou_threshold. A wide box that CONTAINS several small real
+    # detections has LOW IoU with each individually (union dominated by
+    # the big box's own area), so nothing fires and all boxes survive
+    # side by side -- renders as one "expanded" door. Confirmed on a real
+    # case (Kennedy AVI-ON FLAT p002): a 559x333px box matched the
+    # bounding union of 3 separately-kept ~100-300px door boxes to within
+    # a few px. Fixed by `_drop_containment_unions()` in yolo_detector.py
+    # (D2) -- inference-time NMS post-processing, applies to any
+    # checkpoint, not a training fix. Validated directly against the
+    # confirmed case (drops the union box, keeps the 4 real doors).
+    #
+    # (b) Window suppression -- on the identical 48 production files,
+    # -7->-9 dropped window count 67->15 (-78%), invisible to the Kaggle/
+    # test_pcs/held-out checks above (which only showed a 4pt recall dip
+    # -- none of those benchmarks test at this project's actual file-set
+    # scale). Root cause: of -9's 414 E4 hard negatives, 33 were
+    # window-category; windows only had ~67 positive training instances
+    # (vs doors' 515+) so even a small negative count collapsed recall.
+    # Fixed by rebuilding negatives door-only (381 boxes -> 96 after the
+    # same per-page cap as -9), zero window negatives, retrained from -7.
+    # Kaggle-valid window P.73/R.71 post-retrain (healthy, no collapse).
+    #
+    # CAVEAT that turned out to be load-bearing: a full production-scale
+    # recount for -10 was attempted and abandoned (3 inconsistent
+    # reconstructions). -10 was promoted on Kaggle-valid health only.
+    #
+    # REVERTED 2026-09-07 (10 -> 7), same day: D2/D3 (yolo_detector.py)
+    # are GLOBAL code changes, not checkpoint-specific -- they apply to
+    # EVERY checkpoint, including ones measured before D2/D3 existed.
+    # This made every "-9 clean win" / "-10 fixes window" claim above
+    # an apples-to-oranges comparison (old checkpoint measured pre-D2/D3
+    # vs new checkpoint measured post-D2/D3). Re-scored -7, -9, -10 all
+    # under IDENTICAL current code (D2+D3 active) against test_pcs_
+    # commercial GT (11 images, the only real door/window GT this
+    # project has):
+    #
+    #   ckpt   door P/R/F1/IoU              window P/R/F1/IoU           avg F1
+    #   -7     .589/.526/.556/.718          .686/.433/.531/.701          .543
+    #   -9     .644/.492/.558/.737          .796/.341/.477/.704          .518
+    #   -10    .666/.432/.524/.746          .430/.194/.267/.694          .396
+    #
+    # Monotonic decline, -7 to -10, on BOTH categories' F1 and on window
+    # recall specifically (.433->.341->.194). Each retrain aimed at
+    # cutting door FPs traded away recall on both categories -- window
+    # took the largest hit each time (smaller positive training base).
+    # -7 is the best composite checkpoint under current code. -9 and -10
+    # are NOT improvements once scored fairly; they were only "wins"
+    # against a stale, incomparable pre-D2/D3 baseline for -7.
+    #
+    # D2/D3 (containment-union + area-outlier NMS fixes) remain shipped
+    # and validated on their own -- this revert is about CHECKPOINT
+    # CHOICE only, not those fixes. Do not re-promote -9/-10 without a
+    # fresh under-current-code GT comparison, not a raw production count.
     checkpoint_path: str = field(
         default_factory=lambda: str(
-            YOLO_CHECKPOINT_ROOT / "runs" / "kaggle_door_window-9"
+            YOLO_CHECKPOINT_ROOT / "runs" / "kaggle_door_window-7"
             / "weights" / "best.pt"
         )
     )
@@ -1513,17 +2048,103 @@ def _get_mlflow_tracking_uri() -> str:
     return os.getenv("MLFLOW_TRACKING_URI", "http://127.0.0.1:5000")
 
 
+def _get_mlflow_enabled() -> bool:
+    val = os.getenv("MLFLOW_ENABLED", "false")
+    return val.lower() in ("true", "1", "yes")
+
+
 @dataclass
 class MlflowConfig:
     """Self-hosted MLflow run tracking. Diagnostic layer only -- disabled
-    by default, and every call site that consumes this config must no-op
-    (never raise) if mlflow isn't installed or the tracking server is
-    unreachable. See orchestration/mlflow_tracking.py for the guard.
+    by default (opt in per run with --enable-mlflow, or for a whole chain of
+    runs with MLFLOW_ENABLED=1), and every call site that consumes this
+    config must no-op (never raise) if mlflow isn't installed or the
+    tracking server is unreachable. See orchestration/mlflow_tracking.py
+    for the guard.
     """
 
-    enabled: bool = False
+    enabled: bool = field(default_factory=_get_mlflow_enabled)
     tracking_uri: str = field(default_factory=_get_mlflow_tracking_uri)
     experiment_name: str = "floorplan-annotation-pipeline"
+
+
+@dataclass
+class RoomFilterConfig:
+    """Thresholds used by prepare_sft_annotation / _merge_vlm_and_ocr.
+
+    Defaults are the literals previously hardcoded in sft_validator.py —
+    no behavior change at defaults. Room-GT (2026-10-10) shows 36% / 63% of
+    GT rooms are below min_room_area_px / room_min_area; do not retune without
+    a leave-one-building-out check.
+    """
+
+    # Area floor (px²) for non-OCR-anchored rooms in the geometric filter.
+    min_room_area_px: int = 10_000
+
+    # Room-scale gate floor (px²); OCR-anchored sources bypass it.
+    room_min_area: int = 40_000
+
+    # Max fraction of image area for any single room box.
+    max_room_frac: float = 0.30
+
+    # Max fraction of image area for a vlm_only room box.
+    max_vlm_unit_frac: float = 0.08
+
+    # Edge-gap (px) under which an OCR box and a VLM box count as the same
+    # room in _merge_vlm_and_ocr (_bbox_distance). 0 = boxes must overlap.
+    merge_proximity_px: int = 100
+
+    # FIX-5 (non-drawing-region drop) and FIX-6 (ruled-table detection).
+    # Derived over 473 boxes on 58 sheets against an 18-file visual audit
+    # (sprint1_verify35), before any room GT existed:
+    #   ink_binarise_max: grayscale value below which a pixel counts as ink; a
+    #     fixed near-white cut (per-page Otsu was tested and rejected: it
+    #     collapses the wrong/right gap on some sheets).
+    #   min_ink_frac: at that level wrong-box ink maxed at 0.077 and right-box
+    #     ink bottomed at 0.102; the cut sits in that gap. A box with a lower
+    #     ink fraction is dropped. Room GT (sprint1_verify53): low_ink dropped
+    #     1044 candidates, 629 outside any GT room, 322 redundant, 93 harmful.
+    ink_binarise_max: int = 200
+    min_ink_frac: float = 0.09
+
+    # FIX-7: a vlm_only room (no OCR corroboration) is dropped when its box
+    # covers at least this fraction of the image. 0.0 drops every vlm_only room.
+    vlm_uncorroborated_area_frac: float = 0.0167
+
+    # automation/duplicate_boxes.py: drop a room-extent (vlm_only) box when a
+    # label box of the same room type sits inside it -- one room reported
+    # twice, once wall-to-wall and once around its label. Only the redundant
+    # big box goes; a room-extent box that is the sole record of its room is
+    # kept, which is why this is not the same as
+    # vlm_uncorroborated_area_frac=0 (that one drops every vlm_only room and
+    # was rejected 2026-10-21: on sprint1_verify55's 136 corpus_batch2 pages
+    # it deletes 116 rooms, 110 of them with no other room in the same place).
+    #
+    # Default True since 2026-10-21. Measured by replay (rule on vs off):
+    #   sprint1_verify57 / test_input, 48 room-GT pages: 1024 -> 1018 rooms,
+    #   GT rooms located 854 both ways, precision .9350 -> .9346, no document
+    #   loses recall, room-extent boxes 32 -> 26. The precision dip is the
+    #   metric counting a duplicate box as its own correct prediction.
+    #   sprint1_verify55 / corpus_batch2, 136 pages: 533 -> 526 rooms, 7
+    #   removed and 0 gained; every removal viewed at >=2x with both boxes
+    #   drawn, 6 of the 7 visibly holding the label box that replaces them
+    #   (UNIT TYPE - A1, Corridor 102, Conference 103, MANAGER'S OFFICE 120,
+    #   BR 203, a mechanical-room CORRIDOR pair).
+    drop_redundant_room_extent_boxes: bool = True
+
+    # Two-pass OCR's VLM fallback turns VLM-detected rooms into OCR candidates
+    # carrying the VLM's own box and self-reported confidence. Such a candidate
+    # duplicates its VLM room rather than corroborating it, and let invented
+    # rooms bypass FIX-7 and the OCR-anchored gates. True skips it in
+    # prepare_sft_annotation, so the VLM room stays vlm_only. Room GT
+    # (sprint1_verify53): located 797 -> 796, the one lost hit a wrongly named
+    # room; all 7 changed non-GT pages viewed, lost boxes all mislocated.
+    skip_vlm_echo_candidates: bool = True
+
+    # Slack (px) when matching an OCR candidate's box to a VLM room's box:
+    # two_pass_ocr_extractor truncates the VLM box to int when it builds the
+    # candidate.
+    vlm_echo_bbox_tolerance_px: int = 1
 
 
 @dataclass
@@ -1556,6 +2177,8 @@ class PipelineConfig:
         default_factory=ConfidenceWeightsConfig
     )
     mlflow: MlflowConfig = field(default_factory=MlflowConfig)
+    attachment: AttachmentConfig = field(default_factory=AttachmentConfig)
+    room_filter: RoomFilterConfig = field(default_factory=RoomFilterConfig)
 
     # Optional: ground-truth annotations dir (same format as this pipeline's
     # own annotations/ output). If set, run() calls bbox_metrics.evaluate_dataset
@@ -1598,6 +2221,124 @@ class PipelineConfig:
     # img) -- ship default-off, flip only on an explicit go-ahead per
     # the plan's P3 guarded-rollout step.
     use_sam3_exemplar: bool = False
+
+    # AV-6 (2026-09-23): page-type triage (floor_plan /
+    # non_architectural_document / other), one extra single-shot
+    # generate call per image inside STEP 3's existing per-image loop,
+    # while the VLM is already resident (no extra model load/unload
+    # cycle -- see _release_vlm_before_sam's docstring for why that
+    # matters on this stack). Advisory only: the result is persisted as
+    # an observable field on the annotation, never used to drop or
+    # accept a room. Requires use_vlm=True (no effect otherwise -- no
+    # model to classify with). Only the "unsloth" VLM backend has a
+    # PageClassifier adapter today (see vlm/classify/); with any other
+    # backend this flag is a no-op with a logged warning, not a crash.
+    # Default False: adding this flag changes no existing run's output.
+    #
+    # Status (2026-09-23): smoke-tested end-to-end once against a real
+    # page (qwen3-vl-8b, T4, model load 27.6s, classification 79.4s,
+    # correct floor_plan verdict with a coherent rationale on
+    # "ANIMAL CLINIC - AVI-ON LAYOUT_page000"). NOT accuracy-validated:
+    # no human-labeled sample has been scored for agreement rate yet --
+    # that is this flag's own stated precondition before raising its
+    # priority past Prototype First. Do not cite this as a measured
+    # triage accuracy.
+    use_page_type: bool = False
+
+    # Two-pass OCR's Pass 2 (VLM fallback for Pass-1 candidates under 0.92
+    # confidence) on pages where it triggers. sprint1_verify54 (replay from
+    # saved raw OCR): Pass 2 replaced none of the 1187 Pass-1 candidates; it
+    # added 36 VLM-box echoes and 281 candidates whose boxes do not match
+    # their same-name VLM rooms.
+    #
+    # Default False since 2026-10-20. Its candidates' boxes are not in the
+    # page's coordinate space, so a surviving one is a room drawn in the
+    # wrong place. Measured by replaying each run's own saved OCR with
+    # Pass-1 candidates (crop re-reads applied) plus abbreviation recovery:
+    #   sprint1_verify56 / test_input, 48 room-GT pages: 1015 -> 1013 final
+    #   rooms, GT rooms located 853 both ways, precision .9350 -> .9348 (the
+    #   2 boxes it loses were duplicates of rooms another box already
+    #   located), no document loses recall.
+    #   sprint1_verify55 / corpus_batch2, 136 pages without GT: 566 -> 533
+    #   rooms = 50 removed, 17 gained (a Pass-2 box had displaced them).
+    #   All 50 removed were viewed at >=2x with the box drawn: every one sits
+    #   on blank paper, a schedule/legend table, general notes, a title block
+    #   or a company logo, and none encloses its own room name. Of the 17
+    #   gained, 12 are "UNIT TYPE - x" labels inside real apartments and 3
+    #   more are real rooms; 2 are questionable (a grid bubble, a box next to
+    #   "RESIDENTIAL STORAGE").
+    # True restores Pass 2 (--ocr-vlm-fallback). Either way OCR device
+    # selection is unchanged: it depends on the VLM backend being present.
+    use_ocr_vlm_fallback: bool = False
+
+    # C2 (2026-10-15): crop re-read -- a VLM second look at OCR fragments
+    # that are not room labels but look like room keywords ("TAIR",
+    # "CLASSRODM"). Runs in the assembly step, after the PaddleOCR heap is
+    # released, and rebuilds that page's Pass-1 candidates from the re-read
+    # detections (orchestration/crop_reread_step.py).
+    #
+    # Measured offline on sprint1_verify54 (eval/candidate_replay.py
+    # --rereads, 48 scored pages): leave-one-document-out it locates 857 GT
+    # rooms against the no-reread 821, precision .9337 vs .9334, and no fold
+    # chose no-reread. In-sample it costs recall in one document
+    # (bp_1_kennedy_middle_school_electrical_pages).
+    #
+    # Default True (2026-10-16): run it whenever the pipeline CAN. This is a
+    # capability gate, not a promise that it ran -- the step needs a
+    # CropTextReader, and UnslothCropTextReader is the only implementation
+    # (vlm/read/), so a Claude-backend or OCR-only run has nothing to read
+    # crops with and proceeds without it. It is also skipped alongside
+    # use_pdf_text_layer, whose extras reach room candidates by a path this
+    # step does not reproduce and which no crop-reread measurement covers.
+    #
+    # Skipping is reported, never silent: AnnotationPipeline logs the reason
+    # and the run manifest records cropReread.active plus that reason, so a
+    # run cannot look re-read when it was not. Setting this False skips it
+    # unconditionally (--no-crop-reread).
+    #
+    # Cost, from the 58-page probe: 677 crops, median 9 per page, max 42,
+    # 3 pages had none; median 0.99 s/crop, 819 s total. The selector only
+    # picks fragments that are not already room labels but look like room
+    # keywords, so a page with no such text costs nothing.
+    #
+    # KNOWN REGRESSION, accepted by the project owner on 2026-10-16 when
+    # asking for this to run automatically: in-sample on verify54 it costs
+    # recall in one document (bp_1_kennedy_middle_school_electrical_pages),
+    # and all of its evidence is a replay of one run's saved OCR over the 48
+    # GT pages. 32 of 58 pages change room count there (30 gain, 2 lose, net
+    # +58 rooms). C3 -- a fresh run scored end to end -- has NOT happened.
+    use_crop_reread: bool = True
+
+    crop_reread: CropRereadConfig = field(default_factory=CropRereadConfig)
+
+    # Room extents from PDF vector walls (RoomExtentConfig). Pilot, off by
+    # default: adds coordinates.extent beside each room's label box and
+    # changes no existing field. Needs the source PDF (_source_pdf_for).
+    use_vector_room_extent: bool = False
+    room_extent: RoomExtentConfig = field(default_factory=RoomExtentConfig)
+
+    # Drop door detections the PDF's own layers show to be wiring
+    # (DoorLayerFilterConfig). Needs the source PDF (_source_pdf_for); pages
+    # without one, or without a door layer, keep every detection.
+    # On by default: 0 real doors in 145 viewed drops (DoorLayerFilterConfig).
+    use_door_layer_filter: bool = True
+    door_layer_filter: DoorLayerFilterConfig = field(default_factory=DoorLayerFilterConfig)
+
+    # E2 (2026-09-09): block single-letter abbreviation expansion ("K" ->
+    # KITCHEN, "P" -> PANTRY, "G" -> GARAGE in ABBREVIATION_MAP) in the
+    # room-candidate gating path (SemanticRoomValidator.filter_rooms,
+    # TaxonomyNormalizer.normalize). Default True -- unlike every other flag
+    # in this block, True is the SAFE default here, not the conservative
+    # off-state: measured on corpus_batch2 (88 pages), 30/30 bare "K" room
+    # candidates were false positives on visual inspection (fixture-type
+    # tags on a wire, structural grid-line labels, schedule-table
+    # column-header letters), zero were a real kitchen. "K"'s expansion is
+    # the only reason a bare single letter passes the room-keyword gate at
+    # all -- a bare "A"/"B"/etc. matches nothing and is dropped harmlessly.
+    # Set False only for a corpus confirmed to use bare single-letter room
+    # labels genuinely (see plan/single-letter-label-gate-plan-2026-09-09.md
+    # -- multi-character abbreviations like BR/WC/1BR are never affected).
+    block_single_letter_abbreviations: bool = True
 
     # Prototype (2026-08-20 audit): recover room labels from a PDF's
     # embedded text layer, additive-only against OCR's own detections
@@ -1741,6 +2482,36 @@ class PipelineConfig:
 
     # Parallel processing
     num_workers: int = 4
+
+    def crop_reread_skip_reason(self) -> Optional[str]:
+        """Why crop re-read will not run, or None when it will.
+
+        A reason rather than an exception: use_crop_reread defaults on, so
+        the ordinary OCR-only or Claude-backend run must proceed without the
+        step instead of failing at startup. The caller is expected to log
+        this and record it, so a skip is visible rather than silent.
+        """
+        if not self.use_crop_reread:
+            return "use_crop_reread is off"
+        if not self.use_vlm:
+            return (
+                "use_vlm is off: the re-read is a VLM second look at OCR "
+                "fragments and has no non-VLM fallback"
+            )
+        backend = self.vlm.backend.lower()
+        if backend != "unsloth":
+            return (
+                f"vlm.backend is {backend!r}, not 'unsloth': "
+                f"UnslothCropTextReader is the only CropTextReader "
+                f"implementation (vlm/read/)"
+            )
+        if self.use_pdf_text_layer:
+            return (
+                "use_pdf_text_layer is on: its extras reach room candidates "
+                "by a path the re-read step does not reproduce, and no "
+                "crop-reread measurement covers that combination"
+            )
+        return None
 
     @classmethod
     def for_high_detail(cls) -> "PipelineConfig":

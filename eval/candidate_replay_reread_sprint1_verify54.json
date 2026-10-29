@@ -1,0 +1,294 @@
+{
+  "run_dir": "/home/ubuntu/floorplan_classifier/VLM/sprint1_verify54",
+  "run_lacks_patterns": [
+    "^JANITORS?\\s+CLOSET$",
+    "^STAIR\\s+[A-Z0-9]+$",
+    "^COUNC\\.?\\s*OFFICE$",
+    "^MAIN\\s+OFFICE$",
+    "^MAIL\\s*/\\s*IDF$",
+    "^TEACHERS?\\s+LOUNGE$",
+    "^ADA\\s+RESTROOM$"
+  ],
+  "pages_replayed": 58,
+  "pages_scored": 48,
+  "candidates": {
+    "baseline": {
+      "added_name_patterns": [],
+      "removed_name_patterns": [],
+      "reread": null,
+      "localization": {
+        "predictions": 976,
+        "predictions_center_in_gt": 911,
+        "predictions_iou_match": 0,
+        "gt_rooms": 1497,
+        "gt_rooms_located": 821,
+        "gt_rooms_iou_matched": 0,
+        "prediction_best_iou_sum": 39.089505403134815,
+        "gt_best_iou_sum": 40.12249469126369,
+        "label_precision": 0.9334016393442623,
+        "label_recall": 0.5484301937207748,
+        "label_f1": 0.6909092252742761,
+        "label_fdr": 0.06659836065573765,
+        "label_fnr": 0.45156980627922516,
+        "extent_precision": 0.0,
+        "extent_recall": 0.0,
+        "extent_f1": 0.0,
+        "mean_iou_per_prediction": 0.04005072274911354,
+        "mean_iou_per_gt_room": 0.02680193366149879
+      },
+      "documents_with_recall_drop": [],
+      "room_count_changes": {}
+    },
+    "rr": {
+      "added_name_patterns": [],
+      "removed_name_patterns": [],
+      "reread": {
+        "min_text_letters": 3,
+        "keyword_similarity_min": 0.7,
+        "consistency_min": 0.7,
+        "crop_padding_box_heights": 1.0
+      },
+      "localization": {
+        "predictions": 1041,
+        "predictions_center_in_gt": 972,
+        "predictions_iou_match": 0,
+        "gt_rooms": 1497,
+        "gt_rooms_located": 857,
+        "gt_rooms_iou_matched": 0,
+        "prediction_best_iou_sum": 40.783406787625964,
+        "gt_best_iou_sum": 41.26279588544024,
+        "label_precision": 0.9337175792507204,
+        "label_recall": 0.5724782899131596,
+        "label_f1": 0.7097789258020443,
+        "label_fdr": 0.06628242074927959,
+        "label_fnr": 0.42752171008684037,
+        "extent_precision": 0.0,
+        "extent_recall": 0.0,
+        "extent_f1": 0.0,
+        "mean_iou_per_prediction": 0.03917714388820938,
+        "mean_iou_per_gt_room": 0.027563657906105706
+      },
+      "documents_with_recall_drop": [
+        "bp_1_kennedy_middle_school_electrical_pages"
+      ],
+      "room_count_changes": {
+        "326_rockaway_avi_on_layout_page000": [
+          10,
+          17
+        ],
+        "326_rockaway_avi_on_layout_page001": [
+          24,
+          31
+        ],
+        "326_rockaway_avi_on_layout_page002": [
+          41,
+          43
+        ],
+        "326_rockaway_avi_on_layout_page003": [
+          19,
+          22
+        ],
+        "326_rockaway_avi_on_layout_page004": [
+          16,
+          17
+        ],
+        "326_rockaway_avi_on_layout_page005": [
+          17,
+          21
+        ],
+        "bp_1_kennedy_middle_school_avi_on_layout_flat_page000": [
+          8,
+          9
+        ],
+        "bp_1_kennedy_middle_school_avi_on_layout_flat_page002": [
+          29,
+          30
+        ],
+        "bp_1_kennedy_middle_school_avi_on_layout_flat_page003": [
+          25,
+          26
+        ],
+        "bp_1_kennedy_middle_school_avi_on_layout_flat_page006": [
+          15,
+          16
+        ],
+        "bp_1_kennedy_middle_school_electrical_pages_page000": [
+          9,
+          11
+        ],
+        "bp_1_kennedy_middle_school_electrical_pages_page002": [
+          32,
+          31
+        ],
+        "bp_1_kennedy_middle_school_electrical_pages_page007": [
+          24,
+          23
+        ],
+        "bp_1_lake_shore_high_school_electrical_pages_page000": [
+          16,
+          17
+        ],
+        "bp_1_lake_shore_high_school_electrical_pages_page002": [
+          17,
+          19
+        ],
+        "bp_1_lake_shore_high_school_electrical_pages_page004": [
+          40,
+          41
+        ],
+        "bp_1_lake_shore_high_school_electrical_pages_page005": [
+          10,
+          11
+        ],
+        "bp_1_lake_shore_high_school_electrical_pages_page006": [
+          16,
+          18
+        ],
+        "bp_1_lake_shore_high_school_electrical_pages_page007": [
+          16,
+          17
+        ],
+        "bp_1_masonic_heights_elementary_avi_on_layout_flat_page000": [
+          33,
+          36
+        ],
+        "bp_1_masonic_heights_elementary_avi_on_layout_flat_page001": [
+          24,
+          27
+        ],
+        "bp_1_masonic_heights_elementary_avi_on_layout_flat_page002": [
+          42,
+          45
+        ],
+        "bp_1_masonic_heights_elementary_avi_on_layout_flat_page003": [
+          25,
+          27
+        ],
+        "bp_1_masonic_heights_elementary_school_electrical_pages_page000": [
+          32,
+          33
+        ],
+        "bp_1_masonic_heights_elementary_school_electrical_pages_page001": [
+          23,
+          24
+        ],
+        "bp_1_masonic_heights_elementary_school_electrical_pages_page002": [
+          41,
+          44
+        ],
+        "bp_1_violet_elementary_school_avi_on_layout_flat_page000": [
+          20,
+          23
+        ],
+        "bp_1_violet_elementary_school_avi_on_layout_flat_page001": [
+          24,
+          26
+        ],
+        "bp_1_violet_elementary_school_avi_on_layout_flat_page002": [
+          22,
+          23
+        ],
+        "bp_1_violet_elementary_school_electrical_pages_page000": [
+          15,
+          17
+        ],
+        "bp_1_violet_elementary_school_electrical_pages_page001": [
+          25,
+          27
+        ],
+        "bp_1_violet_elementary_school_electrical_pages_page002": [
+          21,
+          22
+        ],
+        "bradley_fair_avi_on_submittal_page000": [
+          2,
+          4
+        ]
+      }
+    }
+  },
+  "leave_one_document_out": {
+    "folds": [
+      {
+        "held_out": "326_rockaway_avi_on_layout",
+        "chosen": "rr",
+        "located": 128,
+        "predictions": 151,
+        "predictions_in_gt": 143
+      },
+      {
+        "held_out": "540_madison_avenue_divcowest_suite_29a_avi_on_layout",
+        "chosen": "rr",
+        "located": 2,
+        "predictions": 5,
+        "predictions_in_gt": 2
+      },
+      {
+        "held_out": "bp_1_kennedy_middle_school_avi_on_layout_flat",
+        "chosen": "rr",
+        "located": 124,
+        "predictions": 139,
+        "predictions_in_gt": 136
+      },
+      {
+        "held_out": "bp_1_kennedy_middle_school_electrical_pages",
+        "chosen": "rr",
+        "located": 123,
+        "predictions": 138,
+        "predictions_in_gt": 131
+      },
+      {
+        "held_out": "bp_1_lake_shore_high_school_electrical_pages",
+        "chosen": "rr",
+        "located": 130,
+        "predictions": 158,
+        "predictions_in_gt": 145
+      },
+      {
+        "held_out": "bp_1_masonic_heights_elementary_avi_on_layout_flat",
+        "chosen": "baseline",
+        "located": 97,
+        "predictions": 124,
+        "predictions_in_gt": 118
+      },
+      {
+        "held_out": "bp_1_masonic_heights_elementary_school_electrical_pages",
+        "chosen": "baseline",
+        "located": 94,
+        "predictions": 120,
+        "predictions_in_gt": 109
+      },
+      {
+        "held_out": "bp_1_violet_elementary_school_avi_on_layout_flat",
+        "chosen": "baseline",
+        "located": 68,
+        "predictions": 87,
+        "predictions_in_gt": 76
+      },
+      {
+        "held_out": "bp_1_violet_elementary_school_electrical_pages",
+        "chosen": "rr",
+        "located": 75,
+        "predictions": 93,
+        "predictions_in_gt": 86
+      },
+      {
+        "held_out": "bradley_fair_avi_on_submittal",
+        "chosen": "rr",
+        "located": 4,
+        "predictions": 4,
+        "predictions_in_gt": 4
+      }
+    ],
+    "held_out": {
+      "gt_rooms_located": 845,
+      "predictions": 1019,
+      "label_precision": 0.9322865554465162
+    },
+    "default": {
+      "gt_rooms_located": 821,
+      "predictions": 976,
+      "label_precision": 0.9334016393442623
+    }
+  }
+}

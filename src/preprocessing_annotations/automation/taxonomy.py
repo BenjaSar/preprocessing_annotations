@@ -1,7 +1,7 @@
 """
 Mandatory SFT Taxonomy — Single Source of Truth.
 
-Implements the standardized 31-class room taxonomy required for Vision-Language
+Implements the standardized room taxonomy (MANDATORY_CLASSES) required for Vision-Language
 Model fine-tuning, while preserving fine-grained residential/utility classification
 via extended_type for non-SFT use cases.
 
@@ -26,7 +26,7 @@ Usage
     extended_type = get_extended_type("CONFERENCE ROOM")  # → "conference_room"
 """
 
-from typing import Dict, List, Set, Optional, NamedTuple
+from typing import Dict, List, NamedTuple, Optional, Sequence, Set
 import logging
 import re
 
@@ -113,6 +113,10 @@ MANDATORY_CLASSES: Dict[str, List[str]] = {
         "COMPUTER LAB", "SCIENCE LAB",
         "SPECIAL EDUCATION", "SPECIAL ED",
         "SCIENCE CLASSROOM", "LITERATURE CLASSROOM",
+        # N3 (2026-10-10): GT-confirmed on 48-page eval (8/10 MEDIA CENTER
+        # candidates inside GT media_center polygons). A school media center
+        # is a library/resource space — nearest existing class is CLASSROOM.
+        "MEDIA CENTER", "MEDIA ROOM",
     ],
     "LECTURE HALL": [
         "LECTURE HALL", "AUDITORIUM", "THEATER", "THEATRE",
@@ -129,8 +133,14 @@ MANDATORY_CLASSES: Dict[str, List[str]] = {
     ],
     "CAFETERIA": [
         "CAFETERIA", "CAFE", "BREAK ROOM", "BREAKROOM",
-        "KITCHEN", "KITCHENETTE", "PANTRY", "BREAK AREA",
+        # KITCHEN/KITCHENETTE moved to their own KITCHEN class (2026-10-13,
+        # reviewer: "Cafeteria vs Kitchen: they are different"). LOUNGE and
+        # PANTRY stay here -- reviewer kept lounge with cafeteria.
+        "PANTRY", "BREAK AREA",
         "STAFF LOUNGE", "TEACHER LOUNGE",
+        # Paired with OCRConfig.room_name_patterns ^TEACHERS?\s+LOUNGE$ (2026-10-13);
+        # without it the plural fell back to STORAGE ROOM.
+        "TEACHERS LOUNGE",
     ],
 
     # ── Retail ──────────────────────────────────────────────────────────────
@@ -141,8 +151,11 @@ MANDATORY_CLASSES: Dict[str, List[str]] = {
 
     # ── Circulation ─────────────────────────────────────────────────────────
     "LOBBY": [
-        "LOBBY", "RECEPTION", "FOYER", "VESTIBULE", "ENTRANCE",
-        "ENTRY", "ENTRY AREA", "ENTRANCE VESTIBULE",
+        # VESTIBULE and ENTRANCE VESTIBULE moved to their own VESTIBULE class
+        # (2026-10-13, reviewer: "Vestibule different to Lobby"). ENTRANCE,
+        # ENTRY, FOYER, RECEPTION and WAITING stay here.
+        "LOBBY", "RECEPTION", "FOYER", "ENTRANCE",
+        "ENTRY", "ENTRY AREA",
         "WAITING ROOM", "WAITING AREA",
         "RECP", "RECEP",
     ],
@@ -155,6 +168,16 @@ MANDATORY_CLASSES: Dict[str, List[str]] = {
     "RESTROOM": [
         "RESTROOM", "BATHROOM", "WC", "LAVATORY",
         "POWDER ROOM", "MEN'S RESTROOM", "WOMEN'S RESTROOM",
+        # R3 (2026-09-14): "REST 4-2" style numbered-restroom labels
+        # (220301_Elect_plans_05) — sft_validator.py's keyword gate was
+        # updated in parallel to admit "REST".
+        "REST",
+        # R3 side-finding, resolved (2026-09-14): bare "RR" abbreviation
+        # ("MEN RR", "STAFF RR", "RR 204") — corpus-scanned, 100% restroom
+        # context. Dotted "R.R." handled separately by
+        # _REGEX_SURFACE_TO_MANDATORY below (trailing-punctuation defeats
+        # this list's word-boundary matching).
+        "RR",
     ],
     # TOILET is its own class (per taxonomy decision): school/institutional
     # plans label gendered toilet rooms distinctly from generic RESTROOM.
@@ -176,6 +199,11 @@ MANDATORY_CLASSES: Dict[str, List[str]] = {
         "SUPPLY ROOM", "ARCHIVES", "FILE ROOM",
         "MECH ROOM",
         "ELEC ROOM",
+        # ZOOM (a dealership's video-call room, OCR pattern ^ZOOM\s*\d*$)
+        # already resolved here through the least-intrusive default. Made
+        # explicit per user directive 2026-10-27 so it does not move if that
+        # default ever changes -- same reasoning as VAULT below.
+        "ZOOM",
         # VAULT per explicit taxonomy directive. Was resolving to STORAGE ROOM
         # only via the unknown-token fallback; made explicit so it does not
         # break silently if the fallback default ever changes.
@@ -191,6 +219,11 @@ MANDATORY_CLASSES: Dict[str, List[str]] = {
         "ELECTRICAL ROOM", "ELECTRICAL", "ELECTRIC ROOM",
         "ELECTRICAL/MECHANICAL ROOM", "TELECOM ROOM", "RISER",
         "SERVER ROOM", "DATA CENTER", "NETWORK ROOM",
+        # N3 (2026-10-10): GT-confirmed on 48-page eval (3/4 MDF, 2/3 IDF
+        # candidates inside GT mdf/idf_mail_idf polygons). MDF = Main
+        # Distribution Frame, IDF = Intermediate Distribution Frame — both
+        # are telecom/network closets, same class as TELECOM ROOM above.
+        "MDF", "MDF ROOM", "IDF", "IDF ROOM",
     ],
 
     # ── Athletic ────────────────────────────────────────────────────────────
@@ -208,11 +241,86 @@ MANDATORY_CLASSES: Dict[str, List[str]] = {
         "WAREHOUSE", "LOADING DOCK", "RECEIVING", "WAREHOUSE SPACE",
     ],
 
+    # ── Categories supplied by the GT reviewer (2026-10-13) ──────────────────
+    # Room kinds the room GT annotates that had no mandatory class, so every
+    # one of them resolved to the STORAGE ROOM fallback. Each variant list
+    # holds the class name the reviewer gave; blast-radius measured over 266
+    # distinct production labels (sprint1_verify54 + verify52): exactly one
+    # label changes class, TEACHER COUNCELING, which is the intended fix.
+    # A "ROOM" class was requested too and is NOT added: measured, it shadows
+    # the extended-class room names at the substring step (BOILER ROOM and
+    # MACHINE ROOM leave ELECTRICAL ROOM), a regression on 4 rooms.
+    # Adding a class lets a detected room be classified correctly; it does not
+    # make the room detected -- the room-name patterns and the semantic
+    # keyword gate decide that, and they are a separate, paired change.
+    "ART CLASSROOM": ["ART CLASSROOM"],
+    "CHILDREN'S PLAYROOM": ["CHILDREN'S PLAYROOM"],
+    # The clinic labels below already had OCR patterns (OCRConfig.
+    # room_name_patterns, added 2026-09-16 with the SHOWROOM/TRIAGE work) but
+    # no entry here, so each one became a candidate and then fell through
+    # normalize_to_mandatory's "least-intrusive default" to STORAGE ROOM.
+    # Measured 2026-10-27 on stored roomsRecognized types: DRAW x10,
+    # EXAM RM x7, TRIAGE x4, NURSE STATION x2, PROCEDURE x1 across
+    # corpus_batch2_v2 + sprint1_verify57 + track2_v2, all typed STORAGE ROOM.
+    # room_type is an SFT training target, so each was teaching a wrong class.
+    # Pattern and taxonomy halves must ship together -- the same pairing bug
+    # as BLOOM/VEG, which had the taxonomy half and no pattern.
+    "CLINIC": [
+        "CLINIC",
+        "EXAM RM", "EXAM ROOM", "TRIAGE", "NURSE STATION", "DRAW", "PROCEDURE",
+    ],
+    "FILE ROOM": ["FILE ROOM"],
+    # Reviewer's spelling kept as the class name; the standard spelling is a
+    # variant so a correctly spelled label still resolves here.
+    "MAINTENACE ROOM": ["MAINTENACE ROOM", "MAINTENANCE ROOM"],
+    "MUSIC ROOM": ["MUSIC ROOM"],
+    "OFFICE ASSIST PRINCIPAL": ["OFFICE ASSIST PRINCIPAL"],
+    "OFFICE FIRE COMMAND CENTER": ["OFFICE FIRE COMMAND CENTER"],
+    "OFFICE IT": ["OFFICE IT"],
+    "OPEN AREA": ["OPEN AREA"],
+    "PACKAGE ROOM": ["PACKAGE ROOM"],
+    "PLUMBING ROOM": ["PLUMBING ROOM"],
+    "STAGE ROOM": ["STAGE ROOM"],
+    # GT spells this category "teacher_counceling"; kept to match.
+    "TEACHER COUNCELING": ["TEACHER COUNCELING"],
+
+    # ── Splits the GT reviewer asked for (2026-10-13) ────────────────────────
+    # Each of these was being merged into another class, so category scoring
+    # could not tell the two apart. Blast radius measured per class before
+    # shipping (266 distinct production labels, verify54 + verify52).
+    # Kept merged by the same reviewer: lounge with CAFETERIA, vault with
+    # STORAGE ROOM.
+    "KITCHEN": ["KITCHEN", "KITCHENETTE"],
+    "CLOSET": ["CLOSET"],
+    # Only the unambiguous mechanical labels move. The mixed ones
+    # ("ELECTRICAL/MECHANICAL ROOM", "MECHANICAL/ELECTRICAL ROOM", "HVAC ROOM",
+    # "BUILDING SYSTEMS") stay with ELECTRICAL ROOM -- the reviewer separated
+    # mechanical from electrical, not the combined rooms.
+    "MECHANICAL ROOM": ["MECHANICAL ROOM", "MECHANICAL", "MECH ROOM"],
+    "LIBRARY": ["LIBRARY"],
+    "VESTIBULE": ["VESTIBULE", "ENTRANCE VESTIBULE"],
+
+    # ── Class assigned by the project owner (2026-10-17) ────────────────────
+    # "Utility room resolves to equipment room." Before this, UTILITY /
+    # UTILITY ROOM / UTIL sat in EXTENDED_TYPES["laundry"], which maps to
+    # RESIDENTIAL UNIT -- a utility room is not a dwelling unit -- and a bare
+    # "EQUIPMENT ROOM" label fell through to the STORAGE ROOM fallback.
+    # The utility variants are MOVED here, not copied, so each label has one
+    # declaration (same as the KITCHEN / VESTIBULE splits above).
+    # "UTIL" as in "UTIL 301" (220301_Elect_plans_05, R3 2026-09-14);
+    # sft_validator.py's keyword gate admits "UTIL" and "UTILITY" already.
+    "EQUIPMENT ROOM": ["EQUIPMENT ROOM", "UTILITY ROOM", "UTILITY", "UTIL"],
+
     # ── Other (kept, detected, but no dedicated class) ───────────────────────
     # Real spaces that must be DETECTED (not dropped) but do not fit any
     # specific mandatory class — per taxonomy decision: CUSTODIAL, LOCKER rooms.
     "OTHER": [
         "OTHER", "CUSTODIAL", "CUSTODIAN OFFICE",
+        # Automotive-dealership spaces, per user directive 2026-10-27. Both
+        # had OCR patterns from the 2026-09-16 dealership vocabulary work and
+        # no entry here, so both resolved to STORAGE ROOM through the
+        # least-intrusive default -- a service bay is not storage.
+        "CAR WASH", "BAYS", "BAY", "DETAIL BAY", "DETAIL BAYS",
         "LOCKER", "LOCKERS", "LOCKER ROOM",
         "BOYS LOCKER", "GIRLS LOCKER", "BOYS LOCKERS", "GIRLS LOCKERS",
         "MENS LOCKER", "WOMENS LOCKER",
@@ -221,6 +329,12 @@ MANDATORY_CLASSES: Dict[str, List[str]] = {
         # not resolve the space-separated label ("YOGA ROOM" is neither a
         # substring of it nor vice-versa), so it fell back to STORAGE ROOM.
         "YOGA ROOM", "YOGA",
+        # Track 2 pilot (2026-09-15): cannabis-cultivation room types
+        # ("Crooked Creek Bloom/Veg Room" PDFs) -- no existing mandatory class
+        # fits a grow-facility flowering/vegetative room; OTHER is the same
+        # honest catch-all already used for generic "ROOM N" labels. Paired
+        # with sft_validator.py's matching VALID_ROOM_KEYWORDS entries.
+        "BLOOM ROOM", "BLOOM RM", "VEG ROOM",
     ],
 }
 
@@ -239,6 +353,23 @@ MANDATORY_CLASSES: Dict[str, List[str]] = {
 # containing a numbered-room fragment.
 _REGEX_SURFACE_TO_MANDATORY: List[tuple] = [
     (re.compile(r"^ROOM\s*\d+$", re.IGNORECASE), "OTHER"),
+    # R3 (2026-09-14): apartment unit-type-code + unit-number labels
+    # ("1.1R 229", "2.1R 227", "1.1 217") — paired with sft_validator.py's
+    # matching VALID_ROOM_REGEXES entry (see that file for the visual
+    # verification and corpus false-positive scan). These are real
+    # residential units, same class as "1BR"/"TYPE-A1" elsewhere in this
+    # taxonomy, just a building-specific numbering convention.
+    (re.compile(r"^\d\.\d[A-Z]?\s*\d{2,4}$"), "RESIDENTIAL UNIT"),
+    # R3 side-finding, resolved (2026-09-14): dotted "R.R." restroom
+    # abbreviation ("Men's R.R.", "224 R.R.", "NON-COMPLIANT R.R.") — paired
+    # with sft_validator.py's matching VALID_ROOM_REGEXES entry (see that
+    # file for the trailing-punctuation word-boundary defect this works
+    # around, and the corpus-wide false-positive scan). Callers use
+    # `.match()`, which anchors at position 0 only — this rule leads with
+    # `.*` so it still matches when "R.R." isn't at the very start of the
+    # string (e.g. "224 R.R.", "NON-COMPLIANT R.R."), unlike the other rules
+    # in this list which are naturally start-anchored already.
+    (re.compile(r".*R\.R\.?", re.IGNORECASE), "RESTROOM"),
 ]
 
 # ---------------------------------------------------------------------------
@@ -275,6 +406,9 @@ EXTENDED_TYPES: Dict[str, List[str]] = {
     "elevator": [
         "ELEVATOR", "ELEVATOR CORE", "ELEVATOR AREA",
         "LIFT", "ELEVATOR MACHINE ROOM",
+        # R3 (2026-09-14): "ELEV #1" style abbreviation (220301_Elect_plans_05);
+        # sft_validator.py's keyword gate admits "ELEV" in parallel.
+        "ELEV",
     ],
 
     # ── Storage variants (beyond mandatory) ──────────────────────────────────
@@ -306,9 +440,9 @@ EXTENDED_TYPES: Dict[str, List[str]] = {
         "LR", "LV", "LVG",
         "LIVING RM", "LIV ROOM",
     ],
-    "laundry": [
-        "LAUNDRY", "LAUNDRY ROOM", "UTILITY ROOM", "UTILITY",
-    ],
+    # UTILITY / UTILITY ROOM / UTIL moved to the EQUIPMENT ROOM mandatory
+    # class (2026-10-17, project owner's decision).
+    "laundry": ["LAUNDRY", "LAUNDRY ROOM"],
     "garage": [
         "GARAGE",
     ],
@@ -397,7 +531,7 @@ VLM_CATEGORY_MAP: Dict[str, str] = {
 
     # Food Service
     "kitchen_break_room": "CAFETERIA",
-    "kitchen": "CAFETERIA",
+    "kitchen": "KITCHEN",
     "break_room": "CAFETERIA",
     "dining_room": "RESTAURANT",
     "cafeteria": "CAFETERIA",
@@ -412,7 +546,7 @@ VLM_CATEGORY_MAP: Dict[str, str] = {
     "storage_room": "STORAGE ROOM",
     # CLOSET is not storage — folded into JANITOR CLOSET, which already
     # holds the closest existing synonyms (CUSTODIAL CLOSET, CLEANING CLOSET).
-    "closet": "JANITOR CLOSET",
+    "closet": "CLOSET",
 
     # Janitor
     "janitor": "JANITOR CLOSET",
@@ -595,6 +729,33 @@ for _extended, _variants in EXTENDED_TYPES.items():
         _EXACT_VARIANT_TO_MANDATORY.setdefault(_v.upper(), _mapped)
 
 
+def resolve_exact_short_variant(raw: str) -> Optional[str]:
+    """
+    Exact-match a short (<=4 char) raw token against this module's own
+    variant tables, bypassing abbreviation expansion and substring rules.
+
+    Callers that pre-expand abbreviations before normalizing (e.g.
+    TaxonomyNormalizer in sft_validator.py) can silently defeat an explicit
+    short-code placement here. Example: "DR" is listed under RESIDENTIAL
+    UNIT above (deliberately, for architectural unit-code sheets), but
+    abbreviations.py expands "DR" -> "DINING ROOM" first, which resolves to
+    RESTAURANT via _SURFACE_TO_MANDATORY instead. Checking the raw token
+    here first lets this module's own explicit placement win, per its
+    stated intent (see the short-token guard comment in
+    normalize_to_mandatory below).
+
+    Returns None (not a fallback class) when the raw token isn't an exact
+    member of any variant list, so callers can tell "no opinion" apart from
+    a genuine resolution and fall back to their own expansion logic.
+    """
+    if not raw:
+        return None
+    raw_upper = raw.strip().upper()
+    if len(raw_upper) > 4:
+        return None
+    return _EXACT_VARIANT_TO_MANDATORY.get(raw_upper)
+
+
 def normalize_to_mandatory(raw: str) -> str:
     """
     Normalize any raw room type string to a mandatory SFT class.
@@ -678,6 +839,57 @@ def normalize_to_mandatory(raw: str) -> str:
 
     logger.debug(f"No match for room type: '{raw}' → STORAGE ROOM (fallback)")
     return "STORAGE ROOM"
+
+
+# Labels whose class depends on the drawing they sit in, not on their own
+# text. "LAB" is a science room in a school and a clinical lab in a clinic,
+# and normalize_to_mandatory sees only the label, so it cannot tell them
+# apart. Per user directive (2026-10-27) such a label takes CLINIC when the
+# page's OTHER labels already say the page is clinical. Observed: 4 of 5 LAB
+# labels in the corpora sit on clinical documents (UNMH Cancer Center,
+# ANIMAL CLINIC, MCA CLINIC), 1 on a page of unknown type.
+CONTEXT_DEPENDENT_LABELS: Dict[str, str] = {
+    "LAB": "CLINIC",
+}
+
+
+def resolve_context_dependent_types(
+    names: Sequence[str], types: Sequence[str]
+) -> List[str]:
+    """Re-type a page's context-dependent labels from the company they keep.
+
+    A label in CONTEXT_DEPENDENT_LABELS takes its mapped class only when some
+    OTHER room on the same page already carries that class on its own text --
+    an unambiguous label like EXAM RM or TRIAGE. A page whose only evidence is
+    the ambiguous label itself is left alone, so "LAB" on a school plan stays
+    whatever its own text resolved to.
+
+    Pure and page-local: takes this page's labels and the classes already
+    resolved for them, returns the corrected classes in the same order.
+
+    Args:
+        names: Each room's label text, in page order.
+        types: The class already resolved for each, same length and order.
+
+    Returns:
+        A new list of classes; unchanged where no rule applies.
+    """
+    resolved = list(types)
+    ambiguous = {
+        index: CONTEXT_DEPENDENT_LABELS[(name or "").strip().upper()]
+        for index, name in enumerate(names)
+        if (name or "").strip().upper() in CONTEXT_DEPENDENT_LABELS
+    }
+    if not ambiguous:
+        return resolved
+
+    unambiguous_classes = {
+        resolved[index] for index in range(len(resolved)) if index not in ambiguous
+    }
+    for index, target in ambiguous.items():
+        if target in unambiguous_classes:
+            resolved[index] = target
+    return resolved
 
 
 def get_extended_type(raw: str) -> Optional[str]:

@@ -46,7 +46,10 @@ def single_instance(wait: bool = True, poll: float = 5.0, lock_path: str = DEFAU
                 logger.error(
                     "Another pipeline run is active (%s). Aborting (--no-wait).", lock_path
                 )
-                fd.close()
+                # Closing here would make SystemExit pass through the finally
+                # below onto a closed fd ("ValueError: I/O operation on closed
+                # file"), which replaced the documented exit code 3 with a
+                # traceback and exit 1. The finally does the close.
                 sys.exit(3)
         fd.write(str(os.getpid()))
         fd.flush()

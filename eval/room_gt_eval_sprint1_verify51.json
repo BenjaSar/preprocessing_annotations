@@ -1,0 +1,54 @@
+{
+  "run_dir": "../../sprint1_verify51",
+  "gt_coco_path": "/home/ubuntu/floorplan_classifier/VLM/gt_segmentation/result.json",
+  "pages_scored": 48,
+  "gt_pages_missing_from_run": [],
+  "detections_scored": 1496,
+  "iou_threshold": 0.5,
+  "localization": {
+    "predictions": 906,
+    "predictions_center_in_gt": 847,
+    "predictions_iou_match": 0,
+    "gt_rooms": 1497,
+    "gt_rooms_located": 772,
+    "gt_rooms_iou_matched": 0,
+    "label_precision": 0.934878587196468,
+    "label_recall": 0.5156980627922512,
+    "extent_precision": 0.0,
+    "extent_recall": 0.0
+  },
+  "attachment": {
+    "intersection": {
+      "correct": 30,
+      "wrong": 5,
+      "attachable": 1059,
+      "correctly_attached": 30,
+      "precision": 0.8571428571428571,
+      "recall_of_attachable": 0.028328611898016998
+    },
+    "nearest_with_cutoff_p50_282px": {
+      "correct": 635,
+      "wrong": 495,
+      "attachable": 1059,
+      "correctly_attached": 635,
+      "precision": 0.5619469026548672,
+      "recall_of_attachable": 0.5996222851746931
+    },
+    "nearest_with_cutoff_p75_742px": {
+      "correct": 706,
+      "wrong": 733,
+      "attachable": 1059,
+      "correctly_attached": 706,
+      "precision": 0.4906184850590688,
+      "recall_of_attachable": 0.6666666666666666
+    },
+    "nearest_with_cutoff_p90_1319px": {
+      "correct": 707,
+      "wrong": 760,
+      "attachable": 1059,
+      "correctly_attached": 707,
+      "precision": 0.48193592365371507,
+      "recall_of_attachable": 0.667610953729934
+    }
+  }
+}

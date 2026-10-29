@@ -7,46 +7,66 @@ segmentation, and export.
 """
 
 import argparse
+import dataclasses
 import json
 import logging
 import os
 import sys
 import time
+from collections import Counter
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 
 from ..config import PipelineConfig
-from ..ingestion.pdf_extractor import PDFExtractor, PageTypeClassifier
+from ..ingestion.pdf_extractor import PDFExtractor, PageTypeClassifier, page_source
 from ..ingestion.ocr_extractor import MEPTextExtractor, RoomCandidate, TextDetection
 from ..ingestion.two_pass_ocr_extractor import TwoPassOCRExtractor
+from ..ingestion.crop_reread import Reread
+from ..vlm.read import UnslothCropTextReader
+from .crop_reread_step import CropRereadStep
+from ..ingestion.vector_walls import VectorWallError, VectorWallReader
+from .room_extent_step import RoomExtentStep
 from ..vlm.vlm_annotator import VLMAnnotator
 from ..vlm.semantic_reconciler import SemanticReconciler
-from ..vlm.vlm_backend import VLMFactory
+from ..vlm.vlm_backend import VLMFactory, UnslothQwenBackend
+from ..vlm.classify import PageClassifier, UnslothPageClassifier
 from ..vlm import prompt_templates
 from ..detection.sam_segmenter import RoomSegmenter
 from ..detection.cubicasa5k_detector import CubiCasa5KDetector
 from ..bbox.bbox_visualizer import BboxVisualizer
 from ..export.exporters import LabelStudioExporter, ReviewPrioritizer, COCOExporter, CoverageReporter
+from ..export.group_split import GroupMap
+from ..export.object_exporter import ObjectDetectionCOCOExporter
 from ..automation import (
     LabelNormalizer, QualityChecker, RegionExtractor,
     ImageResizer, SemanticRoomValidator, TaxonomyNormalizer,
     filter_by_confidence, validate_for_sft, prepare_sft_annotation,
     SFTAnnotationBuilder, build_annotation_json, ConfidenceComputer
 )
-from ..automation.sft_validator import _merge_vlm_and_ocr
-from ..automation.taxonomy import normalize_to_mandatory, get_extended_type
+from ..automation.sft_validator import (
+    _merge_vlm_and_ocr,
+    dropped_page_record,
+    has_room_name_candidate,
+)
+from ..automation.taxonomy import (
+    get_extended_type,
+    normalize_to_mandatory,
+    resolve_context_dependent_types,
+)
 from ..automation.abbreviation_ocr_recovery import (
     AbbreviationOCRRecovery, ResidentialAbbreviationRecovery
 )
 from ..detection.window_detector import (
     WindowDetector, WindowDetection, WindowDetectionTier, RoomWindowMapping,
-    apply_window_suffixes, map_detections_to_rooms, merge_object_mappings,
+    ObjectDetectionPass, apply_window_suffixes, merge_object_mappings,
 )
 from ..detection.yolo_detector import YoloObjectDetector
 from ..detection.sam3_exemplar_detector import Sam3ExemplarDetector
+from ..detection.door_layer_filter import DoorLayerError, DoorLayerFilter
+from ..detection.attachment import AttachmentPolicy, AttachmentPolicyFactory
 from .run_lock import single_instance
 
 logger = logging.getLogger(__name__)
@@ -62,6 +82,36 @@ class PipelineError(Exception):
     """Raised when pipeline execution fails."""
 
     pass
+
+
+def _retype_context_dependent_rooms(
+    annotation: Dict[str, Any], rooms: List[dict], rooms_recognized: List[dict]
+) -> None:
+    """Resolve this page's context-dependent labels, in place, in both lists.
+
+    `rooms` and `roomsRecognized` describe the same rooms in the same order
+    under different key names, and different consumers read each (COCO export
+    reads `rooms`, the SFT exporter and room GT eval read `roomsRecognized`),
+    so a class fixed in one and not the other would make a page disagree with
+    itself. The decision itself lives in taxonomy.resolve_context_dependent_types.
+    """
+    if not rooms_recognized:
+        return
+    names = [room.get("name") or room.get("room_name") or "" for room in rooms_recognized]
+    resolved = resolve_context_dependent_types(
+        names, [room.get("type") or "" for room in rooms_recognized]
+    )
+    for index, room_type in enumerate(resolved):
+        if room_type == rooms_recognized[index].get("type"):
+            continue
+        logger.info(
+            "%s: '%s' re-typed %s -> %s from the page's other labels",
+            annotation.get("image_file", "?"), names[index],
+            rooms_recognized[index].get("type"), room_type,
+        )
+        rooms_recognized[index]["type"] = room_type
+        if index < len(rooms):
+            rooms[index]["type"] = room_type
 
 
 class AnnotationPipeline:
@@ -119,6 +169,9 @@ class AnnotationPipeline:
         # Initialize components lazily
         self._pdf_extractor = None
         self._ocr_extractor = None
+        # Set when the assembly step decides on crop re-read; recorded in
+        # the run manifest so a skip is never invisible. None = it ran.
+        self._crop_reread_skipped: Optional[str] = self.config.crop_reread_skip_reason()
         self._vlm_annotator = None
         self._sam_segmenter = None
         self._cubicasa_room_detector = None
@@ -131,6 +184,9 @@ class AnnotationPipeline:
         self._yolo_object_detector = None
         self._sam3_exemplar_detector = None
         self._bbox_visualizer = None
+        self._attachment_policy = None
+        self._page_classifier: Optional[PageClassifier] = None
+        self._page_classifier_checked = False
 
         # Initialize SFT annotation builder (used for mandatory schema output)
         self.sft_builder = SFTAnnotationBuilder()
@@ -165,11 +221,10 @@ class AnnotationPipeline:
         if img_path is None or self._input_path is None:
             return None
         try:
-            import re
-            stem = img_path.stem  # e.g. "326 ROCKAWAY - AVI-ON LAYOUT_page001"
-            pdf_stem = re.sub(r"_page\d+$", "", stem)
-            if not pdf_stem or pdf_stem == stem:
+            source = page_source(img_path.stem)  # e.g. "326 ROCKAWAY - AVI-ON LAYOUT_page001"
+            if source is None:
                 return None  # Not a page-extracted image
+            pdf_stem = source[0]
 
             # Look for the PDF in the input path (file or directory)
             candidate = (
@@ -214,17 +269,18 @@ class AnnotationPipeline:
         if not self.config.use_pdf_text_layer:
             return None
 
-        pdf_path = self._source_pdf_for(img_path)
+        source = self._source_page_for(img_path)
+        if source is None:
+            return None
+        return self.pdf_extractor.extract_text_layer(*source) or None
+
+    def _source_page_for(self, path: Path) -> Optional[Tuple[Path, int]]:
+        """(source PDF, page index) of a page image or its annotation file
+        (only the ``{pdf_stem}_page{N:03d}`` stem is used), or None."""
+        pdf_path = self._source_pdf_for(path)
         if pdf_path is None:
             return None
-
-        import re
-        match = re.search(r"_page(\d+)$", img_path.stem)
-        if not match:
-            return None
-        page_index = int(match.group(1))
-
-        return self.pdf_extractor.extract_text_layer(pdf_path, page_index) or None
+        return pdf_path, page_source(path.stem)[1]
 
     @property
     def ocr_extractor(self) -> TwoPassOCRExtractor:
@@ -243,6 +299,7 @@ class AnnotationPipeline:
                 ocr_config=self.config.ocr,
                 vlm_backend=vlm_backend,
                 confidence_threshold=0.92,  # PaddleOCR routinely returns >0.97; trigger VLM fallback only for genuinely uncertain tokens
+                vlm_fallback_enabled=self.config.use_ocr_vlm_fallback,
             )
         return self._ocr_extractor
 
@@ -327,6 +384,68 @@ class AnnotationPipeline:
         return self._sam3_exemplar_detector
 
     @property
+    def attachment_policy(self) -> AttachmentPolicy:
+        """AV-3: resolves the configured object-detection -> room
+        attachment policy once per pipeline instance. Default
+        (AttachmentConfig.policy="intersection") is byte-identical to
+        the direct map_detections_to_rooms calls this property
+        replaced -- see IntersectionAttachmentPolicy."""
+        if self._attachment_policy is None:
+            self._attachment_policy = AttachmentPolicyFactory.create(
+                self.config.attachment
+            )
+        return self._attachment_policy
+
+    @property
+    def page_classifier(self) -> Optional[PageClassifier]:
+        """AV-6: resolved once per pipeline instance, only when
+        use_page_type is set. Constructing this reads self.vlm_annotator
+        (may trigger the lazy VLM load), which is safe here because
+        every caller of this property is already inside the
+        use_vlm-gated STEP 3 block -- the VLM is loaded by that point
+        regardless. Returns None when use_page_type is off, or when the
+        configured backend has no PageClassifier adapter (logs a
+        warning once instead of raising)."""
+        if not self._page_classifier_checked:
+            self._page_classifier_checked = True
+            if self.config.use_page_type:
+                backend = self.vlm_annotator
+                if isinstance(backend, UnslothQwenBackend):
+                    self._page_classifier = UnslothPageClassifier(backend)
+                else:
+                    logger.warning(
+                        "use_page_type is set but backend %s has no "
+                        "PageClassifier adapter -- page-type triage will "
+                        "be skipped for this run.",
+                        type(backend).__name__,
+                    )
+        return self._page_classifier
+
+    def _classify_page_type(self, img_path: Path) -> Optional[Dict[str, Any]]:
+        """AV-6: single-shot page-type triage for one image, called from
+        inside STEP 3's per-image loop while the VLM is already
+        resident -- adds one generate call to an already-loaded model,
+        no extra load/unload cycle (see UnslothPageClassifier's
+        docstring). Advisory only: the return value is persisted as an
+        observable field, never used to drop or accept a room. Returns
+        None (not a fallback dict) when use_page_type is off or the
+        backend has no adapter -- both handled by self.page_classifier
+        returning None; a real classification failure still surfaces
+        as {"page_type": "other", ...} from the adapter itself, not
+        None, so "we didn't try" and "we tried and it's uncertain"
+        stay distinguishable in the annotation.
+        """
+        classifier = self.page_classifier
+        if classifier is None:
+            return None
+        try:
+            result = classifier.classify(img_path)
+            return {"page_type": result.page_type, "rationale": result.rationale}
+        except Exception as e:
+            logger.warning(f"Page-type classification failed for {img_path.name}: {e}")
+            return {"page_type": "other", "rationale": f"classification error: {e}"}
+
+    @property
     def bbox_visualizer(self) -> BboxVisualizer:
         if self._bbox_visualizer is None:
             debug_dir = self._output_dir / "debug_overlays" if self._output_dir else None
@@ -377,7 +496,10 @@ class AnnotationPipeline:
         _mlflow_run_id = start_run(self.config.mlflow)
         if _mlflow_run_id:
             log_params(self._build_config_dict())
-            log_tags({"experiment_name": self.config.mlflow.experiment_name})
+            log_tags({
+                "experiment_name": self.config.mlflow.experiment_name,
+                "run_kind": "pipeline",
+            })
 
         # Per-run accumulator for object-detection corroboration signal
         # (_apply_object_attributes below); logged as an MLflow metric at
@@ -618,6 +740,7 @@ class AnnotationPipeline:
         # Raw Pass-1 detections retained per image for the deferred assembly step
         # (VLM refine + abbreviation recovery run after the OCR heap is released).
         raw_detections_by_image: Dict[str, List[TextDetection]] = {}
+        crop_rereads_by_image: Dict[str, List[Reread]] = {}
         # FIX-4: per-image BOM/title-block exclusion zones derived from OCR excluded-token clusters.
         exclusion_zones_by_image: Dict[str, list] = {}
 
@@ -695,11 +818,14 @@ class AnnotationPipeline:
         # recovery — same order and logic as the original single-pass path, so
         # ocr_results match the pre-change baseline. refine_with_vlm is a no-op
         # when there is no VLM backend, so this is safe with use_vlm disabled too.
+        crop_reread_step = self._crop_reread_step()
         for img_path in self._iter_images(images_dir):
             ocr_results[img_path.name] = self._assemble_ocr_candidates(
                 img_path,
                 ocr_results.get(img_path.name, []),
                 raw_detections_by_image.get(img_path.name, []),
+                crop_reread_step,
+                crop_rereads_by_image,
             )
 
         # Step 3: VLM annotation (optional)
@@ -739,7 +865,10 @@ class AnnotationPipeline:
                         )
 
                     # Get VLM result (handles both Claude and Qwen backends)
-                    result = self._get_vlm_result(img_path)
+                    result = self._get_vlm_result(
+                        img_path,
+                        exclusion_zones=exclusion_zones_by_image.get(img_path.name, []),
+                    )
 
                     # FIX-A: Drop VLM detections matching known non-room patterns.
                     # Applied unconditionally (no OCR-proximity gate).
@@ -756,10 +885,21 @@ class AnnotationPipeline:
                     _emit_metric(img_path.stem, "vlm_annotation", _t0_vlm, "ok",
                                  room_count_out=len(result.rooms))
 
+                    # AV-6: advisory page-type triage, only when enabled --
+                    # runs inside this same per-image pass while the VLM
+                    # (self.vlm_annotator, already used above for
+                    # result) is already resident. None when
+                    # use_page_type is off (page_classifier's default
+                    # state), so this is a no-op call by default.
+                    page_type_result = self._classify_page_type(img_path)
+
                     # Save annotation (img_path needed for window detector)
                     object_detections_for_viz = self._save_annotation(
                         result, ann_path, ocr_results.get(img_path.name, []), img_path,
-                        exclusion_zones=exclusion_zones_by_image.get(img_path.name, []))
+                        exclusion_zones=exclusion_zones_by_image.get(img_path.name, []),
+                        page_type_result=page_type_result,
+                        ocr_text_detections=raw_detections_by_image.get(img_path.name, []),
+                        crop_rereads=crop_rereads_by_image.get(img_path.name, []))
 
                     if img_path.name in image_status:
                         image_status[img_path.name]["annotated"] = True
@@ -806,7 +946,9 @@ class AnnotationPipeline:
                     ocr_rooms = ocr_results.get(img_path.name, [])
                     try:
                         self._save_ocr_annotation(img_path, ocr_rooms, annotations_dir,
-                                                   exclusion_zones=exclusion_zones_by_image.get(img_path.name, []))
+                                                   exclusion_zones=exclusion_zones_by_image.get(img_path.name, []),
+                                                   ocr_text_detections=raw_detections_by_image.get(img_path.name, []),
+                        crop_rereads=crop_rereads_by_image.get(img_path.name, []))
                         stats["images_annotated"] += 1
                         stats["rooms_detected"] += len(ocr_rooms)
                         if img_path.name in image_status:
@@ -835,11 +977,15 @@ class AnnotationPipeline:
                 # Previously, images with zero OCR rooms were silently dropped:
                 # no annotation file was written, no warning was logged, and
                 # the image disappeared from all downstream steps and exports.
-                # A zero-room annotation is written with sft_ready=False and
-                # lands in needs_review.json so a human can inspect it.
+                # A zero-room annotation is written with sft_ready=False. Step 4
+                # then moves such pages to skipped_pages/ and leaves them out of
+                # processed_annotations/, so needs_review.json never lists them;
+                # their trace is dropped_page_attribution/.
                 try:
                     self._save_ocr_annotation(img_path, rooms, annotations_dir,
-                                              exclusion_zones=exclusion_zones_by_image.get(img_path.name, []))
+                                              exclusion_zones=exclusion_zones_by_image.get(img_path.name, []),
+                                              ocr_text_detections=raw_detections_by_image.get(img_path.name, []),
+                        crop_rereads=crop_rereads_by_image.get(img_path.name, []))
                     stats["images_annotated"] += 1
                     stats["rooms_detected"] += len(rooms)
                     if img_path.name in image_status:
@@ -943,10 +1089,25 @@ class AnnotationPipeline:
         processed_dir = output_dir / "processed_annotations"
         regions_dir = output_dir / "room_regions"
         reports_dir = output_dir / "quality_reports"
+        # R1 (2026-09-14): drop_attribution/drop_detail are computed
+        # unconditionally by prepare_sft_annotation (sft_validator.py,
+        # attached to the returned dict right before return, regardless of
+        # final room count) but were previously discarded whenever a page
+        # ended at 0 surviving rooms -- that branch below moves the image to
+        # skipped_pages/ without writing processed_annotations, so the
+        # reason(s) every room was dropped were lost. Measured impact: 53/141
+        # pages in corpus_batch2 hit this path; full manual review found
+        # 40 of those 53 are genuine floor plans with real, nameable rooms
+        # that should have survived -- with zero persisted record of which
+        # filter removed them. This directory closes that gap. Instrumentation
+        # only -- does not change which pages get skipped or any filter
+        # threshold (see plan/zero-room-page-recovery-plan-2026-09-14.md).
+        dropped_attribution_dir = output_dir / "dropped_page_attribution"
 
         processed_dir.mkdir(parents=True, exist_ok=True)
         regions_dir.mkdir(parents=True, exist_ok=True)
         reports_dir.mkdir(parents=True, exist_ok=True)
+        dropped_attribution_dir.mkdir(parents=True, exist_ok=True)
 
         quality_summary = {
             "total_annotations": 0,
@@ -958,6 +1119,9 @@ class AnnotationPipeline:
             "issue_details": [],
         }
 
+        room_extent_step = self._room_extent_step()
+        room_extent_counts: Counter = Counter()
+
         for ann_path in sorted(annotations_dir.glob("*.json")):
             try:
                 with open(ann_path) as f:
@@ -968,6 +1132,10 @@ class AnnotationPipeline:
                 # Captured before prepare_sft_annotation pops "ocr_rooms" — needed
                 # downstream by the quality checker's OCR_NAME_EMPTY check.
                 raw_ocr_rooms = annotation.get("ocr_rooms", [])
+                # Same reason: the raw candidates are gone after the call below.
+                has_name_candidate = has_room_name_candidate(
+                    annotation, self.config.block_single_letter_abbreviations
+                )
                 _t0_sft = time.time()
                 annotation = prepare_sft_annotation(
                     annotation,
@@ -975,6 +1143,8 @@ class AnnotationPipeline:
                     image_dir=images_dir,
                     use_window_elongation_filter=self.config.use_window_elongation_filter,
                     exempt_sam_expanded_from_ink_filter=self.config.exempt_sam_expanded_from_ink_filter,
+                    block_single_letter_abbreviations=self.config.block_single_letter_abbreviations,
+                    room_filter=self.config.room_filter,
                 )
                 filtered_room_count = len(annotation.get("rooms", []))
                 _sft_outcome = "sft_ready" if annotation.get("sft_ready") else "filtered"
@@ -1142,11 +1312,21 @@ class AnnotationPipeline:
                     {"id": idx, "bbox": r["coordinates"]["bbox"]}
                     for idx, r in enumerate(new_rr)
                 ]
-                new_mappings = map_detections_to_rooms(reconstructed_detections, rooms_for_remapping)
+                new_mappings = self.attachment_policy.attach(reconstructed_detections, rooms_for_remapping)
                 new_rr = self._apply_object_attributes(
                     new_rr, new_mappings, **self._confidence_weight_kwargs()
                 )
+                # A label like "LAB" means different rooms in a school and in
+                # a clinic; taxonomy sees only the text. Resolve those from
+                # the page's other labels, once, on the final list -- the one
+                # place every build path converges (taxonomy.py).
+                _retype_context_dependent_rooms(annotation, surviving_rooms, new_rr)
+
                 annotation["roomsRecognized"] = new_rr
+                if room_extent_step is not None:
+                    self._attach_room_extents(
+                        room_extent_step, ann_path, annotation, room_extent_counts
+                    )
 
                 if not is_sft_ready and room_count == 0 and localization_failed:
                     # FIX-B: rooms WERE detected but all mislocalized (boxes over
@@ -1164,8 +1344,22 @@ class AnnotationPipeline:
                     quality_summary["total_annotations"] += 1
 
                 elif not is_sft_ready and room_count == 0:
-                    # Genuinely empty annotation — move to skipped_pages/
-                    # (cover page, title block, roof/site sheet, or OCR failure)
+                    # "Genuinely empty" is this branch's original framing, but
+                    # R1's full manual review of corpus_batch2's 53 such pages
+                    # found 40/53 are real floor plans whose rooms were
+                    # filtered out, not empty source pages -- see
+                    # plan/zero-room-page-recovery-plan-2026-09-14.md. Still
+                    # moving the image to skipped_pages/ unchanged (R1 is
+                    # instrumentation only); the attribution write below is
+                    # what makes that 40/53 split possible to re-derive and
+                    # act on in a future phase, instead of guessed from a
+                    # bare NO_ROOMS_DETECTED code with no per-room reason.
+                    attribution_record = dropped_page_record(annotation, has_name_candidate)
+                    if attribution_record:
+                        attribution_path = dropped_attribution_dir / ann_path.name
+                        with open(attribution_path, "w") as f:
+                            json.dump(attribution_record, f, indent=2)
+
                     image_file = None
                     for _ext in self._IMAGE_EXTS:
                         _candidate = images_dir / f"{ann_path.stem}{_ext}"
@@ -1181,7 +1375,8 @@ class AnnotationPipeline:
                             shutil.move(str(image_file), str(skipped_dir / image_file.name))
                             logger.warning(
                                 f"    {ann_path.name}: Moved to skipped_pages/ "
-                                f"(sft_ready=false, 0 rooms — non-floorplan page)"
+                                f"(sft_ready=false, 0 rooms"
+                                f"{'' if has_name_candidate else ', no room-name candidate'})"
                             )
                         except Exception as move_err:
                             logger.warning(
@@ -1210,6 +1405,10 @@ class AnnotationPipeline:
             f"  Total issues found: {quality_summary['total_issues']}\n"
             f"  Room regions extracted: {quality_summary['regions_extracted']}"
         )
+
+        if room_extent_step is not None:
+            quality_summary["room_extent"] = dict(room_extent_counts)
+            logger.info(f"  Room extents: {dict(room_extent_counts)}")
 
         # Save post-processing summary
         summary_path = output_dir / "post_processing_summary.json"
@@ -1254,13 +1453,27 @@ class AnnotationPipeline:
         coco_exporter = COCOExporter()
         coco_exporter.export_splits(
             processed_dir, images_dir, output_dir / "coco",
-            splits=(0.70, 0.15, 0.15), seed=42,
+            splits=self.config.export.split_ratios,
+            seed=self.config.export.split_seed,
             min_annotations_per_image=self.config.min_rooms_for_sft,
+            group_map=GroupMap.load(self.config.export.split_group_map_path),
         )
 
         # 7c: Coverage report (class imbalance visibility before training)
         reporter = CoverageReporter()
         reporter.generate(processed_dir, output_dir / "coverage_report.json")
+
+        # 7d: AV-1 -- objectDetections (door/window geometry) to a
+        # standalone COCO file, own category id space, never merged into
+        # 7b's room-category coco/ export. Default off
+        # (ExportConfig.export_object_detections); flag-off output is
+        # unaffected by this step existing at all.
+        if self.config.export.export_object_detections:
+            object_exporter = ObjectDetectionCOCOExporter()
+            object_exporter.export(
+                processed_dir, output_dir / "coco_objects.json",
+                min_confidence=self.config.export.object_detection_min_confidence,
+            )
 
         # Save config for reproducibility
         config_path = output_dir / "pipeline_config.json"
@@ -1396,19 +1609,82 @@ class AnnotationPipeline:
         logger.info("Pipeline run() complete — all steps finished.")
         return stats
 
+    def _crop_reread_step(self) -> Optional[CropRereadStep]:
+        """The crop-reread step, or None when this run cannot do it.
+
+        Built once per run, not per page, so the selector and reader are not
+        rebuilt for every page. The skip reason is logged and kept for the
+        run manifest: crop re-read is on by default, so a run that silently
+        proceeded without it would look re-read when it was not.
+        """
+        self._crop_reread_skipped = self.config.crop_reread_skip_reason()
+        if self._crop_reread_skipped is not None:
+            logger.info("  Crop re-read: skipped (%s)", self._crop_reread_skipped)
+            return None
+        logger.info(
+            "  Crop re-read: active (%s)", asdict(self.config.crop_reread)
+        )
+        return CropRereadStep(
+            self.ocr_extractor.ocr_extractor,
+            UnslothCropTextReader(self.vlm_annotator),
+            self.config.crop_reread,
+        )
+
+    def _room_extent_step(self) -> Optional[RoomExtentStep]:
+        """The vector-wall extent step, or None when use_vector_room_extent is off."""
+        if not self.config.use_vector_room_extent:
+            return None
+        logger.info("  Room extents from PDF vector walls: active (%s)", asdict(self.config.room_extent))
+        return RoomExtentStep(VectorWallReader(self.config.room_extent))
+
+    def _attach_room_extents(
+        self, step: RoomExtentStep, ann_path: Path, annotation: Dict[str, Any], counts: Counter,
+    ) -> None:
+        """Add coordinates.extent to this page's roomsRecognized; tally the outcome."""
+        source = self._source_page_for(ann_path)
+        if source is None:
+            counts["pages_without_source_pdf"] += 1
+            return
+        size = annotation["image_size"]
+        try:
+            attached = step.attach(
+                annotation["roomsRecognized"], *source, (size["width"], size["height"])
+            )
+        except VectorWallError as error:
+            logger.warning(f"    {ann_path.name}: no room extents -- {error}")
+            counts["pages_unreadable"] += 1
+            return
+        counts["rooms_with_extent"] += attached
+        counts["pages_with_extent"] += attached > 0
+
     def _assemble_ocr_candidates(
         self,
         img_path: Path,
         pass1_rooms: List[RoomCandidate],
         raw_detections: List[TextDetection],
+        crop_reread_step: Optional[CropRereadStep] = None,
+        crop_rereads_by_image: Optional[Dict[str, List[Reread]]] = None,
     ) -> List[RoomCandidate]:
-        """Finalize OCR candidates for one page: Pass-2 VLM refine, then residential
-        abbreviation recovery.
+        """Finalize OCR candidates for one page: optional crop re-read, then
+        Pass-2 VLM refine, then residential abbreviation recovery.
 
         Runs after the PaddleOCR heap is released so the VLM can load without
         co-residence. Order (refine → abbrev) and the per-candidate logic match the
         original in-loop two-pass path, so outputs are unchanged.
+
+        Crop re-read (C2) replaces pass1_rooms before refine, the same order
+        the offline replay measured. Abbreviation recovery below keeps reading
+        the untouched OCR detections: it matches whole abbreviations, which is
+        not what the re-read targets, and leaving it on the raw text keeps this
+        change confined to candidate generation.
         """
+        if crop_reread_step is not None:
+            pass1_rooms, rereads = crop_reread_step.rebuild_candidates(
+                img_path, raw_detections
+            )
+            if crop_rereads_by_image is not None:
+                crop_rereads_by_image[img_path.name] = rereads
+
         refined = self.ocr_extractor.refine_with_vlm(img_path, pass1_rooms)
 
         recovered_abbrevs: List[RoomCandidate] = []
@@ -1447,8 +1723,17 @@ class AnnotationPipeline:
         )
         return all_rooms
 
-    def _get_vlm_result(self, img_path: Path):
-        """Get VLM annotation result, with optional tiled inference for local backends."""
+    def _get_vlm_result(self, img_path: Path, exclusion_zones: Optional[list] = None):
+        """Get VLM annotation result, with optional tiled inference for local backends.
+
+        exclusion_zones (Claude path only): (x1,y1,x2,y2) pixel rectangles in
+        the ORIGINAL image's coordinate space (FIX-4,
+        ocr_extractor.compute_exclusion_zones) to pass into the prompt so
+        labels don't land on schedule tables/BOM/title-block text (B-4).
+        Not threaded into the tiled local-VLM path -- each tile is a crop
+        with its own coordinate frame, and remapping full-page zones into
+        per-tile local coordinates is separate, unvalidated work.
+        """
         vlm = self.vlm_annotator
         backend_name = self.config.vlm.backend.lower()
         is_local_vlm = backend_name in ("qwen", "unsloth")
@@ -1460,7 +1745,7 @@ class AnnotationPipeline:
             # Claude: tiling would quadruple API cost; skip silently unless explicit
             if self.config.use_tiling:
                 logger.debug("Tiling skipped for Claude backend (API cost); using full-image")
-            result = vlm.annotate(img_path)
+            result = vlm.annotate(img_path, exclusion_zones=exclusion_zones)
 
         return result
 
@@ -1596,38 +1881,23 @@ class AnnotationPipeline:
             return vlm.detect_rooms(img_path)
 
         full_w, full_h = full_img.size
-        if max(full_w, full_h) <= self.config.tile_trigger_px:
-            logger.debug(
-                f"Tiling skipped: {full_w}x{full_h} <= trigger {self.config.tile_trigger_px}px"
-            )
-            return vlm.detect_rooms(img_path)
-
         try:
             from ..ingestion.tile_splitter import TileSplitter
         except ImportError:
             logger.warning("tile_splitter not importable — falling back to full-image")
             return vlm.detect_rooms(img_path)
 
-        # Adaptive grid: derive tile count from image size so each tile is about
-        # tile_target_px, capped at tile_cols x tile_rows. Finer grid on dense
-        # floors improves VLM room localization. tile_target_px=0 → fixed grid.
-        if self.config.tile_target_px > 0:
-            cols = max(2, min(self.config.tile_cols,
-                              round(full_w / self.config.tile_target_px)))
-            rows = max(2, min(self.config.tile_rows,
-                              round(full_h / self.config.tile_target_px)))
-        else:
-            cols, rows = self.config.tile_cols, self.config.tile_rows
+        splitter = TileSplitter.for_page(full_w, full_h, self.config)
+        if splitter is None:
+            logger.debug(
+                f"Tiling skipped: {full_w}x{full_h} <= trigger {self.config.tile_trigger_px}px"
+            )
+            return vlm.detect_rooms(img_path)
 
-        splitter = TileSplitter(
-            cols=cols,
-            rows=rows,
-            overlap_pct=self.config.tile_overlap_pct,
-        )
         tiles = splitter.split(full_img)
         logger.info(
             f"{img_path.name}: tiling {full_w}x{full_h} -> "
-            f"{len(tiles)} tiles ({cols}x{rows}, "
+            f"{len(tiles)} tiles ({splitter.cols}x{splitter.rows}, "
             f"overlap={self.config.tile_overlap_pct:.0%})"
         )
 
@@ -1818,6 +2088,9 @@ class AnnotationPipeline:
         ocr_rooms: List[RoomCandidate],
         img_path: Optional[Path] = None,
         exclusion_zones: Optional[List] = None,
+        page_type_result: Optional[Dict[str, Any]] = None,
+        ocr_text_detections: Optional[List[TextDetection]] = None,
+        crop_rereads: Optional[List[Reread]] = None,
     ) -> List[Dict[str, Any]]:
         """
         Save VLM annotation result, merging with OCR data.
@@ -1877,7 +2150,9 @@ class AnnotationPipeline:
         # Build SFT format ("roomsRecognized") from the merged VLM+OCR room list.
         # When the VLM produces 0 valid rooms (stripe rejection), OCR rooms are
         # used so that raw annotations reflect what OCR actually found.
-        merged_room_dicts = _merge_vlm_and_ocr(data["rooms"], data["ocr_rooms"])
+        merged_room_dicts = _merge_vlm_and_ocr(
+            data["rooms"], data["ocr_rooms"], self.config.room_filter.merge_proximity_px
+        ).rooms
 
         sft_rooms = []
         for idx, room_dict in enumerate(merged_room_dicts, start=1):
@@ -1942,9 +2217,25 @@ class AnnotationPipeline:
         # FIX-4: store exclusion zones so prepare_sft_annotation can drop mislocalized rooms
         if exclusion_zones:
             data["exclusion_zones"] = exclusion_zones
+        if ocr_text_detections is not None:
+            data["ocrTextDetections"] = self._serialize_text_detections(ocr_text_detections)
+        if crop_rereads:
+            # C2: kept OUT of ocrTextDetections on purpose. That key is the
+            # offline replay's baseline input, so folding re-read text into it
+            # would make every later "no re-read" baseline already re-read.
+            # Probe format (eval/crop_reread_records.load_rereads), so a sweep
+            # can re-pick selector bounds on this run with no second GPU pass.
+            data["cropRereads"] = [dataclasses.asdict(r) for r in crop_rereads]
 
         # Add preliminary sft_ready flag (will be recomputed in post-processing step)
         data["sft_ready"] = False
+
+        # AV-6: advisory page-type triage result, if the caller ran it.
+        # None (the default) means "not attempted" -- leaves no key,
+        # rather than writing a misleading always-present field.
+        if page_type_result is not None:
+            data["page_type"] = page_type_result.get("page_type")
+            data["page_type_rationale"] = page_type_result.get("rationale", "")
 
         if self.config.use_windows or self.config.use_yolo_objects:
             try:
@@ -1966,11 +2257,15 @@ class AnnotationPipeline:
                     }
                     for idx, r in enumerate(merged_room_dicts)
                 ]
-                mappings = self._detect_object_mappings(
+                detection_pass = self._detect_object_mappings(
                     img_path=img_path, rooms_for_detection=rooms_for_detection,
                 )
+                mappings = detection_pass.mappings
                 object_detections = self._collect_object_detections(mappings)
                 data["objectDetections"] = object_detections
+                data["unattachedObjectDetections"] = [
+                    self._serialize_detection(d) for d in detection_pass.unattached
+                ]
                 data["roomsRecognized"] = self._apply_object_attributes(
                     data["roomsRecognized"], mappings,
                     **self._confidence_weight_kwargs()
@@ -1987,6 +2282,8 @@ class AnnotationPipeline:
     def _save_ocr_annotation(
         self, img_path: Path, rooms: List[RoomCandidate], annotations_dir: Path,
         exclusion_zones: Optional[List] = None,
+        ocr_text_detections: Optional[List[TextDetection]] = None,
+        crop_rereads: Optional[List[Reread]] = None,
     ) -> None:
         """
         Save OCR-only annotation.
@@ -2062,6 +2359,15 @@ class AnnotationPipeline:
         # FIX-4: store exclusion zones
         if exclusion_zones:
             data["exclusion_zones"] = exclusion_zones
+        if ocr_text_detections is not None:
+            data["ocrTextDetections"] = self._serialize_text_detections(ocr_text_detections)
+        if crop_rereads:
+            # C2: kept OUT of ocrTextDetections on purpose. That key is the
+            # offline replay's baseline input, so folding re-read text into it
+            # would make every later "no re-read" baseline already re-read.
+            # Probe format (eval/crop_reread_records.load_rereads), so a sweep
+            # can re-pick selector bounds on this run with no second GPU pass.
+            data["cropRereads"] = [dataclasses.asdict(r) for r in crop_rereads]
 
         # Add preliminary sft_ready flag (will be recomputed in post-processing step)
         data["sft_ready"] = False
@@ -2080,10 +2386,14 @@ class AnnotationPipeline:
                     }
                     for idx, r in enumerate(data["rooms"])
                 ]
-                mappings = self._detect_object_mappings(
+                detection_pass = self._detect_object_mappings(
                     img_path=img_path, rooms_for_detection=rooms_for_detection,
                 )
+                mappings = detection_pass.mappings
                 data["objectDetections"] = self._collect_object_detections(mappings)
+                data["unattachedObjectDetections"] = [
+                    self._serialize_detection(d) for d in detection_pass.unattached
+                ]
                 data["roomsRecognized"] = self._apply_object_attributes(
                     data["roomsRecognized"], mappings,
                     **self._confidence_weight_kwargs()
@@ -2140,7 +2450,7 @@ class AnnotationPipeline:
 
     def _detect_object_mappings(
         self, img_path: Path, rooms_for_detection: List[Dict[str, Any]],
-    ) -> List[RoomWindowMapping]:
+    ) -> ObjectDetectionPass:
         """Run every enabled object-detection source (WindowDetector's
         tiers, and/or T-I's YoloObjectDetector) and OR-merge their
         per-room flags (merge_object_mappings, window_detector.py).
@@ -2150,6 +2460,7 @@ class AnnotationPipeline:
         too, so flipping one flag never changes the other's behavior.
         """
         mappings_sources: List[List[RoomWindowMapping]] = []
+        unattached: List[WindowDetection] = []
 
         if self.config.use_windows:
             image_array = self._load_image_for_detection(img_path)
@@ -2200,6 +2511,8 @@ class AnnotationPipeline:
                 )
                 yolo_detections = yolo_detections + additional
 
+            yolo_detections = self._drop_wiring_doors(img_path, yolo_detections)
+
             for detection in yolo_detections:
                 # Q3: full detection list (bbox+confidence) now persisted
                 # via _collect_object_detections/data["objectDetections"];
@@ -2212,11 +2525,42 @@ class AnnotationPipeline:
                     detection.bbox,
                     detection.confidence,
                 )
-            mappings_sources.append(
-                map_detections_to_rooms(yolo_detections, rooms_for_detection)
+            yolo_mappings = self.attachment_policy.attach(
+                yolo_detections, rooms_for_detection
             )
+            attached_ids = {
+                id(wd) for m in yolo_mappings for wd in m.intersecting_windows
+            }
+            unattached = [d for d in yolo_detections if id(d) not in attached_ids]
+            mappings_sources.append(yolo_mappings)
 
-        return merge_object_mappings(mappings_sources)
+        return ObjectDetectionPass(
+            mappings=merge_object_mappings(mappings_sources), unattached=unattached
+        )
+
+    def _drop_wiring_doors(
+        self, img_path: Path, detections: List[WindowDetection],
+    ) -> List[WindowDetection]:
+        """Door detections the source PDF's layers show to be wiring
+        (DoorLayerFilterConfig) are removed; unchanged when the flag is off,
+        the source PDF is missing or its drawings are unreadable."""
+        if not self.config.use_door_layer_filter:
+            return detections
+        source = self._source_page_for(img_path)
+        if source is None:
+            return detections
+        from PIL import Image
+        with Image.open(img_path) as image:
+            image_size = image.size
+        try:
+            kept, dropped = DoorLayerFilter(self.config.door_layer_filter).split(
+                detections, *source, image_size
+            )
+        except DoorLayerError as error:
+            logger.warning(f"Door layer filter skipped for {img_path.name}: {error}")
+            return detections
+        logger.info("Door layer filter: %d door detections on wiring dropped for %s", len(dropped), img_path.name)
+        return kept
 
     @staticmethod
     def _collect_object_detections(
@@ -2236,13 +2580,26 @@ class AnnotationPipeline:
                 if id(wd) in seen_ids:
                     continue
                 seen_ids.add(id(wd))
-                detections.append({
-                    "category": (wd.metadata or {}).get("type"),
-                    "bbox": list(wd.bbox),
-                    "confidence": wd.confidence,
-                    "source_tier": wd.source_tier.value,
-                })
+                detections.append(AnnotationPipeline._serialize_detection(wd))
         return detections
+
+    @staticmethod
+    def _serialize_text_detections(detections: List[TextDetection]) -> List[Dict[str, Any]]:
+        """Raw Pass-1 OCR detections (pre-candidate), so candidate generation
+        can be replayed offline from the run's own annotations."""
+        return [
+            {"text": d.text, "bbox": [list(point) for point in d.bbox], "confidence": d.confidence}
+            for d in detections
+        ]
+
+    @staticmethod
+    def _serialize_detection(wd: WindowDetection) -> Dict[str, Any]:
+        return {
+            "category": (wd.metadata or {}).get("type"),
+            "bbox": list(wd.bbox),
+            "confidence": wd.confidence,
+            "source_tier": wd.source_tier.value,
+        }
 
     @staticmethod
     def _evidence_bbox_area_frac(
@@ -2366,16 +2723,44 @@ class AnnotationPipeline:
                 "backend": self.config.ocr.backend,
                 "confidence_threshold": self.config.ocr.confidence_threshold,
                 "preprocess": self.config.ocr.preprocess,
+                "room_name_patterns": list(self.config.ocr.room_name_patterns),
+                "room_number_pattern": self.config.ocr.room_number_pattern,
+                "room_name_placeholder_pattern": self.config.ocr.room_name_placeholder_pattern,
+                "extend_titleblock_zone_to_near_edge_only": self.config.ocr.extend_titleblock_zone_to_near_edge_only,
             },
             "vlm": {
                 "backend": self.config.vlm.backend,
                 "model": self.config.vlm.active_model,
                 "qwen_model": self.config.vlm.qwen_model,
                 "unsloth_model": self.config.vlm.unsloth_model,
+                "unsloth_adapter_path": (
+                    str(self.config.vlm.unsloth_adapter_path)
+                    if self.config.vlm.unsloth_adapter_path is not None else None
+                ),
+                "unsloth_room_prompt": self.config.vlm.unsloth_room_prompt,
                 "max_tokens": self.config.vlm.max_tokens,
+                # Generation settings decide what the VLM answered, and they
+                # default from VLM_* env vars (VLMConfig) -- so without them
+                # here a run's own artifacts cannot say how it was decoded.
+                # do_sample False makes the rest inert (vlm_backend.py).
+                "do_sample": self.config.vlm.do_sample,
+                "seed": self.config.vlm.seed,
+                "temperature": self.config.vlm.temperature,
+                "top_p": self.config.vlm.top_p,
+                "top_k": self.config.vlm.top_k,
+                "presence_penalty": self.config.vlm.presence_penalty,
+                "repetition_penalty": self.config.vlm.repetition_penalty,
             },
             "sam": {
                 "model_type": self.config.sam.model_type,
+            },
+            "yolo_objects": {
+                "checkpoint_path": self.config.yolo_objects.checkpoint_path,
+                "confidence_threshold": self.config.yolo_objects.confidence_threshold,
+            },
+            "sam3_exemplar": {
+                "seed_confidence_threshold": self.config.sam3_exemplar.seed_confidence_threshold,
+                "sam3_confidence_threshold": self.config.sam3_exemplar.sam3_confidence_threshold,
             },
             "pipeline": {
                 "use_vlm": self.config.use_vlm,
@@ -2390,7 +2775,33 @@ class AnnotationPipeline:
                 "tile_rows": self.config.tile_rows,
                 "tile_overlap_pct": self.config.tile_overlap_pct,
                 "tile_trigger_px": self.config.tile_trigger_px,
+                "use_page_type": self.config.use_page_type,
+                "use_ocr_vlm_fallback": self.config.use_ocr_vlm_fallback,
+                "use_crop_reread": self.config.use_crop_reread,
+                # What actually happened, not just what was asked for: the
+                # flag defaults on but the step needs an unsloth CropTextReader.
+                "crop_reread_active": self._crop_reread_skipped is None,
+                "crop_reread_skip_reason": self._crop_reread_skipped,
+                "use_pdf_text_layer": self.config.use_pdf_text_layer,
+                "use_vector_room_extent": self.config.use_vector_room_extent,
+                "use_door_layer_filter": self.config.use_door_layer_filter,
+                "use_window_elongation_filter": self.config.use_window_elongation_filter,
+                "exempt_sam_expanded_from_ink_filter": self.config.exempt_sam_expanded_from_ink_filter,
+                "block_single_letter_abbreviations": self.config.block_single_letter_abbreviations,
             },
+            "export": {
+                "split_ratios": list(self.config.export.split_ratios),
+                "split_seed": self.config.export.split_seed,
+                "split_group_map_path": (
+                    str(self.config.export.split_group_map_path)
+                    if self.config.export.split_group_map_path is not None else None
+                ),
+            },
+            "room_filter": asdict(self.config.room_filter),
+            "crop_reread": asdict(self.config.crop_reread),
+            "room_extent": asdict(self.config.room_extent),
+            "door_layer_filter": asdict(self.config.door_layer_filter),
+            "attachment": asdict(self.config.attachment),
             "confidence_weights": {
                 "detection": self.config.confidence_weights.detection,
                 "classification": self.config.confidence_weights.classification,
@@ -2694,6 +3105,24 @@ Examples:
              "qwen3-vl-4b-thinking, qwen3-vl-8b-thinking",
     )
     parser.add_argument(
+        "--unsloth-adapter",
+        type=Path,
+        default=None,
+        help="A5: LoRA adapter directory (scripts/train_qwen3vl_unsloth.py's "
+             "--out) to load on top of the 'unsloth' backend's model. Default: "
+             "none, i.e. the base model. The adapter must have been trained on "
+             "the same --unsloth-model.",
+    )
+    parser.add_argument(
+        "--unsloth-room-prompt",
+        choices=sorted(prompt_templates.ROOM_PROMPT_BUILDERS),
+        default=None,
+        help="Room prompt for the 'unsloth' backend. Default: 'production' (the "
+             "base model's wall-to-wall prompt). Use 'sft_label' with an "
+             "--unsloth-adapter trained by scripts/train_qwen3vl_unsloth.py -- "
+             "an adapter must be asked the way it was trained.",
+    )
+    parser.add_argument(
         "--use-sam", action="store_true", help="Use SAM for boundary refinement"
     )
     parser.add_argument(
@@ -2745,7 +3174,8 @@ Examples:
     parser.add_argument(
         "--enable-mlflow",
         action="store_true",
-        help="Enable MLflow run tracking for this run (default: off). "
+        help="Enable MLflow run tracking for this run (default: off; "
+             "MLFLOW_ENABLED=1 enables it without the flag). "
              "Requires an MLflow tracking server reachable at "
              "--mlflow-tracking-uri (default: http://127.0.0.1:5000 or "
              "$MLFLOW_TRACKING_URI). If mlflow is not installed or the "
@@ -2779,6 +3209,70 @@ Examples:
     )
     parser.add_argument(
         "--dpi", type=int, default=None, help="Custom DPI for PDF extraction"
+    )
+    parser.add_argument(
+        "--enforce-min-edge-floor",
+        action="store_true",
+        help="Raise dpi for physically-small PDF sheets so every page rasterizes "
+             "to at least PDFConfig.min_longest_edge_px (default 4500). Off by "
+             "default pending a broader memory measurement on the CPU-only OCR "
+             "host — see PDFConfig.enforce_min_edge_floor's docstring.",
+    )
+    parser.add_argument(
+        "--no-crop-reread",
+        action="store_true",
+        help="Skip the VLM crop re-read of OCR fragments that look like room "
+             "keywords (orchestration/crop_reread_step.py). On by default "
+             "wherever the run has an unsloth VLM backend; this turns it off.",
+    )
+    parser.add_argument(
+        "--no-door-layer-filter",
+        action="store_true",
+        help="Keep door detections that the source PDF's layers show to be "
+             "wiring (detection/door_layer_filter.py). On by default; this "
+             "turns it off.",
+    )
+    parser.add_argument(
+        "--use-vector-room-extent",
+        action="store_true",
+        help="Pilot: add coordinates.extent (room outline from the PDF's own "
+             "vector wall layers, RoomExtentConfig) beside each room's label box.",
+    )
+    parser.add_argument(
+        "--ocr-vlm-fallback",
+        action="store_true",
+        help="Run two-pass OCR's Pass 2 (VLM fallback for low-confidence "
+             "Pass-1 candidates). Off by default: its boxes are not in page "
+             "coordinates -- see PipelineConfig.use_ocr_vlm_fallback.",
+    )
+    parser.add_argument(
+        "--use-page-type",
+        action="store_true",
+        help="AV-6: single-shot page-type triage (floor_plan / "
+             "non_architectural_document / other) per image, inside "
+             "STEP 3's existing per-image loop (no extra model load). "
+             "Advisory only: writes page_type/page_type_rationale on "
+             "the annotation, never drops or accepts a room. Requires "
+             "--use-vlm --vlm-backend unsloth (no-op with any other "
+             "backend, logs a warning). Default: off.",
+    )
+    parser.add_argument(
+        "--export-object-detections",
+        action="store_true",
+        help="AV-1: also export objectDetections (door/window geometry) "
+             "to coco_objects.json in the output directory, in its own "
+             "category id space (never merged into the room-geometry "
+             "coco/ export). Default: off.",
+    )
+    parser.add_argument(
+        "--object-detection-min-confidence",
+        type=float,
+        default=None,
+        help="Minimum confidence for a detection to be included in "
+             "coco_objects.json (default: ExportConfig."
+             "object_detection_min_confidence, 0.0 -- keeps every "
+             "persisted detection). Has no effect unless "
+             "--export-object-detections is also set.",
     )
     parser.add_argument(
         "--skip-existing",
@@ -2827,16 +3321,26 @@ Examples:
     config.use_windows = args.use_windows
     config.use_yolo_objects = args.use_yolo_objects
     config.use_sam3_exemplar = args.use_sam3_exemplar
+    config.use_page_type = args.use_page_type
+    config.use_ocr_vlm_fallback = args.ocr_vlm_fallback
+    config.use_crop_reread = not args.no_crop_reread
+    config.use_vector_room_extent = args.use_vector_room_extent
+    config.use_door_layer_filter = not args.no_door_layer_filter
     _warn_if_sam3_exemplar_orphaned(config)
     _warn_if_yolo_objects_ocr_only(config)
     if args.corroboration_weight is not None:
         config.confidence_weights.corroboration = args.corroboration_weight
-    config.mlflow.enabled = args.enable_mlflow
+    # `or`, not assignment: the store_true flag defaults to False and would
+    # otherwise overwrite an MLFLOW_ENABLED=1 default from the environment.
+    config.mlflow.enabled = config.mlflow.enabled or args.enable_mlflow
     if args.mlflow_tracking_uri is not None:
         config.mlflow.tracking_uri = args.mlflow_tracking_uri
     if args.eval_gt_dir is not None:
         config.eval_gt_dir = args.eval_gt_dir
     config.min_rooms_for_sft = args.min_rooms
+    config.export.export_object_detections = args.export_object_detections
+    if args.object_detection_min_confidence is not None:
+        config.export.object_detection_min_confidence = args.object_detection_min_confidence
     if args.no_tiling:
         config.use_tiling = False
     config.ocr.backend = args.ocr_backend
@@ -2849,9 +3353,15 @@ Examples:
     config.vlm.qwen_model = args.qwen_model
     if args.unsloth_model is not None:
         config.vlm.unsloth_model = args.unsloth_model
+    if args.unsloth_adapter is not None:
+        config.vlm.unsloth_adapter_path = args.unsloth_adapter
+    if args.unsloth_room_prompt is not None:
+        config.vlm.unsloth_room_prompt = args.unsloth_room_prompt
 
     if args.dpi:
         config.pdf.dpi = args.dpi
+    if args.enforce_min_edge_floor:
+        config.pdf.enforce_min_edge_floor = True
 
     # Serialize runs — VLM + SAM load multi-GB models; two concurrent runs exhaust RAM.
     with single_instance(wait=not args.no_wait):

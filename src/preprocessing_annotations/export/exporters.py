@@ -13,8 +13,10 @@ from typing import List, Optional
 
 try:
     from ..config import ExportConfig
+    from .group_split import SPLIT_NAMES, GroupMap, split_items
 except ImportError:
     from config import ExportConfig
+    from export.group_split import SPLIT_NAMES, GroupMap, split_items
 
 logger = logging.getLogger(__name__)
 
@@ -725,6 +727,11 @@ class COCOExporter:
                         "room_name": room.get("room_name") or room.get("name", ""),
                         "room_number": room.get("room_number", ""),
                         "confidence": room.get("confidence", 1.0),
+                        # What this bbox encloses (label text vs the whole
+                        # room). Carried through so a training-set consumer
+                        # can keep one convention instead of learning from
+                        # both at once; see annotation_schema.box_convention_of.
+                        "box_convention": room.get("box_convention"),
                     },
                 })
                 ann_id += 1
@@ -810,13 +817,16 @@ class COCOExporter:
         splits: tuple = (0.70, 0.15, 0.15),
         seed: int = 42,
         min_annotations_per_image: int = 3,
+        group_map: Optional[GroupMap] = None,
     ) -> dict:
         """
         Export train / val / test COCO files with stratified splitting.
 
         Fix 7: Master category array shared across all splits.
         Fix 8: Minimum annotation count per image.
-        Fix 9: Proper 70/15/15 split balance.
+        Split unit is a group (see group_split.py), not a page: pages of one
+        document -- and of one design family, when the map says so -- would
+        otherwise appear on both sides of the split.
 
         Args:
             processed_dir: Directory of processed annotation JSON files.
@@ -825,14 +835,14 @@ class COCOExporter:
             splits:        Fractions for (train, val, test). Must sum to 1.0.
             seed:          Random seed for reproducibility.
             min_annotations_per_image: Minimum rooms per image for inclusion.
+            group_map:     Document->group map; groups never straddle splits
+                           and pinned groups go to test. Default: one group
+                           per source document.
 
         Returns:
             Dict with split names as keys and image counts as values.
         """
-        import random
-        from collections import defaultdict
-
-        assert abs(sum(splits) - 1.0) < 1e-6, "splits must sum to 1.0"
+        group_map = group_map or GroupMap()
 
         processed_dir = Path(processed_dir)
         output_dir = Path(output_dir)
@@ -868,71 +878,21 @@ class COCOExporter:
             f"{master_categories}"
         )
 
-        # Group by dominant room type for stratification
-        def dominant_type(ann: dict) -> str:
-            from collections import Counter
-            rooms = ann.get("rooms", [])
-            if not rooms:
-                return "other"
-            types = [r.get("type") or r.get("category") or "other" for r in rooms]
-            return Counter(types).most_common(1)[0][0]
-
-        by_type: dict = defaultdict(list)
+        # Group-aware assignment: every page of a group lands in one split,
+        # and groups pinned in the map go to test (group_split.py).
+        item_groups = {fname: group_map.group_of(fname) for fname, _ in all_anns}
+        split_of = split_items(
+            item_groups, splits, seed, group_map.pinned_test_groups
+        )
+        by_split = {name: [] for name in SPLIT_NAMES}
         for fname, ann in all_anns:
-            by_type[dominant_type(ann)].append((fname, ann))
-
-        # Fix 9: Stratified split with proper 70/15/15 balance
-        rng = random.Random(seed)
-        train_anns, val_anns, test_anns = [], [], []
-
-        for group in by_type.values():
-            rng.shuffle(group)
-            n = len(group)
-            n_train = max(1, int(n * splits[0])) if n >= 2 else n
-            n_val = int(n * splits[1])
-            train_anns.extend(group[:n_train])
-            val_anns.extend(group[n_train:n_train + n_val])
-            test_anns.extend(group[n_train + n_val:])
-
-        # Fix 9: Post-hoc redistribution for small datasets.
-        # Guarantee: train ≥ 60% of images, no empty splits when total ≥ 3.
-        split_lists = [train_anns, val_anns, test_anns]
+            by_split[split_of[fname]].append((fname, ann))
+        train_anns, val_anns, test_anns = (by_split[name] for name in SPLIT_NAMES)
         total = len(all_anns)
-
-        if total >= 3:
-            # Ensure no empty splits
-            for i, slist in enumerate(split_lists):
-                if len(slist) == 0:
-                    donor_idx = max(range(3), key=lambda j: len(split_lists[j]))
-                    if len(split_lists[donor_idx]) > 1:
-                        slist.append(split_lists[donor_idx].pop())
-                        split_names = ["train", "val", "test"]
-                        logger.info(
-                            f"Fix9: moved 1 image from "
-                            f"'{split_names[donor_idx]}' to '{split_names[i]}' "
-                            f"to prevent empty split"
-                        )
-
-            # Ensure train has ≥60% of images (checklist #10)
-            train_pct = len(train_anns) / total
-            while train_pct < 0.60 and total >= 3:
-                # Move from largest non-train split
-                non_train = [(1, val_anns), (2, test_anns)]
-                donor_idx, donor_list = max(non_train, key=lambda x: len(x[1]))
-                if len(donor_list) > 1:
-                    train_anns.append(donor_list.pop())
-                    split_names = ["train", "val", "test"]
-                    logger.info(
-                        f"Fix9: moved 1 image from '{split_names[donor_idx]}' "
-                        f"to 'train' (train was {train_pct:.0%})"
-                    )
-                    train_pct = len(train_anns) / total
-                else:
-                    break
 
         # Log final split distribution
         logger.info(
-            f"Fix9: final splits — train={len(train_anns)}, "
+            f"Group split — train={len(train_anns)}, "
             f"val={len(val_anns)}, test={len(test_anns)} "
             f"(total={total})"
         )

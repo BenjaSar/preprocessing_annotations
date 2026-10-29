@@ -119,11 +119,47 @@ _IP_STATEMENT_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+# Electrical panel schedule boilerplate fields (verified present via OCR on a
+# real sheet: "PANEL P3A" table containing "MOUNTING", "NEMA 3R", "DOUBLE LUG",
+# "FEED THRU", "200% NEUTRAL", "I/G BUS", "VOLTS", "PHASE", "WIRE", "MAIN",
+# "MLO", "A.I.C."). None of this table's own row/column-header text (numeric
+# circuit loads, single-letter column abbreviations like the "K"/"I"/"T" stack
+# in a "LTG/CONV/KIT/RECP/MISC" header row) was previously classified as an
+# excluded token, so compute_exclusion_zones() never formed a zone over the
+# table at all (needs >= min_cluster_tokens=3 excluded tokens in proximity) --
+# a room label mislocalized onto the table (e.g. "K" -> CAFETERIA, sitting on
+# the "KIT" column header) survived undetected. These phrases are corpus-wide
+# rare (2-5 of 147 pages checked) and specific to panel-schedule templates --
+# no collision risk with room names or general architectural notes.
+_ELECTRICAL_SCHEDULE_FIELD_PATTERN = re.compile(
+    r"(\bNEMA\b|DOUBLE\s+LUG|FEED\s+THRU|I\s*/\s*G\s+BUS|200\s*%\s*NEUTRAL|\bMLO\b)",
+    re.IGNORECASE,
+)
+
+
+# Column headers of a lighting/fixture legend. Measured on
+# sprint1_verify55 "Lesisure Town Clubhouse Lighting_page005": that sheet's
+# left strip is a legend whose header row reads MARK / VOLT / MOUNT /
+# WALL-CEILING, and whose rows then read 120 / SURFACE / HANGING / FAN. Its
+# row labels survived as rooms ("BREAK ROOM" 155x116 at x=193, "STAIR 2"
+# 140x85, "BD") because the only already-excluded token there was LEGEND --
+# one token, under compute_exclusion_zones' 3-token cluster minimum, so no
+# zone formed and all 5 zones on that page sat at x >= 1304.
+#
+# Scoped to header words rather than row contents on purpose: a zone still
+# needs min_cluster_tokens of these clustered together, so a stray MOUNT or
+# VOLT elsewhere in a drawing cannot create one on its own.
+_LEGEND_HEADER_PATTERN = re.compile(
+    r"^(MARK|VOLT|MOUNT|WALL\s*[/\-]\s*CEILING)$",
+    re.IGNORECASE,
+)
+
 
 def _is_excluded_token(text: str) -> bool:
     """Return True if the raw OCR text should never become a room candidate."""
     return bool(
-        _PANEL_PATTERN.match(text)
+        _LEGEND_HEADER_PATTERN.match(text.strip())
+        or _PANEL_PATTERN.match(text)
         or _EQUIPMENT_ONLY_PATTERN.match(text)
         or _INSTRUCTION_PATTERN.search(text)
         or _DOCUMENTATION_PATTERN.search(text)
@@ -132,6 +168,7 @@ def _is_excluded_token(text: str) -> bool:
         or _TITLE_BLOCK_PATTERN.search(text)
         or _STREET_PATTERN.search(text)
         or _IP_STATEMENT_PATTERN.search(text)
+        or _ELECTRICAL_SCHEDULE_FIELD_PATTERN.search(text)
     )
 
 
@@ -155,13 +192,62 @@ def _centroid(bbox_points: List[List[int]]) -> Tuple[float, float]:
     return sum(xs) / len(xs), sum(ys) / len(ys)
 
 
+def _rect_gap(a: Tuple[int, int, int, int], b: Tuple[int, int, int, int]) -> Tuple[float, float]:
+    """(dx, dy) gap between two rects along each axis; 0 if they overlap on that axis."""
+    dx = max(a[0] - b[2], b[0] - a[2], 0)
+    dy = max(a[1] - b[3], b[1] - a[3], 0)
+    return dx, dy
+
+
+def _group_titleblock_zones(
+    titleblock_zones: List[Tuple[int, int, int, int]],
+    radius: float,
+) -> List[List[Tuple[int, int, int, int]]]:
+    """R3 (2026-09-14): group title-block-pattern zones by physical proximity
+    before unioning them, instead of unioning every title-block match on the
+    page unconditionally.
+
+    Verified defect (220301_Elect_plans_05_page001, full-res visual + code
+    read): the page's real title block is a narrow column on the RIGHT edge,
+    but a second, unrelated title-block-pattern match elsewhere on the page
+    (e.g. a footer stamp) got unioned into the same bbox before extension,
+    making the union's width span nearly the full page -- which
+    `_extend_titleblock_zone` then extended from x=0, producing a zone
+    `[0, 363, 4500, 3046]` that swallowed the entire floor plan (40 raw rooms,
+    all real, all lost). Confirmed systemic, not a one-page fluke: 8/141
+    pages corpus-wide have an exclusion zone covering >30% of page area.
+
+    Reuses the same proximity radius as the token-level clustering above it
+    (`CLUSTER_RADIUS`) so "close enough to be one title strip" means the same
+    thing at both stages. Greedy single-link grouping, same structure as the
+    token clustering: a zone joins a group if it is within `radius` of ANY
+    existing member on both axes.
+    """
+    groups: List[List[Tuple[int, int, int, int]]] = []
+    for zone in titleblock_zones:
+        placed = False
+        for group in groups:
+            for member in group:
+                dx, dy = _rect_gap(zone, member)
+                if dx <= radius and dy <= radius:
+                    group.append(zone)
+                    placed = True
+                    break
+            if placed:
+                break
+        if not placed:
+            groups.append([zone])
+    return groups
+
+
 def _extend_titleblock_zone(
     titleblock_zones: List[Tuple[int, int, int, int]],
     image_width: int,
     image_height: int,
+    near_edge_only: bool,
 ) -> Tuple[int, int, int, int]:
-    """Extend the union of title-block field zones to the page edge along the
-    title strip's long axis.
+    """Extend the union of ONE title-block strip's field zones to the page
+    edge along the strip's long axis.
 
     A firm's logo graphic sits inside/adjacent to the title-block field cluster
     (see _TITLE_BLOCK_PATTERN) but carries no OCR text, so proximity clustering
@@ -175,14 +261,25 @@ def _extend_titleblock_zone(
     vertical strip (side-column title block) across the full page height. The
     short axis stays at the detected field extent, so floor-plan content beyond
     the margin strip is never covered.
+
+    Callers MUST pass zones from a single spatially-coherent title-block strip
+    (see `_group_titleblock_zones`) -- unioning disjoint, unrelated title-block
+    matches from opposite sides of the page before calling this produces a
+    union wide/tall enough to make the wrong axis "win", extending a narrow
+    real title strip's zone across the entire page (verified defect, see
+    `_group_titleblock_zones`'s docstring).
     """
     x1 = min(z[0] for z in titleblock_zones)
     y1 = min(z[1] for z in titleblock_zones)
     x2 = max(z[2] for z in titleblock_zones)
     y2 = max(z[3] for z in titleblock_zones)
     if (x2 - x1) >= (y2 - y1):
-        return (0, y1, image_width, y2)
-    return (x1, 0, x2, image_height)
+        if not near_edge_only:
+            return (0, y1, image_width, y2)
+        return (0, y1, x2, y2) if x1 <= image_width - x2 else (x1, y1, image_width, y2)
+    if not near_edge_only:
+        return (x1, 0, x2, image_height)
+    return (x1, 0, x2, y2) if y1 <= image_height - y2 else (x1, y1, x2, image_height)
 
 
 def _bbox_distance(a_points: List[List[int]], b_points: List[List[int]]) -> float:
@@ -340,6 +437,23 @@ class MEPTextExtractor:
             re.compile(pattern, re.IGNORECASE)
             for pattern in self.config.room_name_patterns
         ]
+        self._room_name_placeholder_pattern = re.compile(
+            self.config.room_name_placeholder_pattern
+        )
+
+    def strip_room_name_placeholders(self, text: str) -> str:
+        """`text` without the drawing's own placeholder marks around a room
+        name -- see OCRConfig.room_name_placeholder_pattern."""
+        return " ".join(self._room_name_placeholder_pattern.sub(" ", text).split())
+
+    def is_room_name(self, text: str) -> bool:
+        """True when `text` matches one of OCRConfig.room_name_patterns."""
+        name = self.strip_room_name_placeholders(text)
+        return any(p.search(name) for p in self._room_name_patterns)
+
+    def matches_room_label(self, text: str) -> bool:
+        """True when `text` on its own is a room number or a room name."""
+        return bool(self._room_number_pattern.match(text)) or self.is_room_name(text)
 
     def release(self) -> None:
         """Drop the OCR backend and return its native heap to the OS.
@@ -676,10 +790,10 @@ class MEPTextExtractor:
         name_candidates: List[RoomCandidate] = []
 
         for detection in merged_detections:
-            text = detection.text.strip()
+            text = self.strip_room_name_placeholders(detection.text.strip())
 
             is_number = bool(self._room_number_pattern.match(text))
-            is_name = any(p.search(text) for p in self._room_name_patterns)
+            is_name = self.is_room_name(text)
 
             if not (is_number or is_name):
                 continue
@@ -758,12 +872,6 @@ class MEPTextExtractor:
 
         sorted_dets = sorted(detections, key=sort_key)
 
-        def _self_matches(text: str) -> bool:
-            return (
-                bool(self._room_number_pattern.match(text))
-                or any(p.search(text) for p in self._room_name_patterns)
-            )
-
         def _make_merged(group: List[TextDetection]) -> TextDetection:
             """Produce a single TextDetection from a group of constituents."""
             g_sorted = sorted(group, key=lambda d: min(p[0] for p in d.bbox))
@@ -817,7 +925,7 @@ class MEPTextExtractor:
                 for window in range(min(MAX_WINDOW, len(ch) - k), 1, -1):
                     group = ch[k: k + window]
                     merged = _make_merged(group)
-                    if _self_matches(merged.text.strip()):
+                    if self.matches_room_label(merged.text.strip()):
                         best_end = k + window
                         best_merged = merged
                         logger.debug(
@@ -877,12 +985,6 @@ class MEPTextExtractor:
         """
         if not detections:
             return []
-
-        def _self_matches(text: str) -> bool:
-            return (
-                bool(self._room_number_pattern.match(text))
-                or any(p.search(text) for p in self._room_name_patterns)
-            )
 
         def _x_range(d: TextDetection):
             xs = [p[0] for p in d.bbox]
@@ -970,7 +1072,7 @@ class MEPTextExtractor:
                 group_indices = [i] + [idx for idx, _ in stack_candidates[:depth]]
                 candidate_text = " ".join(d.text.strip() for d in
                                           sorted(group_tokens, key=lambda d: _centroid(d.bbox)[1]))
-                if _self_matches(candidate_text):
+                if self.matches_room_label(candidate_text):
                     merged_token = _make_stack_merge(group_tokens)
                     best_indices = group_indices
                     logger.debug(
@@ -1059,6 +1161,23 @@ class MEPTextExtractor:
     # (separately configured), giving full in-plan label recall at 4500px input.
     _OCR_MAX_DIM_PX: int = 4500
 
+    @classmethod
+    def ocr_scale_size(cls, size: Tuple[int, int]) -> Optional[Tuple[int, int]]:
+        """The size OCR reads `size` at, or None when it reads it unchanged.
+
+        Detection coordinates are in this space, so anything that crops the
+        page from those coordinates -- crop re-read
+        (ingestion/crop_reread.py) -- has to scale the image the same way.
+        Extracted rather than duplicated: the two must not drift apart, and
+        the OCR copy is a temp file deleted right after extraction, so a
+        later consumer cannot simply reuse it.
+        """
+        longest = max(size)
+        if longest <= cls._OCR_MAX_DIM_PX:
+            return None
+        scale = cls._OCR_MAX_DIM_PX / longest
+        return int(size[0] * scale), int(size[1] * scale)
+
     # Y1 (2026-08-20 audit, corrects a wrong integration point from the
     # same-day PDF-text-layer prototype): "OCR already found something
     # HERE" tolerance for merging extra_detections into candidate
@@ -1121,12 +1240,12 @@ class MEPTextExtractor:
             from PIL import Image as _PIL
             with _PIL.open(image_path) as _img:
                 orig_w, orig_h = _img.size
-            if max(orig_w, orig_h) > self._OCR_MAX_DIM_PX:
-                scale = self._OCR_MAX_DIM_PX / max(orig_w, orig_h)
-                new_w, new_h = int(orig_w * scale), int(orig_h * scale)
+            ocr_size = self.ocr_scale_size((orig_w, orig_h))
+            if ocr_size is not None:
+                new_w, new_h = ocr_size
                 logger.info(
                     f"OCR resize: {orig_w}x{orig_h} → {new_w}x{new_h} "
-                    f"(scale={scale:.3f}) to match annotation coordinate space"
+                    f"(scale={new_w / orig_w:.3f}) to match annotation coordinate space"
                 )
                 with _PIL.open(image_path) as _img:
                     resized = _img.resize((new_w, new_h), _PIL.Resampling.LANCZOS)
@@ -1210,6 +1329,17 @@ class MEPTextExtractor:
         # Simple greedy clustering by proximity (300px radius)
         CLUSTER_RADIUS = 300
         ZONE_PAD = 50
+        # Panel schedules place their boilerplate fields (NEMA/DOUBLE LUG/etc.)
+        # one text-line above their column-header row -- measured on 2 real,
+        # independently-sourced sheets (E-3.3 UNIT P3A, E-3.1 UNIT P2A): the
+        # gap between the boilerplate cluster's bbox and the header row is
+        # 55-59px, just past the default 50px pad, so a bare single-letter
+        # header cell ("K" in a stacked "LTG/CONV/KIT/RECP/MISC" header) was
+        # surviving as an unexcluded room candidate. A larger, gated pad
+        # (applies ONLY to clusters matched via
+        # _ELECTRICAL_SCHEDULE_FIELD_PATTERN, not BOM/title-block/street/IP
+        # zones) comfortably clears the measured gap with margin.
+        SCHEDULE_ZONE_PAD = 150
         clusters: list = []   # each entry = list of TextDetection
 
         for det in excluded_dets:
@@ -1246,13 +1376,17 @@ class MEPTextExtractor:
             )
             if len(cluster) < min_cluster_tokens and not has_strong_marker:
                 continue
+            is_schedule_cluster = any(
+                _ELECTRICAL_SCHEDULE_FIELD_PATTERN.search(d.text) for d in cluster
+            )
+            pad = SCHEDULE_ZONE_PAD if is_schedule_cluster else ZONE_PAD
             xs = [p[0] for d in cluster for p in d.bbox]
             ys = [p[1] for d in cluster for p in d.bbox]
             zone = (
-                max(0, min(xs) - ZONE_PAD),
-                max(0, min(ys) - ZONE_PAD),
-                max(xs) + ZONE_PAD,
-                max(ys) + ZONE_PAD,
+                max(0, min(xs) - pad),
+                max(0, min(ys) - pad),
+                max(xs) + pad,
+                max(ys) + pad,
             )
             # Title-block field clusters are collected separately: their union is
             # extended to the page edge below so the untexted logo corner abutting
@@ -1267,10 +1401,15 @@ class MEPTextExtractor:
                 f"[{zone[0]},{zone[1]},{zone[2]},{zone[3]}]"
             )
 
-        if titleblock_zones:
-            zones.append(
-                _extend_titleblock_zone(titleblock_zones, image_width, image_height)
-            )
+        # R3 (2026-09-14): group before extending -- see _group_titleblock_zones
+        # docstring. Each spatially-coherent group is one real title-block
+        # strip and gets extended independently; disjoint groups no longer
+        # union into one page-spanning zone.
+        for group in _group_titleblock_zones(titleblock_zones, CLUSTER_RADIUS):
+            zones.append(_extend_titleblock_zone(
+                group, image_width, image_height,
+                self.config.extend_titleblock_zone_to_near_edge_only,
+            ))
 
         return zones
 

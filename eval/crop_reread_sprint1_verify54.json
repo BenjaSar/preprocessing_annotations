@@ -1,0 +1,3518 @@
+{
+  "run_dir": "/home/ubuntu/floorplan_classifier/VLM/sprint1_verify54",
+  "model": "qwen3-vl-8b",
+  "selector": {
+    "min_text_letters": 3,
+    "keyword_similarity_min": 0.7,
+    "consistency_min": 0.7,
+    "crop_padding_box_heights": 1.0
+  },
+  "crops": 677,
+  "empty_reads": 5,
+  "unchanged_reads": 161,
+  "seconds_per_crop": {
+    "median": 0.9909163890406489,
+    "max": 40.06834425032139,
+    "total": 819.2303877444938
+  },
+  "pages": {
+    "326 ROCKAWAY - AVI-ON LAYOUT_page000": [
+      {
+        "index": 8,
+        "original": "Description",
+        "reread": "Description"
+      },
+      {
+        "index": 11,
+        "original": "2402BAT-3",
+        "reread": "2402BAT-3"
+      },
+      {
+        "index": 20,
+        "original": "2402BAT-2",
+        "reread": "2402BAT-2"
+      },
+      {
+        "index": 49,
+        "original": "NEWYORK",
+        "reread": "11 HANOVER S"
+      },
+      {
+        "index": 51,
+        "original": "BLOCK3499",
+        "reread": "BLOCK: 3499"
+      },
+      {
+        "index": 63,
+        "original": "CLIENT:",
+        "reread": "CLIENT:"
+      },
+      {
+        "index": 72,
+        "original": "BUILDIN",
+        "reread": "BUILDING STORAGE"
+      },
+      {
+        "index": 96,
+        "original": "STORA",
+        "reread": "STORAGE"
+      },
+      {
+        "index": 102,
+        "original": "TAIR",
+        "reread": "STAIR F"
+      },
+      {
+        "index": 123,
+        "original": "REFUSE",
+        "reread": "REFUSE"
+      },
+      {
+        "index": 132,
+        "original": "PLARO3",
+        "reread": "CHILDREN'S PLAYROOM 835 SF"
+      },
+      {
+        "index": 146,
+        "original": "TORAGE",
+        "reread": "BUILDING STORAGE A 386 SF"
+      },
+      {
+        "index": 152,
+        "original": "AUNDR",
+        "reread": "LAUNDRY"
+      },
+      {
+        "index": 157,
+        "original": "BUILDING",
+        "reread": "BUILDING STORAGE A"
+      },
+      {
+        "index": 159,
+        "original": "COMMERCIAL",
+        "reread": "COMMERCIAL STORAGE"
+      },
+      {
+        "index": 169,
+        "original": "BUILDING",
+        "reread": "BUILDING STORAGE"
+      },
+      {
+        "index": 181,
+        "original": "ACHINE_ROOM",
+        "reread": "ELEVATOR MACHINE ROOM"
+      },
+      {
+        "index": 182,
+        "original": "ATS ROOM",
+        "reread": "ATS ROOM"
+      },
+      {
+        "index": 224,
+        "original": "ROOM",
+        "reread": "ROOM 2"
+      },
+      {
+        "index": 231,
+        "original": "STORAGE_A",
+        "reread": "BUILDING STORAGE_A 386 SF"
+      },
+      {
+        "index": 236,
+        "original": "TAIRL",
+        "reread": "STAIR D"
+      },
+      {
+        "index": 240,
+        "original": "WALTING",
+        "reread": "WAITING"
+      },
+      {
+        "index": 243,
+        "original": "MEP ENG",
+        "reread": "MEP ENGINEERED BY MOROZOV ENGINEERING"
+      },
+      {
+        "index": 250,
+        "original": "TAIR_D",
+        "reread": "STAIR D"
+      },
+      {
+        "index": 254,
+        "original": "PLAROO3",
+        "reread": "CHILDREN PLAYROOM 3"
+      },
+      {
+        "index": 266,
+        "original": "HOMCHINERY",
+        "reread": "NO MACHINERY TO B"
+      },
+      {
+        "index": 271,
+        "original": "AIR",
+        "reread": "STAIR F"
+      }
+    ],
+    "326 ROCKAWAY - AVI-ON LAYOUT_page001": [
+      {
+        "index": 3,
+        "original": "ARE",
+        "reread": "ALL LIGHTS ARE CO"
+      },
+      {
+        "index": 20,
+        "original": "LINE",
+        "reread": "PROPE LINE"
+      },
+      {
+        "index": 29,
+        "original": "STATION",
+        "reread": "ALARM PUBL STATION 1"
+      },
+      {
+        "index": 44,
+        "original": "NEWYORK",
+        "reread": "11 HANOVER S"
+      },
+      {
+        "index": 93,
+        "original": "SOCIA",
+        "reread": "SOCIAL"
+      },
+      {
+        "index": 96,
+        "original": "CLIENT:",
+        "reread": "CLIENT:"
+      },
+      {
+        "index": 113,
+        "original": "STATION",
+        "reread": "ALARM PUL STATION"
+      },
+      {
+        "index": 123,
+        "original": "YORK",
+        "reread": "NEW YORK AVE"
+      },
+      {
+        "index": 135,
+        "original": "TYP",
+        "reread": "TYPE\u2014"
+      },
+      {
+        "index": 139,
+        "original": "GRESE",
+        "reread": "EGRESS EXIT"
+      },
+      {
+        "index": 144,
+        "original": "OMMUNI",
+        "reread": "COMMUNITY"
+      },
+      {
+        "index": 148,
+        "original": "RESIDENTIAL",
+        "reread": "RESIDENTIAL / SOCIAL SERVICE"
+      },
+      {
+        "index": 188,
+        "original": "BLOCK:3499",
+        "reread": "BLOCK: 3499"
+      },
+      {
+        "index": 209,
+        "original": "TYPE-C",
+        "reread": "TYPE-C1"
+      },
+      {
+        "index": 221,
+        "original": "TYPE",
+        "reread": "TYPE-"
+      },
+      {
+        "index": 223,
+        "original": "FAGLITY",
+        "reread": "COMMUNITY FACILITY ENTRY"
+      },
+      {
+        "index": 225,
+        "original": "ENIRANCE",
+        "reread": "ENTRANCE"
+      },
+      {
+        "index": 237,
+        "original": "YPE-A18",
+        "reread": "TYPE-A18"
+      },
+      {
+        "index": 241,
+        "original": "ALL",
+        "reread": "ALL LIG ARE CO"
+      },
+      {
+        "index": 242,
+        "original": "YPE-B4",
+        "reread": "TYPE-B4"
+      },
+      {
+        "index": 251,
+        "original": "STATION",
+        "reread": "MANUAL FIRE ALARM PULL STATION"
+      },
+      {
+        "index": 257,
+        "original": "LER",
+        "reread": "ROLLER"
+      },
+      {
+        "index": 277,
+        "original": "TYPEA10",
+        "reread": "TYPE-A10"
+      },
+      {
+        "index": 278,
+        "original": "YPE-A7",
+        "reread": "TYPE-A7"
+      },
+      {
+        "index": 289,
+        "original": "SIDENTIALT-06",
+        "reread": "RESIDENTIAL T-06 LOBBY"
+      },
+      {
+        "index": 293,
+        "original": "TYPE-A",
+        "reread": "TYPE-A1"
+      },
+      {
+        "index": 302,
+        "original": "ESS",
+        "reread": "WIRELESS U"
+      },
+      {
+        "index": 314,
+        "original": "YPE-A4",
+        "reread": "TYPE-A4 3"
+      },
+      {
+        "index": 337,
+        "original": "L.O.S",
+        "reread": "T.O.S.1"
+      },
+      {
+        "index": 342,
+        "original": "ECTRICAI",
+        "reread": "ELECTRICAL"
+      },
+      {
+        "index": 364,
+        "original": "YPE-B4",
+        "reread": "TYPE-B4"
+      },
+      {
+        "index": 366,
+        "original": "MUNITY ROO",
+        "reread": "COMMUNITY ROOM"
+      },
+      {
+        "index": 367,
+        "original": "MEP ENG",
+        "reread": "MEP ENGINEERED BY MOROZOV ENGINEERING"
+      },
+      {
+        "index": 369,
+        "original": "OMMUN",
+        "reread": "COMMUNITY FACILITY"
+      },
+      {
+        "index": 375,
+        "original": "STORAS",
+        "reread": "STORAGE"
+      },
+      {
+        "index": 380,
+        "original": "TYP",
+        "reread": "(TYP)"
+      },
+      {
+        "index": 385,
+        "original": "UNIT",
+        "reread": "SUPER'S UNIT LR 205 SF"
+      },
+      {
+        "index": 398,
+        "original": "MMUNITYFAEI",
+        "reread": "COMMUNITY FACIL ENTRY"
+      },
+      {
+        "index": 409,
+        "original": "OMUNITY ROOM",
+        "reread": "COMMUNITY ROOM"
+      },
+      {
+        "index": 416,
+        "original": "TAIR_B",
+        "reread": "STAIR B"
+      },
+      {
+        "index": 446,
+        "original": "OBR 9-01",
+        "reread": "OBR 9'-0'"
+      },
+      {
+        "index": 447,
+        "original": "ETORACE",
+        "reread": "STORAGE"
+      }
+    ],
+    "326 ROCKAWAY - AVI-ON LAYOUT_page002": [
+      {
+        "index": 52,
+        "original": "NEWYORK",
+        "reread": "11 HANOVER S"
+      },
+      {
+        "index": 59,
+        "original": "BLOCK3499",
+        "reread": "BLOCK: 3499"
+      },
+      {
+        "index": 63,
+        "original": "LINE",
+        "reread": "PROPER LINE"
+      },
+      {
+        "index": 76,
+        "original": "CLIENT:",
+        "reread": "CLIENT:"
+      },
+      {
+        "index": 105,
+        "original": "ELECTRICAL LIGH",
+        "reread": "ELECTRICAL LIGHT"
+      },
+      {
+        "index": 170,
+        "original": "SUPPOR",
+        "reread": "(SUPPORTI"
+      },
+      {
+        "index": 192,
+        "original": "YPE-A5.1",
+        "reread": "TYPE-A5.1"
+      },
+      {
+        "index": 195,
+        "original": "YPE-B9",
+        "reread": "TYPE-B9"
+      },
+      {
+        "index": 198,
+        "original": "YPE-A15",
+        "reread": "TYPE-A15"
+      },
+      {
+        "index": 220,
+        "original": "YPE-A10.1",
+        "reread": "TYPE-A10.1"
+      },
+      {
+        "index": 221,
+        "original": "CORRID",
+        "reread": "CORRIDOR"
+      },
+      {
+        "index": 235,
+        "original": "TYPE-A4.",
+        "reread": "TYPE-A4.1"
+      },
+      {
+        "index": 247,
+        "original": "YPE-A9.1",
+        "reread": "TYPE-A9.1"
+      },
+      {
+        "index": 257,
+        "original": "YPE-A3.1",
+        "reread": "TYPE-A3.1"
+      },
+      {
+        "index": 259,
+        "original": "YPE-B3",
+        "reread": "TYPE-B3"
+      },
+      {
+        "index": 282,
+        "original": "YPE-B1.1",
+        "reread": "TYPE-B1.1"
+      },
+      {
+        "index": 284,
+        "original": "TYP.",
+        "reread": ""
+      },
+      {
+        "index": 300,
+        "original": "YPE-A1.",
+        "reread": "TYPE-A1.1"
+      },
+      {
+        "index": 302,
+        "original": "LYPE",
+        "reread": "TYPE-A"
+      },
+      {
+        "index": 305,
+        "original": "YPE-A1.1",
+        "reread": "TYPE-A1.1"
+      },
+      {
+        "index": 310,
+        "original": "YPE-B",
+        "reread": "TYPE-B5"
+      },
+      {
+        "index": 361,
+        "original": "TYPE-88",
+        "reread": "TYPE-B8"
+      },
+      {
+        "index": 365,
+        "original": "TILITY",
+        "reread": "UTILITY SINK"
+      },
+      {
+        "index": 366,
+        "original": "PE-C6",
+        "reread": "TYPE-C6"
+      },
+      {
+        "index": 390,
+        "original": "(TYP.)",
+        "reread": ""
+      },
+      {
+        "index": 393,
+        "original": "MEP ENG",
+        "reread": "MEP ENGINEERED BY MOROZOV ENGINEERING"
+      },
+      {
+        "index": 396,
+        "original": "YPE-C",
+        "reread": "TYPE-C2"
+      },
+      {
+        "index": 397,
+        "original": "YPE-A11",
+        "reread": "TYPE-A11"
+      },
+      {
+        "index": 404,
+        "original": "TYPE-35",
+        "reread": "TYPE-B5"
+      },
+      {
+        "index": 405,
+        "original": "ITILITY",
+        "reread": "UTILITY SINK"
+      },
+      {
+        "index": 408,
+        "original": "ETYP",
+        "reread": ""
+      },
+      {
+        "index": 409,
+        "original": "YPE-R9",
+        "reread": "TYPE-B9"
+      },
+      {
+        "index": 425,
+        "original": "LYPE-",
+        "reread": "TYPE-C2"
+      }
+    ],
+    "326 ROCKAWAY - AVI-ON LAYOUT_page003": [
+      {
+        "index": 48,
+        "original": "NEWYORK",
+        "reread": "11 HANOVER S"
+      },
+      {
+        "index": 51,
+        "original": "LINE",
+        "reread": "PROPER LINE"
+      },
+      {
+        "index": 66,
+        "original": "ORAGE",
+        "reread": "BUILDING STORAGE"
+      },
+      {
+        "index": 78,
+        "original": "CLIENT:",
+        "reread": "CLIENT:"
+      },
+      {
+        "index": 112,
+        "original": "YPE-A15.1",
+        "reread": "TYPE-A15.1"
+      },
+      {
+        "index": 117,
+        "original": "SUPPE",
+        "reread": "HUMELESS (SUPPORT"
+      },
+      {
+        "index": 123,
+        "original": "ELECTRICAL L",
+        "reread": "ELECTRICAL LIC"
+      },
+      {
+        "index": 145,
+        "original": "BLOCK:3499",
+        "reread": "BLOCK: 3499"
+      },
+      {
+        "index": 174,
+        "original": "YPER",
+        "reread": "TYPE-B7."
+      },
+      {
+        "index": 196,
+        "original": "YPE-B8.",
+        "reread": "TYPE-B8.1"
+      },
+      {
+        "index": 212,
+        "original": "YPE-C3.1",
+        "reread": "TYPE-C3.1"
+      },
+      {
+        "index": 224,
+        "original": "TORAGE",
+        "reread": "BUILDING STORAGE"
+      },
+      {
+        "index": 228,
+        "original": "PE-C6.",
+        "reread": "TYPE-C6.1"
+      },
+      {
+        "index": 231,
+        "original": "TYPE-C2.",
+        "reread": "TYPE-C2.1"
+      },
+      {
+        "index": 238,
+        "original": "JTILITY",
+        "reread": "UTILITY SINK"
+      },
+      {
+        "index": 245,
+        "original": "(TYP)",
+        "reread": "12\" DRO (TYP.)"
+      },
+      {
+        "index": 265,
+        "original": "MEP ENG",
+        "reread": "MEP ENGINEERED BY MOROZOV ENGINEERING"
+      },
+      {
+        "index": 269,
+        "original": "YPE-R",
+        "reread": "TYPE-B7."
+      },
+      {
+        "index": 291,
+        "original": "FILITY",
+        "reread": "UTILITY SINK"
+      },
+      {
+        "index": 293,
+        "original": "PE-C4",
+        "reread": "TYPE-C4.1"
+      }
+    ],
+    "326 ROCKAWAY - AVI-ON LAYOUT_page004": [
+      {
+        "index": 14,
+        "original": "LINE",
+        "reread": "PROPER LINE"
+      },
+      {
+        "index": 32,
+        "original": "YPE+A16",
+        "reread": "TYPE+A16"
+      },
+      {
+        "index": 34,
+        "original": "NEWYORK",
+        "reread": "11 HANOVER S"
+      },
+      {
+        "index": 40,
+        "original": "BLOCK3499",
+        "reread": "BLOCK: 3499"
+      },
+      {
+        "index": 64,
+        "original": "CLIENT:",
+        "reread": "CLIENT:"
+      },
+      {
+        "index": 103,
+        "original": "TYP.",
+        "reread": "-12  DR"
+      },
+      {
+        "index": 121,
+        "original": "ELECTRICAL L",
+        "reread": "ELECTRICAL LIC"
+      },
+      {
+        "index": 131,
+        "original": "BUILDING",
+        "reread": "BUILDING OUTLINE (E"
+      },
+      {
+        "index": 163,
+        "original": "TYP.",
+        "reread": "=12  DRC (TYP.)"
+      },
+      {
+        "index": 173,
+        "original": "YPE-B7.1",
+        "reread": "TYPE-B7.1"
+      },
+      {
+        "index": 182,
+        "original": "YPE-C3.1",
+        "reread": "TYPE-C3.1"
+      },
+      {
+        "index": 189,
+        "original": "JTILITY",
+        "reread": "UTILITY SINK"
+      },
+      {
+        "index": 191,
+        "original": "LUNI",
+        "reread": "SS UNIT (TIVE) @"
+      },
+      {
+        "index": 219,
+        "original": "YPE-C4",
+        "reread": "TYPE-C4.2"
+      },
+      {
+        "index": 220,
+        "original": "MEP ENG",
+        "reread": "MEP ENGINEERED BY MOROZOV ENGINEERING"
+      },
+      {
+        "index": 232,
+        "original": "AIR",
+        "reread": "TAIR A"
+      },
+      {
+        "index": 235,
+        "original": "BRE",
+        "reread": "BR1"
+      }
+    ],
+    "326 ROCKAWAY - AVI-ON LAYOUT_page005": [
+      {
+        "index": 33,
+        "original": "NEWYORK",
+        "reread": "11 HANOVER S"
+      },
+      {
+        "index": 36,
+        "original": "BLOCK3499",
+        "reread": "BLOCK: 3499"
+      },
+      {
+        "index": 56,
+        "original": "CLIENT:",
+        "reread": "CLIENT:"
+      },
+      {
+        "index": 66,
+        "original": "AIR",
+        "reread": "STAIR B"
+      },
+      {
+        "index": 104,
+        "original": "ELECTRICAL LIGH",
+        "reread": "ELECTRICAL LIGHT"
+      },
+      {
+        "index": 123,
+        "original": "(TYP)",
+        "reread": "12\" DROP (TYP.)"
+      },
+      {
+        "index": 126,
+        "original": "TYP.",
+        "reread": ""
+      },
+      {
+        "index": 128,
+        "original": "TYPE-D",
+        "reread": "TYPE-D2"
+      },
+      {
+        "index": 136,
+        "original": "YPE-B13",
+        "reread": "TYPE-B13"
+      },
+      {
+        "index": 145,
+        "original": "CORRIDOF",
+        "reread": "CORRIDOR_"
+      },
+      {
+        "index": 172,
+        "original": "TYP.",
+        "reread": "12' DRC (TYP.)\u2014"
+      },
+      {
+        "index": 176,
+        "original": "TYPE-B",
+        "reread": "TYPE-B7.1"
+      },
+      {
+        "index": 177,
+        "original": "(EMTAIR",
+        "reread": "STAIR"
+      },
+      {
+        "index": 178,
+        "original": "12'DRO",
+        "reread": ""
+      },
+      {
+        "index": 203,
+        "original": "TYPI",
+        "reread": "TYPE\u2014"
+      },
+      {
+        "index": 206,
+        "original": "DOR",
+        "reread": "DOOR"
+      }
+    ],
+    "326 ROCKAWAY - AVI-ON LAYOUT_page006": [
+      {
+        "index": 32,
+        "original": "NEWYORK",
+        "reread": "11 HANOVER S"
+      },
+      {
+        "index": 38,
+        "original": "BLOCK3499",
+        "reread": "BLOCK: 3499"
+      },
+      {
+        "index": 44,
+        "original": "ELECTRICAL LIGH",
+        "reread": "ELECTRICAL LIGHT"
+      },
+      {
+        "index": 56,
+        "original": "CLIENT:",
+        "reread": "CLIENT:"
+      },
+      {
+        "index": 71,
+        "original": "39MECHANICAL ROOM",
+        "reread": "39 MECHANICAL ROOM 425 SF"
+      },
+      {
+        "index": 138,
+        "original": "MEP ENG",
+        "reread": "MEP ENGINEERED BY MOROZOV ENGINEERING"
+      }
+    ],
+    "540 Madison Avenue Divcowest Suite 29A - AVI-ON LAYOUT_page000": [
+      {
+        "index": 2,
+        "original": "Description",
+        "reread": "Description"
+      },
+      {
+        "index": 21,
+        "original": "CON",
+        "reread": "CON"
+      },
+      {
+        "index": 28,
+        "original": "2402BAT-3",
+        "reread": "2402BAT-3"
+      },
+      {
+        "index": 33,
+        "original": "PAN",
+        "reread": "PAN"
+      },
+      {
+        "index": 38,
+        "original": "CON",
+        "reread": "CON"
+      },
+      {
+        "index": 45,
+        "original": "RECEPT",
+        "reread": "RECEPTIC"
+      },
+      {
+        "index": 50,
+        "original": "DESCRIPTION",
+        "reread": "DESCRIPTION"
+      },
+      {
+        "index": 60,
+        "original": "contractor.",
+        "reread": "18/3 cable. contractor. 4 Sensor pl"
+      },
+      {
+        "index": 78,
+        "original": "PANTRY",
+        "reread": "PANTRY"
+      },
+      {
+        "index": 109,
+        "original": "2402BAT-2",
+        "reread": "2402BAT-2"
+      }
+    ],
+    "BP-1 Kennedy Middle School  - AVI-ON LAYOUT FLAT_page000": [
+      {
+        "index": 5,
+        "original": "Description",
+        "reread": "AVI-SEN-DUCM-24"
+      },
+      {
+        "index": 32,
+        "original": "OWNER",
+        "reread": "OWNER"
+      },
+      {
+        "index": 46,
+        "original": "ASSROOM",
+        "reread": "CLASSROOM - 110"
+      },
+      {
+        "index": 63,
+        "original": "TYP.",
+        "reread": "3 TYP."
+      },
+      {
+        "index": 72,
+        "original": "FOR",
+        "reread": "BID"
+      },
+      {
+        "index": 95,
+        "original": "TYP",
+        "reread": "TYP."
+      },
+      {
+        "index": 105,
+        "original": "CLASSROPM",
+        "reread": "CLASSROOM - 117"
+      },
+      {
+        "index": 113,
+        "original": "CLASSRODM",
+        "reread": "CLASSROOM-117"
+      },
+      {
+        "index": 144,
+        "original": "CLASSRODM - 117",
+        "reread": "CLASSROOM - 117"
+      }
+    ],
+    "BP-1 Kennedy Middle School  - AVI-ON LAYOUT FLAT_page001": [
+      {
+        "index": 21,
+        "original": "LASSROOM",
+        "reread": "CLASSROOM - 121"
+      },
+      {
+        "index": 25,
+        "original": "OWNER",
+        "reread": "OWNER"
+      },
+      {
+        "index": 45,
+        "original": "TYP",
+        "reread": "3 TYP."
+      },
+      {
+        "index": 55,
+        "original": "FOR",
+        "reread": "BID"
+      },
+      {
+        "index": 57,
+        "original": "LASSROO",
+        "reread": "CLASSROOM - 125"
+      }
+    ],
+    "BP-1 Kennedy Middle School  - AVI-ON LAYOUT FLAT_page002": [
+      {
+        "index": 50,
+        "original": "EDUCATION",
+        "reread": "SPECIAL EDUCATION- 128"
+      },
+      {
+        "index": 73,
+        "original": "OWNER",
+        "reread": "OWNER"
+      },
+      {
+        "index": 98,
+        "original": "SPECIAL",
+        "reread": "SPECIAL EDUCATION - 128"
+      },
+      {
+        "index": 121,
+        "original": "OUNGE",
+        "reread": "LOUNGE"
+      },
+      {
+        "index": 125,
+        "original": "FOR",
+        "reread": "BID"
+      },
+      {
+        "index": 126,
+        "original": "TYP",
+        "reread": "TYP."
+      },
+      {
+        "index": 173,
+        "original": "LASSROOM- 129",
+        "reread": "CLASSROOM - 129"
+      },
+      {
+        "index": 209,
+        "original": "_OUNGE",
+        "reread": "LOUNGE"
+      }
+    ],
+    "BP-1 Kennedy Middle School  - AVI-ON LAYOUT FLAT_page003": [
+      {
+        "index": 43,
+        "original": "OWNER",
+        "reread": "OWNER"
+      },
+      {
+        "index": 45,
+        "original": "UNGE",
+        "reread": "LOUNGE"
+      },
+      {
+        "index": 78,
+        "original": "ESTIBUL",
+        "reread": "VESTIBULE"
+      },
+      {
+        "index": 90,
+        "original": "FOR",
+        "reread": "BID"
+      },
+      {
+        "index": 104,
+        "original": "OUNGE",
+        "reread": "LOUNGE"
+      },
+      {
+        "index": 161,
+        "original": "CLASSROQM10",
+        "reread": "CLASSROOM 101"
+      },
+      {
+        "index": 175,
+        "original": "CORRIDOE",
+        "reread": "CORRIDOR"
+      },
+      {
+        "index": 192,
+        "original": "MAILIDE",
+        "reread": "MAIL/IDF"
+      },
+      {
+        "index": 196,
+        "original": "UILE1",
+        "reread": "C112"
+      }
+    ],
+    "BP-1 Kennedy Middle School  - AVI-ON LAYOUT FLAT_page004": [
+      {
+        "index": 37,
+        "original": "KITCHEN STORAGE",
+        "reread": "KITCHEN STORAGE"
+      },
+      {
+        "index": 39,
+        "original": "OWNER",
+        "reread": "OWNER"
+      },
+      {
+        "index": 79,
+        "original": "TYP",
+        "reread": "TYP."
+      },
+      {
+        "index": 85,
+        "original": "FOR",
+        "reread": "BID"
+      },
+      {
+        "index": 122,
+        "original": "CORRI",
+        "reread": "CORRIG10"
+      },
+      {
+        "index": 125,
+        "original": "TYP.",
+        "reread": "TYP."
+      },
+      {
+        "index": 159,
+        "original": "TYP.",
+        "reread": "3 TYP."
+      }
+    ],
+    "BP-1 Kennedy Middle School  - AVI-ON LAYOUT FLAT_page005": [
+      {
+        "index": 12,
+        "original": "STAGE",
+        "reread": "STAGE"
+      },
+      {
+        "index": 21,
+        "original": "OWNER",
+        "reread": "OWNER"
+      },
+      {
+        "index": 45,
+        "original": "FOR",
+        "reread": "BID"
+      },
+      {
+        "index": 92,
+        "original": "CLASSROC",
+        "reread": "CLASSROOM - 141"
+      }
+    ],
+    "BP-1 Kennedy Middle School  - AVI-ON LAYOUT FLAT_page006": [
+      {
+        "index": 22,
+        "original": "ELEC",
+        "reread": "ELEC"
+      },
+      {
+        "index": 24,
+        "original": "GYM",
+        "reread": "GYM"
+      },
+      {
+        "index": 35,
+        "original": "OWNER",
+        "reread": "OWNER"
+      },
+      {
+        "index": 61,
+        "original": "LASSROOM",
+        "reread": "CLASSROOM 137"
+      },
+      {
+        "index": 72,
+        "original": "TYP.",
+        "reread": "1 TYP."
+      },
+      {
+        "index": 76,
+        "original": "FOR",
+        "reread": "BID"
+      },
+      {
+        "index": 78,
+        "original": "TYP.",
+        "reread": "3 TYP."
+      },
+      {
+        "index": 99,
+        "original": "COMPUTER LA",
+        "reread": "COMPUTER LAB - 136"
+      },
+      {
+        "index": 145,
+        "original": "COMPUTER LAB - 136",
+        "reread": "COMPUTER LAB - 136"
+      },
+      {
+        "index": 158,
+        "original": "MEET",
+        "reread": "MECH"
+      }
+    ],
+    "BP-1 Kennedy Middle School  - AVI-ON LAYOUT FLAT_page007": [
+      {
+        "index": 31,
+        "original": "GYM",
+        "reread": "GYM"
+      },
+      {
+        "index": 35,
+        "original": "ELEC",
+        "reread": "ELEC"
+      },
+      {
+        "index": 38,
+        "original": "EDUCATION",
+        "reread": "SPECIAL EDUCATION - 138"
+      },
+      {
+        "index": 50,
+        "original": "OWNER",
+        "reread": "OWNER"
+      },
+      {
+        "index": 54,
+        "original": "SPE",
+        "reread": "SPECIAL EDUCATION"
+      },
+      {
+        "index": 60,
+        "original": "EDUCA",
+        "reread": "SPECIAL EDUCATION - 138"
+      },
+      {
+        "index": 65,
+        "original": "SPECIAL",
+        "reread": "SPECIAL EDUCATION-138"
+      },
+      {
+        "index": 78,
+        "original": "EDUC",
+        "reread": "SPECIAL EDUCATION 138"
+      },
+      {
+        "index": 90,
+        "original": "TYP.",
+        "reread": "1 TYP."
+      },
+      {
+        "index": 98,
+        "original": "FOR",
+        "reread": "BID"
+      }
+    ],
+    "BP-1 Kennedy Middle School Electrical Pages_page000": [
+      {
+        "index": 9,
+        "original": "Description",
+        "reread": "Description"
+      },
+      {
+        "index": 23,
+        "original": "OWNER",
+        "reread": "OWNER"
+      },
+      {
+        "index": 28,
+        "original": "MECHANICALE",
+        "reread": "MALNQINE MECHANICAL EL 180 HIGH OAK ROAD"
+      },
+      {
+        "index": 47,
+        "original": "LIGHTING",
+        "reread": "LIGHTING PL"
+      },
+      {
+        "index": 59,
+        "original": "TYP.",
+        "reread": "TYP."
+      },
+      {
+        "index": 64,
+        "original": "LASSROOM",
+        "reread": "CLASSROOM"
+      },
+      {
+        "index": 92,
+        "original": "CLASSRODM - 117",
+        "reread": "CLASSROOM - 117"
+      }
+    ],
+    "BP-1 Kennedy Middle School Electrical Pages_page001": [
+      {
+        "index": 14,
+        "original": "OWNER",
+        "reread": "OWNER"
+      },
+      {
+        "index": 17,
+        "original": "MECHANICALE",
+        "reread": "MALNQINE MECHANICAL EL 180 HIGH OAK ROAD"
+      },
+      {
+        "index": 27,
+        "original": "LIGHTING",
+        "reread": "LIGHTING PL"
+      },
+      {
+        "index": 30,
+        "original": "TYP",
+        "reread": "TYP."
+      },
+      {
+        "index": 108,
+        "original": "TYP.",
+        "reread": "TYP."
+      }
+    ],
+    "BP-1 Kennedy Middle School Electrical Pages_page002": [
+      {
+        "index": 58,
+        "original": "OWNER",
+        "reread": "OWNER"
+      },
+      {
+        "index": 59,
+        "original": "EDUCATION",
+        "reread": "SPECIAL EDUCATION - 128"
+      },
+      {
+        "index": 63,
+        "original": "MECHANICALE",
+        "reread": "MALNQINE MECHANICAL EL 180 HIGH OAK ROAD"
+      },
+      {
+        "index": 71,
+        "original": "SPECIAL",
+        "reread": "SPECIAL EDUCATION -"
+      },
+      {
+        "index": 88,
+        "original": "TYP",
+        "reread": "TYP."
+      },
+      {
+        "index": 178,
+        "original": "TYP.",
+        "reread": "TYP."
+      }
+    ],
+    "BP-1 Kennedy Middle School Electrical Pages_page003": [
+      {
+        "index": 34,
+        "original": "RAGE",
+        "reread": "STORAGE"
+      },
+      {
+        "index": 41,
+        "original": "OWNER",
+        "reread": "OWNER"
+      },
+      {
+        "index": 46,
+        "original": "CORRID",
+        "reread": "CORRIDOR"
+      },
+      {
+        "index": 63,
+        "original": "MECHANICALE",
+        "reread": "MALNQINE MECHANICAL EL 180 HIGH OAK ROAD"
+      },
+      {
+        "index": 69,
+        "original": "LIGHTING",
+        "reread": "LIGHTING PL"
+      },
+      {
+        "index": 74,
+        "original": "TYP.",
+        "reread": "TYP."
+      }
+    ],
+    "BP-1 Kennedy Middle School Electrical Pages_page004": [
+      {
+        "index": 25,
+        "original": "OWNER",
+        "reread": "OWNER"
+      },
+      {
+        "index": 39,
+        "original": "MECHANICALE",
+        "reread": "MALNQINE MECHANICAL EL 180 HIGH OAK ROAD"
+      },
+      {
+        "index": 44,
+        "original": "KITCHEN STORAGE",
+        "reread": "KITCHEN STORAGE"
+      },
+      {
+        "index": 55,
+        "original": "LIGHTING",
+        "reread": "LIGHTING PL"
+      },
+      {
+        "index": 68,
+        "original": "TYP",
+        "reread": "TYP."
+      },
+      {
+        "index": 76,
+        "original": "TYP",
+        "reread": "TYP."
+      },
+      {
+        "index": 86,
+        "original": "CORRIC",
+        "reread": "CORRIC"
+      },
+      {
+        "index": 91,
+        "original": "ROOM - 132",
+        "reread": "CLASSROOM - 132"
+      },
+      {
+        "index": 109,
+        "original": "TYP.",
+        "reread": "TYP."
+      }
+    ],
+    "BP-1 Kennedy Middle School Electrical Pages_page005": [
+      {
+        "index": 17,
+        "original": "STAGE",
+        "reread": "STAGE"
+      },
+      {
+        "index": 24,
+        "original": "OWNER",
+        "reread": "OWNER"
+      },
+      {
+        "index": 27,
+        "original": "MECHANICALE",
+        "reread": "MALNQINE MECHANICAL EL 180 HIGH OAK ROAD"
+      },
+      {
+        "index": 34,
+        "original": "LIGHTING",
+        "reread": "LIGHTING PL"
+      },
+      {
+        "index": 46,
+        "original": "TYP.",
+        "reread": "TYP."
+      },
+      {
+        "index": 68,
+        "original": "STIBULE",
+        "reread": "ESTIBULE"
+      },
+      {
+        "index": 109,
+        "original": "DRAGE",
+        "reread": "STORAGE"
+      }
+    ],
+    "BP-1 Kennedy Middle School Electrical Pages_page006": [
+      {
+        "index": 17,
+        "original": "ELEC",
+        "reread": "ELEC"
+      },
+      {
+        "index": 30,
+        "original": "GYM",
+        "reread": "GYM"
+      },
+      {
+        "index": 36,
+        "original": "OWNER",
+        "reread": "OWNER"
+      },
+      {
+        "index": 39,
+        "original": "ECH",
+        "reread": "MECH"
+      },
+      {
+        "index": 44,
+        "original": "MECHANICALE",
+        "reread": "MALNQINE MECHANICAL EL 180 HIGH OAK ROAD"
+      },
+      {
+        "index": 58,
+        "original": "LIGHTING",
+        "reread": "LIGHTING PL"
+      },
+      {
+        "index": 68,
+        "original": "TYP.",
+        "reread": "TYP."
+      },
+      {
+        "index": 72,
+        "original": "TYP.",
+        "reread": "3 TYP."
+      },
+      {
+        "index": 106,
+        "original": "COMPUTER LAB - 136",
+        "reread": "COMPUTER LAB - 136"
+      }
+    ],
+    "BP-1 Kennedy Middle School Electrical Pages_page007": [
+      {
+        "index": 27,
+        "original": "ELEC",
+        "reread": "ELEC"
+      },
+      {
+        "index": 44,
+        "original": "OWNER",
+        "reread": "OWNER"
+      },
+      {
+        "index": 45,
+        "original": "GYM",
+        "reread": "GYM"
+      },
+      {
+        "index": 50,
+        "original": "SPECIAL",
+        "reread": "SPECIAL EDUCATION -"
+      },
+      {
+        "index": 51,
+        "original": "EDUCATION",
+        "reread": "SPECIAL EDUCATION - 138"
+      },
+      {
+        "index": 54,
+        "original": "MECHANICALE",
+        "reread": "MALNQINE MECHANICAL EL 180 HIGH OAK ROAD"
+      },
+      {
+        "index": 67,
+        "original": "LIGHTING",
+        "reread": "LIGHTING PL"
+      },
+      {
+        "index": 71,
+        "original": "TYP.",
+        "reread": "TYP."
+      },
+      {
+        "index": 80,
+        "original": "ENS TOILET",
+        "reread": "MENS TOILET"
+      },
+      {
+        "index": 127,
+        "original": "OILET",
+        "reread": "IS TOILET"
+      }
+    ],
+    "BP-1 Lake Shore High School Electrical Pages_page000": [
+      {
+        "index": 21,
+        "original": "Description",
+        "reread": "Description"
+      },
+      {
+        "index": 27,
+        "original": "OWNER",
+        "reread": "OWNER"
+      },
+      {
+        "index": 35,
+        "original": "LIGHTING",
+        "reread": "MAIN LEVEL LIGHTING PL AREA A"
+      },
+      {
+        "index": 40,
+        "original": "MECHANICALE",
+        "reread": "MALENGINE MECHANICAL EL 180 HIGH OAK ROAD"
+      },
+      {
+        "index": 43,
+        "original": "TYP",
+        "reread": "TYP."
+      },
+      {
+        "index": 62,
+        "original": "CLASM138",
+        "reread": "CLAS M 138"
+      },
+      {
+        "index": 90,
+        "original": "TYP.",
+        "reread": "TYP."
+      },
+      {
+        "index": 102,
+        "original": "CLASOM 141",
+        "reread": "CLASSROOM 141"
+      },
+      {
+        "index": 125,
+        "original": "TYP.",
+        "reread": "TYP."
+      }
+    ],
+    "BP-1 Lake Shore High School Electrical Pages_page001": [
+      {
+        "index": 16,
+        "original": "OWNER",
+        "reread": "OWNER"
+      },
+      {
+        "index": 30,
+        "original": "MECHANICALE",
+        "reread": "MALNQINE MECHANICAL EL 180 HIGH OAK ROAD"
+      },
+      {
+        "index": 34,
+        "original": "TORAGE???",
+        "reread": "??STORAGE??"
+      },
+      {
+        "index": 38,
+        "original": "TYP.",
+        "reread": "TYP."
+      },
+      {
+        "index": 51,
+        "original": "LIGHTING",
+        "reread": "MAIN LEVEL LIGHTING PL AREA B"
+      },
+      {
+        "index": 53,
+        "original": "TYP.",
+        "reread": "TYP."
+      },
+      {
+        "index": 67,
+        "original": "LASSROOM125",
+        "reread": "CLASSROOM 125"
+      },
+      {
+        "index": 76,
+        "original": "CLASSROQM A118D",
+        "reread": "CLASSROOM A118D"
+      },
+      {
+        "index": 78,
+        "original": "ART CLASSROOM",
+        "reread": "ART CLASSROOM 117"
+      },
+      {
+        "index": 82,
+        "original": "ASSROOM122",
+        "reread": "CLASSROOM 122"
+      },
+      {
+        "index": 99,
+        "original": "???STORAGE???",
+        "reread": "???STORAGE???"
+      },
+      {
+        "index": 104,
+        "original": "REWORK",
+        "reread": "REWORK C INDICATED."
+      },
+      {
+        "index": 116,
+        "original": "ASSROOM 122",
+        "reread": "CLASSROOM 122"
+      },
+      {
+        "index": 152,
+        "original": "STrUDIO",
+        "reread": "STUDIO CLASSROOM"
+      },
+      {
+        "index": 155,
+        "original": "SrUDIOE",
+        "reread": "STUDIO CLASSROOM"
+      }
+    ],
+    "BP-1 Lake Shore High School Electrical Pages_page002": [
+      {
+        "index": 20,
+        "original": "OWNER",
+        "reread": "OWNER"
+      },
+      {
+        "index": 35,
+        "original": "MECHANICALE",
+        "reread": "MALENGINE MECHANICAL EL 180 HIGH OAK ROAD"
+      },
+      {
+        "index": 53,
+        "original": "CLASSR",
+        "reread": "CLASSROO"
+      },
+      {
+        "index": 57,
+        "original": "CLASSROO",
+        "reread": "SCIENCE CLASSROOM 407"
+      },
+      {
+        "index": 60,
+        "original": "TYP.",
+        "reread": "TYP."
+      },
+      {
+        "index": 71,
+        "original": "CLASSROO",
+        "reread": "SCIENCE CLASSROOM 120"
+      },
+      {
+        "index": 84,
+        "original": "PREP ROOM",
+        "reread": "PREP ROOM"
+      },
+      {
+        "index": 91,
+        "original": "TYP.",
+        "reread": "TYP."
+      },
+      {
+        "index": 118,
+        "original": "CLASSRQOM",
+        "reread": "SCIENCE CLASSROOM 130"
+      },
+      {
+        "index": 122,
+        "original": "CLASSROOI",
+        "reread": "SCIENCE CLASSROOM 129"
+      },
+      {
+        "index": 124,
+        "original": "CSROOM145",
+        "reread": "CLASSROOM 145"
+      },
+      {
+        "index": 125,
+        "original": "??? CLASSROOM ???",
+        "reread": "??? CLASSROOM ???"
+      }
+    ],
+    "BP-1 Lake Shore High School Electrical Pages_page003": [
+      {
+        "index": 17,
+        "original": "Room",
+        "reread": "Room"
+      },
+      {
+        "index": 40,
+        "original": "OWNER",
+        "reread": "OWNER"
+      },
+      {
+        "index": 44,
+        "original": "RIDOR",
+        "reread": "CORRIDOR"
+      },
+      {
+        "index": 57,
+        "original": "LIGHTING",
+        "reread": "MAIN LEVEL LIGHTING PL AREA D"
+      },
+      {
+        "index": 66,
+        "original": "MECHANICALE",
+        "reread": "MALENGINE MECHANICAL EL 180 HIGH OAK ROAD"
+      },
+      {
+        "index": 75,
+        "original": "TYP",
+        "reread": "TYP."
+      },
+      {
+        "index": 94,
+        "original": "TYP.",
+        "reread": "TYP."
+      },
+      {
+        "index": 97,
+        "original": "CLA",
+        "reread": "CLASS"
+      },
+      {
+        "index": 104,
+        "original": "CLA$SROOM",
+        "reread": "SCIENCE CLASSROOM 127"
+      },
+      {
+        "index": 112,
+        "original": "TYP.",
+        "reread": "TYP."
+      },
+      {
+        "index": 136,
+        "original": "AR'TCLASSROOM",
+        "reread": "ART CLASSROOM"
+      },
+      {
+        "index": 160,
+        "original": "CORRID(",
+        "reread": "CORRID("
+      },
+      {
+        "index": 161,
+        "original": "??? ELEC ???",
+        "reread": "??? ELEC ??"
+      }
+    ],
+    "BP-1 Lake Shore High School Electrical Pages_page004": [
+      {
+        "index": 59,
+        "original": "OWNER",
+        "reread": "OWNER"
+      },
+      {
+        "index": 83,
+        "original": "MECHANICALE",
+        "reread": "MALENGINE MECHANICAL EL 180 HIGH OAK ROAD"
+      },
+      {
+        "index": 90,
+        "original": "LIGHTING",
+        "reread": "MAIN LEVEL LIGHTING PL AREA E"
+      },
+      {
+        "index": 102,
+        "original": "SRO OFFICE",
+        "reread": "SRO OFFICE"
+      },
+      {
+        "index": 110,
+        "original": "TYP",
+        "reread": "TYP."
+      },
+      {
+        "index": 128,
+        "original": "TYP",
+        "reread": "TYP."
+      },
+      {
+        "index": 177,
+        "original": "ROOM",
+        "reread": "CLASSROOM"
+      }
+    ],
+    "BP-1 Lake Shore High School Electrical Pages_page005": [
+      {
+        "index": 9,
+        "original": "JAN",
+        "reread": "JAN"
+      },
+      {
+        "index": 21,
+        "original": "OWNER",
+        "reread": "OWNER"
+      },
+      {
+        "index": 32,
+        "original": "MECHANICALE",
+        "reread": "MALENGINE MECHANICAL EL 180 HIGH OAK ROAD"
+      },
+      {
+        "index": 36,
+        "original": "A/V ROOM",
+        "reread": "A/V ROOM"
+      },
+      {
+        "index": 64,
+        "original": "TYP",
+        "reread": "TYP."
+      },
+      {
+        "index": 93,
+        "original": "CLASSM105",
+        "reread": "CLASSROOM 105"
+      }
+    ],
+    "BP-1 Lake Shore High School Electrical Pages_page006": [
+      {
+        "index": 23,
+        "original": "OWNER",
+        "reread": "OWNER"
+      },
+      {
+        "index": 33,
+        "original": "MECHANICALE",
+        "reread": "MALENGINE MECHANICAL EL 180 HIGH OAK ROAD"
+      },
+      {
+        "index": 46,
+        "original": "TYP.",
+        "reread": "TYP."
+      },
+      {
+        "index": 66,
+        "original": "TYP",
+        "reread": "TYP."
+      },
+      {
+        "index": 94,
+        "original": "LASSROOM217",
+        "reread": "CLASSROOM 217"
+      },
+      {
+        "index": 113,
+        "original": "CLASSROOO13",
+        "reread": "CLASSROOM 13"
+      },
+      {
+        "index": 114,
+        "original": "ASSRO3",
+        "reread": "CLASSROOM 13"
+      }
+    ],
+    "BP-1 Lake Shore High School Electrical Pages_page007": [
+      {
+        "index": 13,
+        "original": "Room",
+        "reread": "Room"
+      },
+      {
+        "index": 16,
+        "original": "OWNER",
+        "reread": "OWNER"
+      },
+      {
+        "index": 27,
+        "original": "LIGHTING",
+        "reread": "SECOND LEVEL LIGHTING PLAN AREA C"
+      },
+      {
+        "index": 41,
+        "original": "MECHANICALE",
+        "reread": "MALENGINE MECHANICAL EL 180 HIGH OAK ROAD"
+      },
+      {
+        "index": 43,
+        "original": "SSROOM204",
+        "reread": "CLASSROOM 204"
+      },
+      {
+        "index": 52,
+        "original": "SSROOM206",
+        "reread": "CLASSROOM 206"
+      },
+      {
+        "index": 53,
+        "original": "CLASS",
+        "reread": "CLASS"
+      },
+      {
+        "index": 65,
+        "original": "CLASS203",
+        "reread": "CLASS M 203"
+      },
+      {
+        "index": 79,
+        "original": "TYP.",
+        "reread": "TYP."
+      },
+      {
+        "index": 94,
+        "original": "TYP.",
+        "reread": "TYP."
+      },
+      {
+        "index": 98,
+        "original": "SSROOM 202",
+        "reread": "CLASSROOM 202"
+      },
+      {
+        "index": 123,
+        "original": "CLASSROOR5",
+        "reread": "CLASSROOM 5"
+      }
+    ],
+    "BP-1 Masonic Heights Elementary - AVI-ON LAYOUT FLAT_page000": [
+      {
+        "index": 26,
+        "original": "Description",
+        "reread": "AVI-SEN-DUCM-24"
+      },
+      {
+        "index": 44,
+        "original": "CLA",
+        "reread": "CLASSR"
+      },
+      {
+        "index": 73,
+        "original": "OWNER",
+        "reread": "OWNER"
+      },
+      {
+        "index": 105,
+        "original": "MNASIUM",
+        "reread": "GYMNASIUM"
+      },
+      {
+        "index": 106,
+        "original": "LOSET",
+        "reread": "CLOSET"
+      },
+      {
+        "index": 116,
+        "original": "TYP",
+        "reread": "TYP."
+      },
+      {
+        "index": 125,
+        "original": "CLA$SROOM1",
+        "reread": "CLASSROOM 1"
+      },
+      {
+        "index": 128,
+        "original": "FILE STORAGE",
+        "reread": "FILE STORAGE"
+      },
+      {
+        "index": 133,
+        "original": "SECTION-B",
+        "reread": "EXISTING MDP SECTION-B"
+      },
+      {
+        "index": 139,
+        "original": "FOR",
+        "reread": "BID"
+      },
+      {
+        "index": 142,
+        "original": "CLA$SROOM",
+        "reread": "CLASSROOM 1"
+      },
+      {
+        "index": 147,
+        "original": "TYP.",
+        "reread": "TYP."
+      },
+      {
+        "index": 150,
+        "original": "OILET",
+        "reread": "TOILET"
+      },
+      {
+        "index": 158,
+        "original": "ESTORAGE",
+        "reread": "FILE STORAGE"
+      },
+      {
+        "index": 163,
+        "original": "SECURE VESTIBULE",
+        "reread": "SECURE VESTIBULE"
+      },
+      {
+        "index": 231,
+        "original": "RRIDOF",
+        "reread": "CORRIDOR"
+      }
+    ],
+    "BP-1 Masonic Heights Elementary - AVI-ON LAYOUT FLAT_page001": [
+      {
+        "index": 22,
+        "original": "F TOILET",
+        "reread": "STAFF TOILET"
+      },
+      {
+        "index": 44,
+        "original": "OWNER",
+        "reread": "OWNER"
+      },
+      {
+        "index": 81,
+        "original": "TYP",
+        "reread": "TYP."
+      },
+      {
+        "index": 98,
+        "original": "FOR",
+        "reread": "BID"
+      },
+      {
+        "index": 141,
+        "original": "CLASSROON",
+        "reread": "CLASSROOM 4"
+      },
+      {
+        "index": 144,
+        "original": "CLASSROOM.4",
+        "reread": "CLASSROOM 4"
+      },
+      {
+        "index": 146,
+        "original": "OILET",
+        "reread": "TOILET"
+      },
+      {
+        "index": 155,
+        "original": "LASSROOM1",
+        "reread": "CLASSROOM 15"
+      }
+    ],
+    "BP-1 Masonic Heights Elementary - AVI-ON LAYOUT FLAT_page002": [
+      {
+        "index": 75,
+        "original": "OWNER",
+        "reread": "OWNER"
+      },
+      {
+        "index": 112,
+        "original": "CLOS",
+        "reread": "CLOSET"
+      },
+      {
+        "index": 124,
+        "original": "TYP.",
+        "reread": "TYP."
+      },
+      {
+        "index": 138,
+        "original": "CEOSET",
+        "reread": "C120B"
+      },
+      {
+        "index": 143,
+        "original": "FOR",
+        "reread": "BID"
+      },
+      {
+        "index": 151,
+        "original": "CLASSROO",
+        "reread": "CLASSROOM 17"
+      },
+      {
+        "index": 156,
+        "original": "LASSROOM",
+        "reread": "CLASSROOM 24"
+      },
+      {
+        "index": 163,
+        "original": "CLOSEF",
+        "reread": "CLOSET"
+      },
+      {
+        "index": 166,
+        "original": "TYP",
+        "reread": "3 TYP."
+      },
+      {
+        "index": 176,
+        "original": "TYP.",
+        "reread": "3 TYP."
+      },
+      {
+        "index": 179,
+        "original": "RCLOSET",
+        "reread": "JANITOR CLOSET"
+      },
+      {
+        "index": 202,
+        "original": "OILET",
+        "reread": "TOILET"
+      },
+      {
+        "index": 232,
+        "original": "COILET",
+        "reread": "TOILET"
+      },
+      {
+        "index": 243,
+        "original": "CLLSSET",
+        "reread": "CLOSET"
+      }
+    ],
+    "BP-1 Masonic Heights Elementary - AVI-ON LAYOUT FLAT_page003": [
+      {
+        "index": 45,
+        "original": "Lighting",
+        "reread": "Bluetooth\u00ae Lighting Controls"
+      },
+      {
+        "index": 52,
+        "original": "OWNER",
+        "reread": "OWNER"
+      },
+      {
+        "index": 88,
+        "original": "LASSROOM",
+        "reread": "CLASSROOM 5"
+      },
+      {
+        "index": 99,
+        "original": "FOR",
+        "reread": "BID"
+      },
+      {
+        "index": 108,
+        "original": "TYP.",
+        "reread": "TYP."
+      },
+      {
+        "index": 114,
+        "original": "LASSROOM6",
+        "reread": "CLASSROOM 6"
+      },
+      {
+        "index": 148,
+        "original": "CLASSRDOM 6A",
+        "reread": "CLASSROOM 6A"
+      },
+      {
+        "index": 150,
+        "original": "TOI",
+        "reread": "TOILET"
+      },
+      {
+        "index": 153,
+        "original": "TYP.",
+        "reread": "TYP."
+      },
+      {
+        "index": 157,
+        "original": "CLASSRPOM 6A",
+        "reread": "CLASSROOM 6A"
+      },
+      {
+        "index": 176,
+        "original": "LASSRDOM 6A",
+        "reread": "CLASSROOM 6A"
+      },
+      {
+        "index": 177,
+        "original": "ASSROOM",
+        "reread": "CLASSROOM 11"
+      },
+      {
+        "index": 186,
+        "original": "LASSBOOM1",
+        "reread": "CLASSROOM 10"
+      },
+      {
+        "index": 192,
+        "original": "CLASSROOMAQ",
+        "reread": "CLASSROOM 10"
+      },
+      {
+        "index": 194,
+        "original": "OILET",
+        "reread": "TOILET"
+      }
+    ],
+    "BP-1 Masonic Heights Elementary School Electrical Pages_page000": [
+      {
+        "index": 32,
+        "original": "Description",
+        "reread": "Description"
+      },
+      {
+        "index": 57,
+        "original": "OWNER",
+        "reread": "OWNER"
+      },
+      {
+        "index": 76,
+        "original": "FILE STORAGE",
+        "reread": "FILE STORAGE"
+      },
+      {
+        "index": 86,
+        "original": "LIGHTING",
+        "reread": "LIGHTING PL"
+      },
+      {
+        "index": 90,
+        "original": "MECHANICALE",
+        "reread": "MECHANICALEL"
+      },
+      {
+        "index": 112,
+        "original": "SECTION-B",
+        "reread": "MDP SECTION-B"
+      },
+      {
+        "index": 122,
+        "original": "TYP.",
+        "reread": "TYP."
+      },
+      {
+        "index": 123,
+        "original": "SECURE VESTIBULE",
+        "reread": "SECURE VESTIBULE"
+      },
+      {
+        "index": 128,
+        "original": "TYP.",
+        "reread": "TYP."
+      },
+      {
+        "index": 129,
+        "original": "ISTING",
+        "reread": "EXISTING MDP"
+      },
+      {
+        "index": 141,
+        "original": "CLA$SROOM1",
+        "reread": "CLASSROOM 1"
+      },
+      {
+        "index": 144,
+        "original": "SROOM1",
+        "reread": "CLASSROOM 1"
+      },
+      {
+        "index": 165,
+        "original": "SSROOM2",
+        "reread": "CLASSROOM 2"
+      }
+    ],
+    "BP-1 Masonic Heights Elementary School Electrical Pages_page001": [
+      {
+        "index": 34,
+        "original": "OWNER",
+        "reread": "OWNER"
+      },
+      {
+        "index": 66,
+        "original": "MECHANICALE",
+        "reread": "MALNQINE MECHANICAL EL 180 HIGH OAK ROAD"
+      },
+      {
+        "index": 69,
+        "original": "LIGHTING",
+        "reread": "LIGHTING PL"
+      },
+      {
+        "index": 71,
+        "original": "TYP.",
+        "reread": "TYP."
+      },
+      {
+        "index": 78,
+        "original": "TYP",
+        "reread": "TYP."
+      },
+      {
+        "index": 132,
+        "original": "CLASSROOM.4",
+        "reread": "CLASSROOM 4"
+      }
+    ],
+    "BP-1 Masonic Heights Elementary School Electrical Pages_page002": [
+      {
+        "index": 40,
+        "original": "ILET",
+        "reread": "TOILET"
+      },
+      {
+        "index": 67,
+        "original": "OWNER",
+        "reread": "OWNER"
+      },
+      {
+        "index": 95,
+        "original": "MECHANICALE",
+        "reread": "MALNQINE MECHANICAL EL 180 HIGH OAK ROAD"
+      },
+      {
+        "index": 99,
+        "original": "LIGHTING",
+        "reread": "LIGHTING PL"
+      },
+      {
+        "index": 101,
+        "original": "TYP.",
+        "reread": "TYP."
+      },
+      {
+        "index": 114,
+        "original": "TYP.",
+        "reread": "TYP."
+      },
+      {
+        "index": 120,
+        "original": "CEOSET",
+        "reread": "CLOSET"
+      },
+      {
+        "index": 133,
+        "original": "TYP",
+        "reread": "TYP."
+      },
+      {
+        "index": 139,
+        "original": "TYP.",
+        "reread": "TYP."
+      },
+      {
+        "index": 155,
+        "original": "JANITOI",
+        "reread": "JANITOR C"
+      },
+      {
+        "index": 183,
+        "original": "CORRIDOI",
+        "reread": "CORRIDOR"
+      }
+    ],
+    "BP-1 Masonic Heights Elementary School Electrical Pages_page003": [
+      {
+        "index": 38,
+        "original": "OWNER",
+        "reread": "OWNER"
+      },
+      {
+        "index": 57,
+        "original": "MECHANICALE",
+        "reread": "MALNQINE MECHANICAL EL 180 HIGH OAK ROAD"
+      },
+      {
+        "index": 59,
+        "original": "LIGHTING",
+        "reread": "LIGHTING PL"
+      },
+      {
+        "index": 77,
+        "original": "TYP.",
+        "reread": "TYP."
+      },
+      {
+        "index": 89,
+        "original": "CLASSRPOM 6A",
+        "reread": "CLASSROOM 6A"
+      },
+      {
+        "index": 132,
+        "original": "CLASSBOOM1Q",
+        "reread": "CLASSROOM 10"
+      }
+    ],
+    "BP-1 Violet Elementary School  - AVI-ON LAYOUT FLAT_page000": [
+      {
+        "index": 19,
+        "original": "Description",
+        "reread": "2401AC"
+      },
+      {
+        "index": 28,
+        "original": "LET",
+        "reread": "TOILET"
+      },
+      {
+        "index": 38,
+        "original": "AGE",
+        "reread": "STORAGE"
+      },
+      {
+        "index": 39,
+        "original": "ORAGE",
+        "reread": "STORAGE"
+      },
+      {
+        "index": 42,
+        "original": "ILET",
+        "reread": "TOILET"
+      },
+      {
+        "index": 47,
+        "original": "OWNER",
+        "reread": "OWNER"
+      },
+      {
+        "index": 55,
+        "original": "REWORK",
+        "reread": "REWORK CIRCUIT"
+      },
+      {
+        "index": 56,
+        "original": "AGE",
+        "reread": "STORAGE"
+      },
+      {
+        "index": 65,
+        "original": "RAGE",
+        "reread": "STORAGE"
+      },
+      {
+        "index": 69,
+        "original": "LIGHTING",
+        "reread": "LIGHTING CONTROL"
+      },
+      {
+        "index": 71,
+        "original": "RAGE",
+        "reread": "STORAGE"
+      },
+      {
+        "index": 88,
+        "original": "ALL",
+        "reread": "ALL LIGHT"
+      },
+      {
+        "index": 108,
+        "original": "FOR",
+        "reread": "BID"
+      },
+      {
+        "index": 130,
+        "original": "TYP.",
+        "reread": "3 TYP."
+      },
+      {
+        "index": 177,
+        "original": "TYP.",
+        "reread": "TYP."
+      },
+      {
+        "index": 185,
+        "original": "CLASSROON",
+        "reread": "CLASSROOM 1"
+      },
+      {
+        "index": 186,
+        "original": "ILET",
+        "reread": "TOILET"
+      }
+    ],
+    "BP-1 Violet Elementary School  - AVI-ON LAYOUT FLAT_page001": [
+      {
+        "index": 14,
+        "original": "TAFF TOILET",
+        "reread": "STAFF TOILET"
+      },
+      {
+        "index": 35,
+        "original": "NCIPAL",
+        "reread": "PRINCIPAL"
+      },
+      {
+        "index": 52,
+        "original": "OWNER",
+        "reread": "OWNER"
+      },
+      {
+        "index": 54,
+        "original": "TEACHERS",
+        "reread": "TEACHERS WORK ROOM C125"
+      },
+      {
+        "index": 56,
+        "original": "AFF TOILET",
+        "reread": "STAFF TOILET"
+      },
+      {
+        "index": 61,
+        "original": "REWORK",
+        "reread": "REWORK CIRCUIT"
+      },
+      {
+        "index": 65,
+        "original": "TEACHERS",
+        "reread": "TEACHERS LOUNGE C124"
+      },
+      {
+        "index": 77,
+        "original": "LIGHTING",
+        "reread": "LIGHTING CONTROL TYPE DEP IN SAME LOCATION"
+      },
+      {
+        "index": 99,
+        "original": "FOR",
+        "reread": "BID"
+      },
+      {
+        "index": 113,
+        "original": "ICIPAL",
+        "reread": "PRINCIPAL"
+      },
+      {
+        "index": 119,
+        "original": "TYP.",
+        "reread": "TYP."
+      },
+      {
+        "index": 120,
+        "original": "TYP.",
+        "reread": "TYP."
+      },
+      {
+        "index": 145,
+        "original": "CLASSRQOM14",
+        "reread": "CLASSROOM 14"
+      },
+      {
+        "index": 155,
+        "original": "CLASSRQOM 14",
+        "reread": "CLASSROOM 14"
+      },
+      {
+        "index": 167,
+        "original": "FOILET",
+        "reread": "TOILET"
+      }
+    ],
+    "BP-1 Violet Elementary School  - AVI-ON LAYOUT FLAT_page002": [
+      {
+        "index": 30,
+        "original": "STORA",
+        "reread": "STORA D12"
+      },
+      {
+        "index": 39,
+        "original": "OWNER",
+        "reread": "OWNER"
+      },
+      {
+        "index": 49,
+        "original": "REWORK",
+        "reread": "REWORK CIRCUIT"
+      },
+      {
+        "index": 62,
+        "original": "LIGHTING",
+        "reread": "LIGHTING CONTROL"
+      },
+      {
+        "index": 69,
+        "original": "CLASSRO",
+        "reread": "CLASSROOM 7"
+      },
+      {
+        "index": 76,
+        "original": "TYP.",
+        "reread": "1 TYP."
+      },
+      {
+        "index": 88,
+        "original": "FOR",
+        "reread": "BID"
+      },
+      {
+        "index": 92,
+        "original": "TYP.",
+        "reread": "3 TYP."
+      },
+      {
+        "index": 104,
+        "original": "VECHANICAL ROOM",
+        "reread": "MECHANICAL ROOM"
+      },
+      {
+        "index": 130,
+        "original": "CLASSROO",
+        "reread": "CLASSROOM 7"
+      },
+      {
+        "index": 147,
+        "original": "LASSROOM8",
+        "reread": "CLASSROOM 8"
+      },
+      {
+        "index": 151,
+        "original": "ALL",
+        "reread": "ALL LIGHT"
+      },
+      {
+        "index": 160,
+        "original": "QILET",
+        "reread": "TOILET"
+      }
+    ],
+    "BP-1 Violet Elementary School  - AVI-ON LAYOUT FLAT_page003": [
+      {
+        "index": 36,
+        "original": "OWNER",
+        "reread": "OWNER"
+      },
+      {
+        "index": 45,
+        "original": "REWORK",
+        "reread": "REWORK CIRCUIT"
+      },
+      {
+        "index": 55,
+        "original": "LIGHTING",
+        "reread": "LIGHTING CONTROL"
+      },
+      {
+        "index": 73,
+        "original": "LASSROOM",
+        "reread": "CLASSROOM 18"
+      },
+      {
+        "index": 80,
+        "original": "FOR",
+        "reread": "BID"
+      },
+      {
+        "index": 98,
+        "original": "TOILE",
+        "reread": "TOILET"
+      },
+      {
+        "index": 119,
+        "original": "CLASSROON",
+        "reread": "CLASSROOM 20"
+      },
+      {
+        "index": 126,
+        "original": "LASSROOM 23",
+        "reread": "CLASSROOM 23"
+      },
+      {
+        "index": 140,
+        "original": "LASSROON",
+        "reread": "CLASSROOM 17"
+      }
+    ],
+    "BP-1 Violet Elementary School Electrical Pages_page000": [
+      {
+        "index": 22,
+        "original": "Description",
+        "reread": "Description"
+      },
+      {
+        "index": 37,
+        "original": "OWNER",
+        "reread": "OWNER"
+      },
+      {
+        "index": 52,
+        "original": "CORRIDO",
+        "reread": "CORRIDOR"
+      },
+      {
+        "index": 53,
+        "original": "MECHANICALE",
+        "reread": "MALENGINE MECHANICAL EL 180 HIGH OAK ROAD"
+      },
+      {
+        "index": 66,
+        "original": "LIGHTING",
+        "reread": "LIGHTING PL"
+      },
+      {
+        "index": 88,
+        "original": "TYP.",
+        "reread": "3 TYP."
+      },
+      {
+        "index": 113,
+        "original": "STO",
+        "reread": "STORA"
+      },
+      {
+        "index": 131,
+        "original": "TOI",
+        "reread": "TOILET"
+      },
+      {
+        "index": 137,
+        "original": "CLASSROOM.1",
+        "reread": "CLASSROOM 1"
+      },
+      {
+        "index": 138,
+        "original": "TYP.",
+        "reread": "TYP."
+      }
+    ],
+    "BP-1 Violet Elementary School Electrical Pages_page001": [
+      {
+        "index": 36,
+        "original": "OWNER",
+        "reread": "OWNER"
+      },
+      {
+        "index": 43,
+        "original": "TEACHERS",
+        "reread": "TEACHERS LOUNGE"
+      },
+      {
+        "index": 47,
+        "original": "TEACHERS",
+        "reread": "TEACHERS WORK ROOM"
+      },
+      {
+        "index": 51,
+        "original": "MECHANICALE",
+        "reread": "MALENGINE MECHANICAL EL 180 HIGH OAK ROAD"
+      },
+      {
+        "index": 57,
+        "original": "LIGHTING",
+        "reread": "LIGHTING PL"
+      },
+      {
+        "index": 72,
+        "original": "PRI",
+        "reread": "PRINC"
+      },
+      {
+        "index": 74,
+        "original": "TYP",
+        "reread": "TYP."
+      },
+      {
+        "index": 84,
+        "original": "CLASSRQOM 14",
+        "reread": "CLASSROOM 14"
+      },
+      {
+        "index": 95,
+        "original": "TYP.",
+        "reread": "TYP."
+      }
+    ],
+    "BP-1 Violet Elementary School Electrical Pages_page002": [
+      {
+        "index": 15,
+        "original": "STORA",
+        "reread": "STORA"
+      },
+      {
+        "index": 23,
+        "original": "OWNER",
+        "reread": "OWNER"
+      },
+      {
+        "index": 38,
+        "original": "MECHANICALE",
+        "reread": "MALENGINE MECHANICAL EL 180 HIGH OAK ROAD"
+      },
+      {
+        "index": 48,
+        "original": "LIGHTING",
+        "reread": "LIGHTING PL"
+      },
+      {
+        "index": 55,
+        "original": "TYP.",
+        "reread": "TYP."
+      },
+      {
+        "index": 63,
+        "original": "TYP.",
+        "reread": "TYP."
+      },
+      {
+        "index": 99,
+        "original": "CLASSROO",
+        "reread": "CLASSROOM 7"
+      }
+    ],
+    "BP-1 Violet Elementary School Electrical Pages_page003": [
+      {
+        "index": 33,
+        "original": "OWNER",
+        "reread": "OWNER"
+      },
+      {
+        "index": 41,
+        "original": "MECHANICALE",
+        "reread": "MALENGINE MECHANICAL EL 180 HIGH OAK ROAD"
+      },
+      {
+        "index": 48,
+        "original": "LIGHTING",
+        "reread": "LIGHTING PL"
+      },
+      {
+        "index": 67,
+        "original": "TYP",
+        "reread": "TYP."
+      },
+      {
+        "index": 107,
+        "original": "TYP.",
+        "reread": "TYP."
+      }
+    ],
+    "Bradley Fair_Avi-on Submittal_page000": [
+      {
+        "index": 13,
+        "original": "YORK",
+        "reread": "man at the Beach,LLC"
+      },
+      {
+        "index": 18,
+        "original": "Description",
+        "reread": "Description"
+      },
+      {
+        "index": 20,
+        "original": "ORK",
+        "reread": "LONG BEACH"
+      },
+      {
+        "index": 38,
+        "original": "2402BAT-2",
+        "reread": "2402BAT-2"
+      },
+      {
+        "index": 45,
+        "original": "ROOM",
+        "reread": "FITNESS ROOM C-113"
+      },
+      {
+        "index": 49,
+        "original": "LOCK 118,",
+        "reread": "Engel Burman at the Beach,LLC"
+      },
+      {
+        "index": 80,
+        "original": "FITNESS",
+        "reread": "FITNESS ROOM"
+      },
+      {
+        "index": 85,
+        "original": "2402BAT",
+        "reread": "2402BAT"
+      },
+      {
+        "index": 106,
+        "original": "ECEPXON",
+        "reread": "RECEPTION"
+      },
+      {
+        "index": 222,
+        "original": "CART",
+        "reread": "CART STOP"
+      },
+      {
+        "index": 225,
+        "original": "PAC",
+        "reread": "E/CO-WC SPACE C-105"
+      },
+      {
+        "index": 252,
+        "original": "LOUNGE/CO",
+        "reread": "LOUNGE/CO-W SPACE"
+      },
+      {
+        "index": 280,
+        "original": "ESTIBL",
+        "reread": "VESTIBULE"
+      },
+      {
+        "index": 300,
+        "original": "WOMENC-",
+        "reread": "WOMEN'S ROOM"
+      },
+      {
+        "index": 311,
+        "original": "PEASING",
+        "reread": "LEASING OFFICE C-109"
+      },
+      {
+        "index": 344,
+        "original": "COR",
+        "reread": "MONITOR'S APC-73"
+      },
+      {
+        "index": 365,
+        "original": "ENTE",
+        "reread": "COMMAND CENTER"
+      },
+      {
+        "index": 373,
+        "original": "c-ae",
+        "reread": "LS APC-80"
+      }
+    ],
+    "Buffalo Run Neighborhood Avi-on Layout flattened_page000": [
+      {
+        "index": 5,
+        "original": "TYP",
+        "reread": "TYP"
+      },
+      {
+        "index": 7,
+        "original": "TYP",
+        "reread": "LT-03"
+      },
+      {
+        "index": 8,
+        "original": "TYP",
+        "reread": "LI-10"
+      },
+      {
+        "index": 11,
+        "original": "Description",
+        "reread": "Description"
+      },
+      {
+        "index": 12,
+        "original": "TYP",
+        "reread": "LT-10"
+      },
+      {
+        "index": 14,
+        "original": "TYP",
+        "reread": "L1-02"
+      },
+      {
+        "index": 15,
+        "original": "TYP",
+        "reread": "LT-10"
+      },
+      {
+        "index": 19,
+        "original": "TYP",
+        "reread": "LT-02"
+      },
+      {
+        "index": 21,
+        "original": "contractor.",
+        "reread": "3. 24V sensor contractor."
+      },
+      {
+        "index": 22,
+        "original": "TYP",
+        "reread": "LI-10"
+      },
+      {
+        "index": 23,
+        "original": "LIGHTING",
+        "reread": "LIGHTING - OVERRIDE SW"
+      },
+      {
+        "index": 24,
+        "original": "age",
+        "reread": "gnage"
+      },
+      {
+        "index": 26,
+        "original": "TYP",
+        "reread": "TYP"
+      },
+      {
+        "index": 27,
+        "original": "TYP",
+        "reread": "TYP"
+      },
+      {
+        "index": 31,
+        "original": "TYP",
+        "reread": "LI-03"
+      },
+      {
+        "index": 32,
+        "original": "TYP",
+        "reread": "TYP"
+      },
+      {
+        "index": 33,
+        "original": "TYP",
+        "reread": "TYP"
+      },
+      {
+        "index": 34,
+        "original": "TYP",
+        "reread": "TYP"
+      },
+      {
+        "index": 35,
+        "original": "TYP",
+        "reread": "TYP"
+      },
+      {
+        "index": 36,
+        "original": "FESS",
+        "reread": "No. 001 PROFESSIONAL LICENSE"
+      },
+      {
+        "index": 38,
+        "original": "TYP",
+        "reread": "LT-02"
+      },
+      {
+        "index": 41,
+        "original": "TYP",
+        "reread": "LT-02"
+      },
+      {
+        "index": 45,
+        "original": "2402BAT-2",
+        "reread": "2402BAT-2"
+      },
+      {
+        "index": 55,
+        "original": "uantity",
+        "reread": "Quantity"
+      },
+      {
+        "index": 62,
+        "original": "2402BAT-3",
+        "reread": "2402BAT-3"
+      },
+      {
+        "index": 131,
+        "original": "TYP",
+        "reread": "LT-01"
+      },
+      {
+        "index": 147,
+        "original": "TYP",
+        "reread": "LT-09 TYP"
+      },
+      {
+        "index": 198,
+        "original": "TYPC3-6",
+        "reread": "TYP C3-6"
+      },
+      {
+        "index": 288,
+        "original": "nen",
+        "reread": "tchen"
+      }
+    ],
+    "Buffalo Run Neighborhood Avi-on Layout_page000": [
+      {
+        "index": 5,
+        "original": "TYP",
+        "reread": "TYP"
+      },
+      {
+        "index": 7,
+        "original": "TYP",
+        "reread": "LT-03"
+      },
+      {
+        "index": 8,
+        "original": "TYP",
+        "reread": "LI-10"
+      },
+      {
+        "index": 11,
+        "original": "Description",
+        "reread": "Description"
+      },
+      {
+        "index": 12,
+        "original": "TYP",
+        "reread": "LT-10"
+      },
+      {
+        "index": 14,
+        "original": "TYP",
+        "reread": "L1-02"
+      },
+      {
+        "index": 15,
+        "original": "TYP",
+        "reread": "LT-10"
+      },
+      {
+        "index": 18,
+        "original": "contractor.",
+        "reread": "3. 24V sensor contractor."
+      },
+      {
+        "index": 20,
+        "original": "TYP",
+        "reread": "LT-02"
+      },
+      {
+        "index": 23,
+        "original": "TYP",
+        "reread": "LI-10"
+      },
+      {
+        "index": 24,
+        "original": "LIGHTING",
+        "reread": "LIGHTING - OVERRIDE SW"
+      },
+      {
+        "index": 25,
+        "original": "age",
+        "reread": "gnage"
+      },
+      {
+        "index": 28,
+        "original": "TYP",
+        "reread": "TYP"
+      },
+      {
+        "index": 29,
+        "original": "TYP",
+        "reread": "TYP"
+      },
+      {
+        "index": 31,
+        "original": "TYP",
+        "reread": "LI-03"
+      },
+      {
+        "index": 32,
+        "original": "TYP",
+        "reread": "TYP"
+      },
+      {
+        "index": 33,
+        "original": "TYP",
+        "reread": "TYP"
+      },
+      {
+        "index": 34,
+        "original": "TYP",
+        "reread": "TYP"
+      },
+      {
+        "index": 35,
+        "original": "TYP",
+        "reread": "TYP"
+      },
+      {
+        "index": 36,
+        "original": "FESS",
+        "reread": "No. 001 PROFESSIONAL LICENSE"
+      },
+      {
+        "index": 38,
+        "original": "TYP",
+        "reread": "LT-02"
+      },
+      {
+        "index": 41,
+        "original": "TYP",
+        "reread": "LT-02"
+      },
+      {
+        "index": 46,
+        "original": "2402BAT-2",
+        "reread": "2402BAT-2"
+      },
+      {
+        "index": 55,
+        "original": "uantity",
+        "reread": "Quantity"
+      },
+      {
+        "index": 62,
+        "original": "2402BAT-3",
+        "reread": "2402BAT-3"
+      },
+      {
+        "index": 137,
+        "original": "TYP",
+        "reread": "LT-01"
+      },
+      {
+        "index": 145,
+        "original": "TYP",
+        "reread": "LT-09 TYP"
+      },
+      {
+        "index": 198,
+        "original": "TYPC3-6",
+        "reread": "TYP C3-6"
+      },
+      {
+        "index": 289,
+        "original": "nen",
+        "reread": "tchen"
+      }
+    ],
+    "Building A-B_page000": [
+      {
+        "index": 5,
+        "original": "POWER",
+        "reread": "POLY-VINYL-CHL"
+      },
+      {
+        "index": 8,
+        "original": "COPPER",
+        "reread": "COORDINATE"
+      },
+      {
+        "index": 12,
+        "original": "ELEVATION",
+        "reread": "ELECTROSTATIC DISCHARGE"
+      },
+      {
+        "index": 20,
+        "original": "ERVICE",
+        "reread": "PRIMARY SERVICE"
+      },
+      {
+        "index": 23,
+        "original": "TECTION",
+        "reread": "CIRCUIT INTERRUPTER"
+      },
+      {
+        "index": 35,
+        "original": "ENT",
+        "reread": "ENT"
+      },
+      {
+        "index": 38,
+        "original": "CAT",
+        "reread": "CAT"
+      },
+      {
+        "index": 43,
+        "original": "Telecomm",
+        "reread": "Telecommunications"
+      },
+      {
+        "index": 46,
+        "original": "IRES: 12/31/2",
+        "reread": "EXPIRES: 12/31/22"
+      },
+      {
+        "index": 52,
+        "original": "POWER",
+        "reread": "SURFACE OR POWER"
+      },
+      {
+        "index": 76,
+        "original": "ON CENTER",
+        "reread": "NOT IN CONTRACT"
+      },
+      {
+        "index": 111,
+        "original": "INTERFACE",
+        "reread": "INTERFACE ENGINEERING"
+      },
+      {
+        "index": 140,
+        "original": "EACH",
+        "reread": "EACH"
+      },
+      {
+        "index": 232,
+        "original": "DIA",
+        "reread": "DTL DIA DIM DN"
+      },
+      {
+        "index": 244,
+        "original": "STD",
+        "reread": "STP"
+      },
+      {
+        "index": 268,
+        "original": "ORAWING",
+        "reread": "DN"
+      },
+      {
+        "index": 274,
+        "original": "TYP",
+        "reread": "TvSs"
+      },
+      {
+        "index": 315,
+        "original": "TER",
+        "reread": "BATTERY PA"
+      },
+      {
+        "index": 357,
+        "original": "3/11/2022 11:14:45 AMI",
+        "reread": "3/11/2022 11:14:45 AM"
+      },
+      {
+        "index": 475,
+        "original": "QUANTIT",
+        "reread": "PANEL PHASE POLYVINYLCHLORIDE POWER QUANTITY RELOCATE REQUEST FOR INFORMATION REQUIRED RIGID METAL CONDUIT"
+      },
+      {
+        "index": 486,
+        "original": "Lighting",
+        "reread": "Lighting"
+      },
+      {
+        "index": 511,
+        "original": "ADVAUL",
+        "reread": "FORMER PADVAULT"
+      },
+      {
+        "index": 579,
+        "original": "L POWER",
+        "reread": "CRITICAL POWER"
+      },
+      {
+        "index": 581,
+        "original": "SERVICE",
+        "reread": "PRIMARY SERVICE"
+      },
+      {
+        "index": 596,
+        "original": "67.00DETAILS ELECTRICAL",
+        "reread": "E4.00 UNIT ELEC PLANS - BLDG A & B"
+      },
+      {
+        "index": 623,
+        "original": "E SERVICE",
+        "reread": "PRIMARY SERVICE"
+      },
+      {
+        "index": 712,
+        "original": "VER",
+        "reread": "POWER"
+      },
+      {
+        "index": 744,
+        "original": "HES3T",
+        "reread": "HEIGHT"
+      }
+    ],
+    "Building A-B_page001": [
+      {
+        "index": 2,
+        "original": "TYPE",
+        "reread": "TYPE A"
+      },
+      {
+        "index": 3,
+        "original": "RATING",
+        "reread": "ULIP RATING DAMP"
+      },
+      {
+        "index": 4,
+        "original": "THE",
+        "reread": "WITH THE ORE"
+      },
+      {
+        "index": 27,
+        "original": "LAUNDRY",
+        "reread": "LAUNDRY"
+      },
+      {
+        "index": 28,
+        "original": "CON",
+        "reread": "CONTROL"
+      },
+      {
+        "index": 50,
+        "original": "LIGHTING",
+        "reread": "LUMINAIRE AND LIGHTING SCHEDULES"
+      },
+      {
+        "index": 58,
+        "original": "INTERFACE",
+        "reread": "INTERFACE ENGINEERING"
+      },
+      {
+        "index": 89,
+        "original": "ALW,62 SERIES",
+        "reread": "12 WATTS AFK DAYG4 LED SERIES, LUMINA ALV.62 SERIES"
+      },
+      {
+        "index": 121,
+        "original": "AUT",
+        "reread": "AUTO DIM WHEN OC"
+      },
+      {
+        "index": 124,
+        "original": "3/11/2022 11:14:46 AMI",
+        "reread": "3/11/2022 11:14:46 AM"
+      },
+      {
+        "index": 152,
+        "original": "DIMMING",
+        "reread": "120 VOLT, TRIAC DIMMING"
+      },
+      {
+        "index": 188,
+        "original": "TOR",
+        "reread": "SCALE 0.5-INCH = 1-FOOT"
+      },
+      {
+        "index": 215,
+        "original": "SPEC SECTION 2627 26",
+        "reread": "3"
+      },
+      {
+        "index": 218,
+        "original": "SPEC SECTION 26 09 23",
+        "reread": "SPEC_SECTION_36.09.23"
+      },
+      {
+        "index": 236,
+        "original": "AUT",
+        "reread": "AUTO ON T"
+      },
+      {
+        "index": 242,
+        "original": "SPEC SECTION 26 27 26",
+        "reread": "PRODUCT BASIS OF DESIGN"
+      },
+      {
+        "index": 279,
+        "original": "STAIRWELLS, LOBBY",
+        "reread": "ASTRONOMY"
+      },
+      {
+        "index": 329,
+        "original": "AUT",
+        "reread": "AUTO ON/C"
+      },
+      {
+        "index": 360,
+        "original": "STAIRWELLS, O63",
+        "reread": "STAIRWELLS, LOBBY"
+      },
+      {
+        "index": 371,
+        "original": "RESIDINTIAL UNITS",
+        "reread": "EXTERNAL"
+      },
+      {
+        "index": 372,
+        "original": "SPEC SECTION 26 09 30",
+        "reread": "SPEC_SECTION_16.09.23"
+      },
+      {
+        "index": 451,
+        "original": "IMAI",
+        "reread": "MANUAL"
+      },
+      {
+        "index": 452,
+        "original": "SURE",
+        "reread": "SURFACE MOUNT CEILING TYPE"
+      }
+    ],
+    "Building A-B_page002": [],
+    "Building A-B_page003": [],
+    "Building A-B_page004": [
+      {
+        "index": 45,
+        "original": "ASSER",
+        "reread": "WASHER."
+      }
+    ],
+    "Building A-B_page005": [],
+    "Building A-B_page006": [
+      {
+        "index": 29,
+        "original": "ELECTRIC",
+        "reread": "A. ELECTRIC WATER H-"
+      },
+      {
+        "index": 64,
+        "original": "LINn1",
+        "reread": "LING UNIT"
+      }
+    ]
+  }
+}

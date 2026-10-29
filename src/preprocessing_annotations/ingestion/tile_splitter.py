@@ -16,9 +16,12 @@ Usage (from pipeline):
 """
 import logging
 from dataclasses import dataclass
-from typing import Any, Dict, List, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 from PIL import Image
+
+if TYPE_CHECKING:
+    from ..config.config import PipelineConfig
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +49,30 @@ class TileSplitter:
         self.cols = cols
         self.rows = rows
         self.overlap_pct = overlap_pct
+
+    @classmethod
+    def for_page(
+        cls, width: int, height: int, config: "PipelineConfig"
+    ) -> Optional["TileSplitter"]:
+        """The grid local-VLM room detection uses on a page of this size, or
+        None when the page goes to the VLM whole.
+
+        Single source for that geometry: an SFT example must show the model
+        the same view inference does, so the dataset exporter tiles with this
+        too rather than re-deriving the grid.
+
+        Adaptive grid: tile count derived from page size so each tile is about
+        tile_target_px, capped at tile_cols x tile_rows. Finer grid on dense
+        floors improves VLM room localization. tile_target_px=0 -> fixed grid.
+        """
+        if not config.use_tiling or max(width, height) <= config.tile_trigger_px:
+            return None
+        if config.tile_target_px > 0:
+            cols = max(2, min(config.tile_cols, round(width / config.tile_target_px)))
+            rows = max(2, min(config.tile_rows, round(height / config.tile_target_px)))
+        else:
+            cols, rows = config.tile_cols, config.tile_rows
+        return cls(cols=cols, rows=rows, overlap_pct=config.tile_overlap_pct)
 
     def split(self, image: Image.Image) -> List[Tuple[Image.Image, TileMeta]]:
         """Return (tile_img, TileMeta) list, left-to-right top-to-bottom."""

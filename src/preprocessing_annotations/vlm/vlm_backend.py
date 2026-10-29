@@ -1124,14 +1124,30 @@ class UnslothQwenBackend(VLMBackend):
                 load_in_4bit=True,  # Use pre-quantized 4-bit model
                 use_gradient_checkpointing="unsloth",  # Memory optimization
             )
-            
+
+            # A5: a LoRA adapter from scripts/train_qwen3vl_unsloth.py, so a
+            # fine-tune can be scored by the same harness that scores the base
+            # model (eval/room_gt_eval.py over a pipeline run). Default None
+            # keeps the base model and every run before this unchanged.
+            # Loaded before for_inference so the merged graph is the one
+            # optimized. A missing or incompatible adapter raises rather than
+            # falling back: a run that silently scored the base model while
+            # reporting an adapter would be worse than no run at all.
+            adapter_path = self.config.unsloth_adapter_path
+            if adapter_path is not None:
+                adapter_path = Path(adapter_path)
+                if not adapter_path.exists():
+                    raise FileNotFoundError(f"adapter not found: {adapter_path}")
+                logger.info(f"Loading LoRA adapter: {adapter_path}")
+                self.model.load_adapter(str(adapter_path))
+
             # Enable inference mode optimization
             FastVisionModel.for_inference(self.model)
-            
+
             self.initialized = True
             logger.info(
                 f"Unsloth Qwen backend initialized: model={model_key}, "
-                f"device={self.device}"
+                f"adapter={adapter_path}, device={self.device}"
             )
         
         except ImportError as e:
@@ -1353,8 +1369,11 @@ class UnslothQwenBackend(VLMBackend):
          Args:
              img_width: Actual image width in pixels (after any resizing).
              img_height: Actual image height in pixels (after any resizing).
+
+         Which prompt is VLMConfig.unsloth_room_prompt: an adapter has to be
+         asked the way it was trained (prompt_templates.ROOM_PROMPT_BUILDERS).
          """
-         return prompt_templates.build_room_prompt_unsloth(
+         return prompt_templates.room_prompt_builder(self.config.unsloth_room_prompt)(
              img_width, img_height, self.config.max_rooms
          )
 
@@ -1686,6 +1705,90 @@ class UnslothQwenBackend(VLMBackend):
         doors = self._run_door_inference(resized)
         _rescale_bbox_objects(doors, _NO_RESCALE / scale)
         return doors
+
+    def classify_page_type(self, image_path: Union[str, Path]) -> Dict[str, Any]:
+        """AV-6: single-shot page-type triage (floor_plan /
+        non_architectural_document / other) -- see
+        prompt_templates.build_page_type_prompt_unsloth's module
+        comment for the gap this addresses.
+
+        Advisory only: the caller persists this as an observable field;
+        it must never be used to drop or accept a room on its own (no
+        such caller exists in this codebase). Runs on an already-loaded
+        model (initialize() is idempotent, same as every other detect_*
+        method) -- intended to be called from inside the same per-image
+        pass as detect_rooms, while the VLM is already resident, not as
+        a separate model-load cycle.
+
+        Returns {"page_type": ..., "rationale": ...} always -- falls
+        back to {"page_type": "other", ...} on any failure (image
+        unreadable, generation error, unparseable/unrecognized
+        response) rather than raising, matching this class's other
+        detect_* methods' empty-list-on-failure convention.
+        """
+        image = self._open_image_rgb(image_path)
+        if image is None:
+            return {"page_type": "other", "rationale": "could not open image"}
+        resized, _ = self._resize_for_detection(image)
+        prompt = prompt_templates.build_page_type_prompt_unsloth()
+        try:
+            text = self._generate_for_image(
+                resized, prompt, self.config.page_type_max_new_tokens
+            )
+        except Exception as e:
+            logger.warning(f"classify_page_type: generation failed: {e}")
+            return {"page_type": "other", "rationale": f"generation failed: {e}"}
+        return self._parse_page_type_response(text)
+
+    @staticmethod
+    def _parse_page_type_response(response_text: str) -> Dict[str, Any]:
+        """Parse classify_page_type's JSON response. Falls back to
+        {"page_type": "other", ...} on any parse failure or an
+        unrecognized page_type value -- never raises, never returns a
+        page_type outside prompt_templates.PAGE_TYPE_CATEGORIES."""
+        import re
+
+        match = re.search(r"\{.*\}", response_text, re.DOTALL)
+        if not match:
+            return {"page_type": "other", "rationale": "unparseable response"}
+        try:
+            data = json.loads(match.group(0))
+        except (json.JSONDecodeError, TypeError):
+            return {"page_type": "other", "rationale": "invalid JSON"}
+        page_type = data.get("page_type")
+        if page_type not in prompt_templates.PAGE_TYPE_CATEGORIES:
+            return {
+                "page_type": "other",
+                "rationale": f"unrecognized page_type: {page_type!r}",
+            }
+        return {"page_type": page_type, "rationale": str(data.get("rationale", ""))}
+
+    def read_crop_text(self, image: Any) -> str:
+        """Transcribe the text label at the centre of an RGB crop.
+
+        Used by ingestion/crop_reread.py for a second look at an OCR text
+        fragment. Returns "" on any failure (generation error, no
+        legible text, unparseable response) rather than raising, matching
+        this class's other detect_* methods."""
+        self.initialize()
+        prompt = prompt_templates.build_crop_text_prompt_unsloth()
+        try:
+            text = self._generate_for_image(
+                image, prompt, self.config.crop_text_max_new_tokens
+            )
+        except Exception as e:
+            logger.warning(f"read_crop_text: generation failed: {e}")
+            return ""
+        return self._parse_crop_text_response(text)
+
+    @staticmethod
+    def _parse_crop_text_response(response_text: str) -> str:
+        """First string of the response's JSON array, stripped; "" when
+        the array is missing, empty or does not start with a string."""
+        parsed = _extract_json_array(response_text)
+        if not parsed or not isinstance(parsed[0], str):
+            return ""
+        return parsed[0].strip()
 
     def _open_image_rgb(self, image_path: Union[str, Path]) -> Optional[Any]:
         """Initialize the model and open the image as RGB; None on failure."""

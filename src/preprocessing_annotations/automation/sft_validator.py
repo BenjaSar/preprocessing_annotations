@@ -6,11 +6,15 @@ Filters non-spatial text, validates taxonomy, enforces confidence thresholds.
 """
 
 import re
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Tuple, Optional
 from PIL import Image
 import io
 import logging
+import math
+
+from .duplicate_boxes import split_redundant_room_extents
 
 import cv2
 import numpy as np
@@ -20,19 +24,23 @@ logger = logging.getLogger(__name__)
 try:
     from .taxonomy import (
         MANDATORY_CLASSES, VALID_TYPES, normalize_to_mandatory,
-        get_extended_type, strip_window_suffix,
+        get_extended_type, strip_window_suffix, resolve_exact_short_variant,
     )
     from .abbreviations import ABBREVIATION_MAP as _ABBREVIATION_MAP
+    from .abbreviations import expand_abbreviation as _expand_abbreviation_shared
+    from .annotation_schema import box_convention_of
     from ..detection.window_evidence import is_window_shaped
-    from ..config import WindowEvidenceConfig
+    from ..config import WindowEvidenceConfig, RoomFilterConfig
 except ImportError:
     from taxonomy import (
         MANDATORY_CLASSES, VALID_TYPES, normalize_to_mandatory,
-        get_extended_type, strip_window_suffix,
+        get_extended_type, strip_window_suffix, resolve_exact_short_variant,
     )
     from abbreviations import ABBREVIATION_MAP as _ABBREVIATION_MAP
+    from abbreviations import expand_abbreviation as _expand_abbreviation_shared
+    from annotation_schema import box_convention_of
     from detection.window_evidence import is_window_shaped
-    from config import WindowEvidenceConfig
+    from config import WindowEvidenceConfig, RoomFilterConfig
 
 
 class ImageResizer:
@@ -300,6 +308,91 @@ class SemanticRoomValidator:
         "SOCIAL SERVICE", "SOCIAL SERVICES",  # → MULTIPURPOSE ROOM
         "RECREATION",                          # → MULTIPURPOSE ROOM
         "PLAY ROOM",                           # "CHILDREN'S PLAY ROOM" → MULTIPURPOSE ROOM
+        # R3 (2026-09-14): bare "STAIR" / "STAIR #N" reached this gate and was
+        # filtered even though taxonomy.py's STAIRWELL synonym list already
+        # includes "STAIR" (line ~169) — this stage was simply missing the
+        # word the pipeline's own downstream normalizer already recognizes.
+        # Verified on 4 real-gap pages (220301_Elect_plans_05 pages 3/5/6/7):
+        # "STAIR #3", "STAIR #1", bare "STAIR" — all real stairwell labels.
+        "STAIR",                               # → STAIRWELL
+        # R3 continued (2026-09-14): short abbreviations on the same
+        # 220301_Elect_plans_05 sheet set, each paired with a taxonomy.py
+        # variant-list addition (see that file) so they resolve to the
+        # correct type, not just pass this gate. Corpus-scanned for false
+        # positives first: REST/ELEV/UTIL hits are ~all on this one document
+        # family, each followed by a room number or "#N" (ELEV #1, UTIL 301,
+        # REST 4-2) — real MEP-labeled rooms, not stray abbreviation noise.
+        "REST",         # "REST 4-2" → RESTROOM
+        "ELEV",         # "ELEV #1" → CORRIDOR (elevator shaft, per existing convention)
+        "UTIL",         # "UTIL 301" → RESIDENTIAL UNIT (per existing UTILITY→laundry mapping)
+        # Track 2 pilot (2026-09-15): first cannabis-cultivation-facility
+        # drawings seen in this corpus ("Crooked Creek Bloom/Veg Room" PDFs).
+        # "BLOOM ROOM"/"VEG ROOM" are standard grow-facility room types
+        # (flowering room / vegetative room), same shape as any other
+        # too-generic-alone compound (cf. "PLAY ROOM"). "BLOOM RM" is the
+        # abbreviated form seen on the same page -- _expand_abbreviation only
+        # expands from the START of a string, so "BLOOM RM 1" never reaches
+        # "BLOOM ROOM" and needs its own entry.
+        "BLOOM ROOM", "BLOOM RM",   # → OTHER (grow-facility flowering room)
+        "VEG ROOM",                 # → OTHER (grow-facility vegetative room)
+        # R3 side-finding, resolved (2026-09-14): "R.R." abbreviation for
+        # restroom ("Men's R.R.", "224 R.R.", "STAFF RR", "RR 204") was
+        # falling through taxonomy's least-intrusive default to STORAGE ROOM
+        # (or, for the bare-"RR" forms below, failing this gate outright).
+        # Corpus-scanned exhaustively (every "R.R"/"RR" occurrence in all 141
+        # pages, not just the drop population): 42 hits, 100% restroom
+        # context (gendered/staff/patient/unisex/room-number/vestibule
+        # prefix) — zero railroad/rural-route/address ambiguity anywhere in
+        # this corpus. Dotted "R.R." handled by a VALID_ROOM_REGEXES entry
+        # below (bare "RR" as a keyword hits a word-boundary regex dead end
+        # on trailing punctuation — verified before shipping, not assumed).
+        "RR",           # "MEN RR" / "STAFF RR" / "RR 204" → RESTROOM
+        # Second-gate sync (2026-09-17): this keyword set gates BOTH OCR- and
+        # VLM-sourced room candidates (VLM proposes names directly, bypassing
+        # config.py's room_name_patterns entirely), so it's the more
+        # consequential of the two vocabulary gates. Confirmed via real pilot
+        # run (track2_pilot_output_v2): "CAR WASH"/"DETAIL AREA"/
+        # "TRASH ENCLOSURE" (VLM-sourced, E-10.0 REFLECTED CEILING PLANS - CAR
+        # WASH & DETAIL AREA) all reached this gate and were dropped, taking
+        # the whole page down to 0 rooms and misclassifying it
+        # sft_ready=false "non-floorplan page" even though it's a real
+        # floorplan. Same session's earlier config.py room_name_patterns
+        # additions (bank/dealership/clinic vocabulary — see
+        # showroom-triage-vocabulary-gap and Rally Palmhurst bank-vocabulary
+        # fixes) never synced here; CAFE/LAB/RESIDENTIAL happened to already
+        # be present, the rest below were not.
+        "SHOWROOM",
+        "ZOOM",
+        "CAR WASH",
+        "TRASH ENCLOSURE",
+        "DETAIL AREA",
+        "EQUIPMENT ROOM",   # bare "EQUIPMENT" stays banned via NON_ROOM_PATTERNS;
+                            # confirmed "EQUIPMENT ROOM" itself matches none of those
+        "TRIAGE",
+        "DRAW",
+        "NURSE STATION",
+        "EXAM RM",
+        "PROCEDURE",
+        "INTAKE",
+        "CASHIER",
+        "WORKROOM",         # bare "WORK" (line 287) doesn't cover this: \bWORK\b
+                            # needs a boundary after K, absent in "WORKROOM"
+        "TELLER LINE",
+        "MOTHER'S ROOM",
+        "NIGHT DROP/ITM",
+        # N3 (2026-10-10): GT-confirmed vocabulary gaps on the 48-page
+        # target-domain eval (room_gt_eval_sprint1_verify51.json).
+        # CAFETERIA is already in taxonomy.py's CAFETERIA class but the
+        # keyword gate pattern \bCAFE\b does NOT match CAFETERIA — verified
+        # via re.search(r"\bCAFE\b", "CAFETERIA") → no match. Add the
+        # full word so "CAFETERIA" passes this gate and reaches taxonomy.
+        "CAFETERIA",
+        # MEDIA CENTER: 8/10 candidates inside GT media_center polygons.
+        # Maps to CLASSROOM via taxonomy.py (added same session).
+        "MEDIA CENTER",
+        # MDF/IDF: 3/4 and 2/3 respectively inside GT polygons.
+        # Maps to ELECTRICAL ROOM via taxonomy.py (added same session).
+        "MDF", "IDF",
     }
 
     # Generalized label forms a fixed keyword cannot express because they carry
@@ -314,6 +407,34 @@ class SemanticRoomValidator:
     # "SEE ROOM 2 SCHEDULE" (verified).
     VALID_ROOM_REGEXES = (
         r"^ROOM\s*\d+$",
+        # R3 (2026-09-14): apartment unit-type-code + unit-number labels
+        # ("1.1R 229", "2.1R 227", "1.1 217", "2.1 214") — the box literally
+        # stacks a unit-type code over a unit number on the source drawing
+        # (verified visually, 220301_Elect_plans_05_page003, corridor of
+        # repeating residential units with bathroom fixtures). Corpus-scanned:
+        # all 72 matches confined to this one document's 5 pages, all paired
+        # with a plausible 2-4 digit room number; zero matches anywhere else
+        # in the 141-page corpus (structural grid-line callouts like "A-6"
+        # use a different letter-first format, don't collide).
+        r"^\d\.\d[A-Z]?\s*\d{2,4}$",
+        # R3 side-finding, resolved (2026-09-14): dotted "R.R." restroom
+        # abbreviation ("Men's R.R.", "224 R.R.", "NON-COMPLIANT R.R."). Not
+        # placed in VALID_ROOM_KEYWORDS: a trailing-punctuation token wrapped
+        # in \b...\b never matches (verified: \bR\.R\.\b fails on every real
+        # sample — both sides of the boundary after a trailing "." followed
+        # by whitespace/end-of-string are non-word, so no transition exists).
+        # Leading boundary only, deliberately not anchored full-string
+        # (prefix text varies: "224 ", "231 Staff Men ", "NON-COMPLIANT ") —
+        # corpus-scanned exhaustively (all 141 pages, every "R.R"/"RR"
+        # occurrence, not just the drop population): 42 hits, 100% restroom
+        # context, zero railroad/rural-route ambiguity.
+        r"\bR\.R\.?",
+        # Second-gate sync (2026-09-17), same reasoning as room_name_patterns'
+        # matching entries added earlier this session: real OCR produced more
+        # than one surface form for each, so a plain VALID_ROOM_KEYWORDS
+        # literal isn't enough.
+        r"\bCUSTOMER\s*R\.?\s*R\.?",   # "CUSTOMER R.R.", "CUSTOMER RR", OCR-merged "CUSTOMERRR"
+        r"\bMECH\s*/\s*ELEC\b",        # "MECH/ELEC", "MECH /ELEC"
     )
 
     # Class-level compiled word-boundary pattern built from VALID_ROOM_KEYWORDS.
@@ -335,7 +456,7 @@ class SemanticRoomValidator:
     # and TaxonomyNormalizer.  All three now import from abbreviations.py.
     ABBREVIATION_EXPANSIONS = _ABBREVIATION_MAP
 
-    def _expand_abbreviation(self, name: str) -> str:
+    def _expand_abbreviation(self, name: str, block_single_letter: bool = True) -> str:
         """
         Expand abbreviated room names to canonical forms.
 
@@ -343,31 +464,32 @@ class SemanticRoomValidator:
 
         Args:
             name: Room name (potentially abbreviated)
+            block_single_letter: E2 (2026-09-09). When True (default), a
+                single-letter abbreviation ("K", "P", "G" in
+                ABBREVIATION_MAP) is never expanded here. Measured on
+                corpus_batch2 (88 pages): every one of 30 bare "K" room
+                candidates was a false positive on visual inspection
+                (fixture-type tag on a wire, a structural grid-line label,
+                or a schedule-table column-header letter) -- zero were a
+                real kitchen. "K"'s expansion to "KITCHEN" is the only
+                reason a bare single letter passes the room-keyword gate at
+                all (a bare "A"/"B"/etc. matches nothing and is dropped
+                harmlessly elsewhere). Multi-character abbreviations (BR,
+                WC, 1BR, ...) are unaffected -- those were checked
+                individually against real crops and are unambiguous.
+                Set False only for a corpus confirmed to use bare
+                single-letter room labels (see plan/single-letter-label-gate-plan-2026-09-09.md).
 
         Returns:
             Expanded canonical room name, or original if not an abbreviation
+            (including a blocked single-letter abbreviation).
         """
-        name_upper = name.upper().strip()
-
-        # Check if entire name is a known abbreviation
-        if name_upper in self.ABBREVIATION_EXPANSIONS:
-            expanded = self.ABBREVIATION_EXPANSIONS[name_upper]
+        expanded = _expand_abbreviation_shared(name, block_single_letter=block_single_letter)
+        if expanded != name:
             logger.debug(f"Expanded abbreviation: '{name}' → '{expanded}'")
-            return expanded
+        return expanded
 
-        # Check if name contains an abbreviation pattern (e.g., "BR 1" → "BEDROOM 1")
-        for abbrev, expansion in self.ABBREVIATION_EXPANSIONS.items():
-            if name_upper.startswith(abbrev):
-                # Handle cases like "BR", "BR 1", "BR-1", "BR1", "BR 101"
-                suffix = name_upper[len(abbrev):].strip()
-                if not suffix or suffix[0] in [' ', '-', '1', '2', '3', '4', '5', '6', '7', '8', '9', '0']:
-                    result = f"{expansion} {suffix}".strip()
-                    logger.debug(f"Expanded: '{name}' → '{result}'")
-                    return result
-
-        return name
-
-    def filter_rooms(self, rooms: List[Dict]) -> List[Dict]:
+    def filter_rooms(self, rooms: List[Dict], block_single_letter_abbreviations: bool = True) -> List[Dict]:
         """
         Filter rooms, keeping only valid spatial annotations.
 
@@ -375,6 +497,8 @@ class SemanticRoomValidator:
 
         Args:
             rooms: List of room dictionaries with 'name'/'room_name' and 'bbox' keys
+            block_single_letter_abbreviations: E2 (2026-09-09). Passed through
+                to _expand_abbreviation -- see that method's docstring.
 
         Returns:
             Filtered list of valid rooms
@@ -427,7 +551,9 @@ class SemanticRoomValidator:
 
             # CRITICAL FIX: Expand abbreviations BEFORE keyword check
             # This ensures abbreviated room names (BR, LR, BA) are recognized
-            expanded_name = self._expand_abbreviation(name)
+            expanded_name = self._expand_abbreviation(
+                name, block_single_letter=block_single_letter_abbreviations
+            )
 
             # Keep ONLY if the name contains a valid room keyword.
             # ⚠️  REMOVED: "or confidence > 0.95" bypass.
@@ -492,32 +618,22 @@ class TaxonomyNormalizer:
     # and ResidentialAbbreviationRecovery.
     ABBREVIATION_EXPANSIONS = _ABBREVIATION_MAP
 
-    def _expand_abbreviation(self, name: str) -> str:
+    def _expand_abbreviation(self, name: str, block_single_letter: bool = True) -> str:
         """
         Expand abbreviated room names to canonical forms.
 
         Args:
             name: Room name (potentially abbreviated)
+            block_single_letter: E2 (2026-09-09) -- see SemanticRoomValidator's
+                sibling method for the full measured rationale. Default True.
 
         Returns:
             Expanded canonical room name, or original if not an abbreviation
+            (including a blocked single-letter abbreviation).
         """
-        name_upper = name.upper().strip()
+        return _expand_abbreviation_shared(name, block_single_letter=block_single_letter)
 
-        # Check if entire name is a known abbreviation
-        if name_upper in self.ABBREVIATION_EXPANSIONS:
-            return self.ABBREVIATION_EXPANSIONS[name_upper]
-
-        # Check if name contains an abbreviation pattern (e.g., "BR 1" → "BEDROOM 1")
-        for abbrev, expansion in self.ABBREVIATION_EXPANSIONS.items():
-            if name_upper.startswith(abbrev):
-                suffix = name_upper[len(abbrev):].strip()
-                if not suffix or suffix[0] in [' ', '-', '1', '2', '3', '4', '5', '6', '7', '8', '9', '0']:
-                    return f"{expansion} {suffix}".strip()
-
-        return name
-
-    def normalize(self, room_name: str) -> str:
+    def normalize(self, room_name: str, block_single_letter_abbreviations: bool = True) -> str:
         """
         Map extracted room name to mandatory SFT taxonomy type.
 
@@ -536,11 +652,24 @@ class TaxonomyNormalizer:
                 f"— verify it represents a single room (e.g., IT/STORAGE) and not two rooms"
             )
 
+        # Try the raw token against taxonomy.py's own exact short-code table
+        # FIRST, before abbreviation expansion. Some short codes (e.g. "DR")
+        # are deliberately placed under one mandatory class directly in
+        # taxonomy.py, but abbreviations.py expands them to a phrase that
+        # resolves under a DIFFERENT class ("DR" -> "DINING ROOM" -> RESTAURANT,
+        # vs. taxonomy.py's own "DR" -> RESIDENTIAL UNIT). Letting the raw
+        # exact match win here honors taxonomy.py's explicit placement.
+        exact = resolve_exact_short_variant(room_name)
+        if exact is not None:
+            return exact
+
         # _expand_abbreviation existed on this class but was never called here,
         # so a bare abbreviation (e.g. "CL") reached normalize_to_mandatory()
         # unexpanded, hit the short-token guard, and fell back to STORAGE ROOM
         # instead of resolving through its real expansion ("CLOSET").
-        return normalize_to_mandatory(self._expand_abbreviation(room_name))
+        return normalize_to_mandatory(
+            self._expand_abbreviation(room_name, block_single_letter=block_single_letter_abbreviations)
+        )
 
 
 def filter_by_confidence(rooms: List[Dict], min_confidence: float = 0.85,
@@ -763,7 +892,12 @@ def _resolve_bbox_overlaps(rooms: List[Dict]) -> List[Dict]:
     if not rooms:
         return rooms
 
-    circulation_types = {'hallway', 'corridor', 'lobby', 'elevator', 'stairwell', 'riser'}
+    # 'vestibule' listed since VESTIBULE became its own class (2026-10-13):
+    # these rooms were exempt here as LOBBY, and splitting the class must not
+    # silently expose them to overlap resolution. T-ASPECT's _CIRC already
+    # treats vestibule as circulation.
+    circulation_types = {'hallway', 'corridor', 'lobby', 'elevator', 'stairwell',
+                         'riser', 'vestibule'}
     processed = []
     skip_indices = set()
 
@@ -915,6 +1049,38 @@ def _dedup_nested_same_type(rooms: List[Dict], contain_frac: float = 0.7) -> Lis
 
 
 
+def _room_desc(room: Dict) -> Dict[str, Any]:
+    """Minimal per-room record stored in drop_detail."""
+    return {
+        "room_name": room.get("room_name") or room.get("name"),
+        "bbox": room.get("bbox"),
+        "source": room.get("source"),
+    }
+
+
+@dataclass
+class MergeResult:
+    """Merged rooms plus the candidates the merge discarded, keyed by reason."""
+
+    rooms: List[Dict]
+    discards: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
+
+    def record(self, reason: str, room: Dict) -> None:
+        self.discards.setdefault(reason, []).append(_room_desc(room))
+
+
+def _is_vlm_echo(ocr_room: Dict, vlm_rooms: List[Dict], tolerance_px: int) -> bool:
+    """True when an OCR candidate's box equals a VLM room's box within
+    tolerance. A text-OCR box cannot coincide with a VLM room extent, so such
+    a candidate is that VLM detection seen twice (its label may differ)."""
+    ocr_bbox = ocr_room.get("bbox", [])
+    return bool(ocr_bbox) and any(
+        len(vlm.get("bbox", [])) == len(ocr_bbox)
+        and all(abs(a - b) <= tolerance_px for a, b in zip(ocr_bbox, vlm["bbox"]))
+        for vlm in vlm_rooms
+    )
+
+
 def _same_label(ocr_name: str, vlm_name: str) -> bool:
     """True when both detectors produced the same room label.
 
@@ -971,7 +1137,18 @@ def _adopt_ocr_geometry(target: Dict, ocr_room: Dict, ocr_name: str,
         target.pop("segmentation", None)
 
 
-def _merge_vlm_and_ocr(vlm_rooms: List[Dict], ocr_rooms: List[Dict]) -> List[Dict]:
+def _center_distance(bbox1: List, bbox2: List) -> float:
+    """Distance between two xywh boxes' centres, or inf if either is unusable."""
+    if len(bbox1) < 4 or len(bbox2) < 4:
+        return float("inf")
+    x1, y1, w1, h1 = bbox1[:4]
+    x2, y2, w2, h2 = bbox2[:4]
+    return math.hypot((x1 + w1 / 2) - (x2 + w2 / 2), (y1 + h1 / 2) - (y2 + h2 / 2))
+
+
+def _merge_vlm_and_ocr(
+    vlm_rooms: List[Dict], ocr_rooms: List[Dict], proximity_px: int
+) -> MergeResult:
     """
     Merge VLM and OCR room detections, preferring compound names from OCR.
 
@@ -986,9 +1163,12 @@ def _merge_vlm_and_ocr(vlm_rooms: List[Dict], ocr_rooms: List[Dict]) -> List[Dic
         ocr_rooms: Rooms detected by OCR (may have compound names)
 
     Returns:
-        Merged list of unique rooms
+        MergeResult: merged unique rooms, plus candidates discarded by the
+        merge (OCR labels skipped as fragments; VLM boxes whose geometry was
+        replaced by an OCR box) so every merge loss is attributable.
     """
     merged = []
+    result = MergeResult(rooms=merged)
 
     # Add all VLM rooms first (they have spatial boundaries)
     for vlm_room in vlm_rooms:
@@ -997,18 +1177,38 @@ def _merge_vlm_and_ocr(vlm_rooms: List[Dict], ocr_rooms: List[Dict]) -> List[Dic
         merged.append(r)
         logger.debug(f"Added VLM room: {r.get('name', r.get('room_name', 'UNNAMED'))}")
 
+    # Only these first entries are VLM rooms. The loop below appends OCR rooms
+    # to `merged`, and matching against those too made this function collapse
+    # neighbouring OCR labels into each other -- it is a VLM<->OCR merge, and
+    # OCR-to-OCR duplicates are resolved later (_resolve_bbox_overlaps,
+    # _dedup_nested_same_type) with rules meant for that job.
+    #
+    # Measured on BP-1 Masonic Heights Electrical page002, a row of five
+    # 16px-tall labels 58px apart (CLOSET + 4x TOILET): with room-scale VLM
+    # boxes a big CLASSROOM box matches first and every label survives via
+    # FM-1, which hid this. With the SFT-tuned model's label-scale boxes no VLM
+    # box is proximal at all, the scan reached the already-appended TOILETs,
+    # and FM-2 merged pairs of them -- two real rooms lost. Both runs had
+    # byte-identical OCR candidates, so the loss was entirely this scan.
+    vlm_room_count = len(merged)
+
     # Process OCR rooms
     for ocr_room in ocr_rooms:
         ocr_name = ocr_room.get("name") or ocr_room.get("room_name", "")
         ocr_bbox = ocr_room.get("bbox", [])
 
-        # Check if this OCR room overlaps with any VLM room
+        # Check if this OCR room overlaps with any VLM room. Nearest proximal
+        # box, not the first in list order: with several proximal VLM boxes the
+        # list order is arbitrary, and the nearest one is the defensible match.
         matched_vlm = None
-        for i, vlm_room in enumerate(merged):
-            vlm_bbox = vlm_room.get("bbox", [])
-            if _bbox_distance(ocr_bbox, vlm_bbox):
-                matched_vlm = i
-                break
+        best_distance = None
+        for i in range(vlm_room_count):
+            vlm_bbox = merged[i].get("bbox", [])
+            if not _bbox_distance(ocr_bbox, vlm_bbox, threshold=proximity_px):
+                continue
+            distance = _center_distance(ocr_bbox, vlm_bbox)
+            if best_distance is None or distance < best_distance:
+                matched_vlm, best_distance = i, distance
 
         if matched_vlm is not None:
             # CRITICAL FIX #3: Preserve compound names from OCR
@@ -1035,6 +1235,7 @@ def _merge_vlm_and_ocr(vlm_rooms: List[Dict], ocr_rooms: List[Dict]) -> List[Dic
                 logger.debug(
                     f"Merged: VLM '{vlm_name}' + OCR '{ocr_name}' → using OCR (compound)"
                 )
+                result.record("merge_vlm_geometry_replaced", merged[matched_vlm])
                 _adopt_ocr_geometry(merged[matched_vlm], ocr_room, ocr_name, ocr_bbox)
             elif _same_label(ocr_name, vlm_name):
                 # FM-2: VLM and OCR independently produced the SAME label for the
@@ -1048,6 +1249,7 @@ def _merge_vlm_and_ocr(vlm_rooms: List[Dict], ocr_rooms: List[Dict]) -> List[Dic
                     f"FM-2: VLM '{vlm_name}' corroborated by identical OCR label "
                     f"→ vlm_ocr_merged"
                 )
+                result.record("merge_vlm_geometry_replaced", merged[matched_vlm])
                 _adopt_ocr_geometry(merged[matched_vlm], ocr_room, ocr_name, ocr_bbox)
             else:
                 # FM-1 (D-M2): a matched-but-not-compound OCR label was previously
@@ -1068,6 +1270,7 @@ def _merge_vlm_and_ocr(vlm_rooms: List[Dict], ocr_rooms: List[Dict]) -> List[Dic
                     r["source"] = "ocr_only"
                     merged.append(r)
                 else:
+                    result.record("merge_fragment_skip", ocr_room)
                     logger.debug(f"Merged: VLM '{vlm_name}' (OCR '{ocr_name}' skipped, fragment/empty)")
         else:
             # OCR room doesn't overlap with VLM → add as new room
@@ -1077,7 +1280,7 @@ def _merge_vlm_and_ocr(vlm_rooms: List[Dict], ocr_rooms: List[Dict]) -> List[Dic
             merged.append(r)
 
     logger.info(f"Merged {len(vlm_rooms)} VLM + {len(ocr_rooms)} OCR → {len(merged)} total")
-    return merged
+    return result
 
 
 # ── FIX-5: non-drawing-region drop (ink-fraction under box) ──────────────────
@@ -1094,17 +1297,8 @@ def _merge_vlm_and_ocr(vlm_rooms: List[Dict], ocr_rooms: List[Dict]) -> List[Dic
 # near-white paper (near-zero ink). Size-, source-, and grid-agnostic — measured
 # to separate the two defect classes where those weaker signals do not.
 #
-# Constants are data-derived, not chosen — measured over 473 boxes across 58
-# sheets against the 18-file visual ground truth:
-#   INK_BINARISE_MAX  grayscale value below which a pixel counts as ink. A fixed
-#     near-white cut. Per-page Otsu was tested and rejected: it collapses the
-#     wrong/right gap (on-drawing boxes fall to ~0 ink on some sheets).
-#   INK_MIN_FRAC  at that binarise level the wrong-box ink maxed at 0.077 and the
-#     right-box ink bottomed at 0.102; the cut sits in that empty gap.
-# Known residual (1 of 112): a margin giant overlapping an inset detail-plan
-# reaches 0.111 ink and survives — a false negative, not a false drop.
-INK_BINARISE_MAX = 200
-INK_MIN_FRAC = 0.09
+# The two thresholds (RoomFilterConfig.ink_binarise_max / min_ink_frac) and the
+# 18-file audit they were derived from are documented on that config.
 
 
 def _bbox_ink_fraction(gray: Image.Image, bbox: List, binarise_max: int) -> Optional[float]:
@@ -1286,6 +1480,8 @@ def prepare_sft_annotation(
     image_dir: Optional[Path] = None,
     use_window_elongation_filter: bool = False,
     exempt_sam_expanded_from_ink_filter: bool = False,
+    block_single_letter_abbreviations: bool = True,
+    room_filter: Optional["RoomFilterConfig"] = None,
 ) -> Dict:
     """
     Convert annotation to SFT-ready format.
@@ -1308,6 +1504,16 @@ def prepare_sft_annotation(
             with sam_expanded truthy -- measured to have no discriminative
             power for that population (see PipelineConfig's docstring for
             the numbers). Default False pending validation.
+        block_single_letter_abbreviations: E2 (2026-09-09). When True
+            (default), a single-letter abbreviation ("K" -> KITCHEN, "P" ->
+            PANTRY, "G" -> GARAGE in ABBREVIATION_MAP) is never expanded, so
+            it cannot pass the room-keyword gate. Measured on corpus_batch2:
+            30/30 bare "K" room candidates in 88 pages were false positives
+            on visual inspection (fixture-type tags, structural grid-line
+            labels, schedule-table column headers) -- zero were a real
+            kitchen. Set False only for a corpus confirmed to use bare
+            single-letter room labels genuinely (see
+            plan/single-letter-label-gate-plan-2026-09-09.md).
 
     CRITICAL FIXES:
     - Merges VLM-detected rooms with OCR-detected compound names
@@ -1325,32 +1531,75 @@ def prepare_sft_annotation(
     validator = SemanticRoomValidator()
     normalizer = TaxonomyNormalizer()
 
+    # N5a (2026-10-10): resolve tunable thresholds from config or defaults.
+    _rf = room_filter if room_filter is not None else RoomFilterConfig()
+
     # Per-step rejection counter — attached to annotation for run-level aggregation.
     drop_attribution: Dict[str, int] = {}
-    # Diagnostic-only, additive: per-room detail for the dominant drop reasons,
-    # so a run can be audited for false-negative risk (a real room dropped as
-    # noise) without needing to re-run with different thresholds first.
+    # N1 (2026-10-10): per-room detail for EVERY filter step, same minimal
+    # descriptor shape, so every loss is re-derivable from run artifacts
+    # (previously only vlm_uncorroborated and ocr_name_unresolved had detail).
     drop_detail: Dict[str, List[Dict[str, Any]]] = {}
 
     # CRITICAL FIX #2: Merge VLM and OCR results instead of OR logic
     vlm_rooms = annotation.get("rooms", [])
     ocr_rooms = annotation.get("ocr_rooms", [])
-    rooms = _merge_vlm_and_ocr(vlm_rooms, ocr_rooms)
+    if _rf.skip_vlm_echo_candidates:
+        echoes: List[Dict] = []
+        independent: List[Dict] = []
+        for ocr_room in ocr_rooms:
+            is_echo = _is_vlm_echo(ocr_room, vlm_rooms, _rf.vlm_echo_bbox_tolerance_px)
+            (echoes if is_echo else independent).append(ocr_room)
+        if echoes:
+            ocr_rooms = independent
+            drop_attribution["vlm_echo_skipped"] = len(echoes)
+            drop_detail["vlm_echo_skipped"] = [_room_desc(o) for o in echoes]
+    merge = _merge_vlm_and_ocr(vlm_rooms, ocr_rooms, _rf.merge_proximity_px)
+    rooms = merge.rooms
+    for reason, discarded in merge.discards.items():
+        drop_attribution[reason] = len(discarded)
+        drop_detail[reason] = discarded
 
-    # FIX-7: drop VLM detections with no OCR corroboration (source == vlm_only).
-    # By merge semantics a real *labeled* room's VLM box matches an OCR label and
-    # becomes vlm_ocr_merged; a surviving vlm_only box is a pure-visual detection
-    # no text confirms. Qwen3-VL visual grounding on CAD line-art is unreliable
-    # (verified: 11/11 vlm_only rooms >=1.67% area across 116 files were oversized
-    # /mislocated giants — logo/margin hallucinations and on-drawing swallowers;
-    # zero legit vlm_only found). Dropping them removes exactly that class; the
-    # VLM's real value (refining an OCR box → vlm_ocr_merged) is untouched.
+    # FIX-7: drop *large* VLM detections with no OCR corroboration (source ==
+    # vlm_only). By merge semantics a real *labeled* room's VLM box matches an
+    # OCR label and becomes vlm_ocr_merged; a surviving vlm_only box is a
+    # pure-visual detection no independent OCR pass confirms. Qwen3-VL visual
+    # grounding on CAD line-art is unreliable for large boxes specifically
+    # (verified: 11/11 vlm_only rooms >=1.67% area across 116 files were
+    # oversized/mislocated giants — logo/margin hallucinations and
+    # on-drawing swallowers; zero legit large vlm_only found).
+    #
+    # R3 (2026-09-14): that 1.67% threshold was measured but never applied —
+    # the original code dropped every vlm_only room regardless of size, not
+    # just the validated giants. Cross-checked against
+    # plan/zero-room-page-recovery-plan-2026-09-14.md's R2 filter ranking:
+    # this was the single largest cause of the 40/53 real-floor-plan pages
+    # losing every room (886 of 1437 dropped rooms across those 40 pages,
+    # 61.7%, dominant filter on 34/40) — small vlm_only rooms have a VLM-read
+    # name (room numbers, OFFICE/CORRIDOR/RESTROOM/...) that simply failed to
+    # spatially merge with an independent OCR box, not a hallucination.
+    # Blast-radius checked on the 88 pages that already survive: area-gating
+    # this filter recovers 71 more real rooms across 26 pages (spot-checked,
+    # all plausible named rooms) with zero rooms lost anywhere in that set —
+    # narrowing the drop condition can only ever admit rooms this stage used
+    # to remove, never remove ones it used to keep.
     _img_w0 = annotation.get("image_size", {}).get("width", 0)
     _img_h0 = annotation.get("image_size", {}).get("height", 0)
     _img_area0 = _img_w0 * _img_h0 if _img_w0 and _img_h0 else 0
+    _VLM_UNCORROBORATED_AREA_THRESHOLD = _rf.vlm_uncorroborated_area_frac
+    def _vlm_only_area_frac(r):
+        bbox = r.get("bbox")
+        if bbox and len(bbox) == 4 and _img_area0:
+            return (bbox[2] * bbox[3]) / _img_area0
+        return None
+    def _drop_vlm_only(r):
+        if r.get("source") != "vlm_only":
+            return False
+        area_frac = _vlm_only_area_frac(r)
+        return area_frac is None or area_frac >= _VLM_UNCORROBORATED_AREA_THRESHOLD
     pre_vlm = len(rooms)
-    _dropped_vlm_only = [r for r in rooms if r.get("source") == "vlm_only"]
-    rooms = [r for r in rooms if r.get("source") != "vlm_only"]
+    _dropped_vlm_only = [r for r in rooms if _drop_vlm_only(r)]
+    rooms = [r for r in rooms if not _drop_vlm_only(r)]
     n_vlm = pre_vlm - len(rooms)
     if n_vlm:
         drop_attribution["vlm_uncorroborated"] = n_vlm
@@ -1404,10 +1653,13 @@ def prepare_sft_annotation(
                             or (zone_area > 0 and inter / zone_area > ZONE_OVERLAP_ZONE_FRAC)):
                         return True
             return False
+        _pre_excl_rooms = list(rooms)
         rooms = [r for r in rooms if not _in_any_zone(r.get("bbox", []), exclusion_zones)]
         n_excl = pre_excl - len(rooms)
         if n_excl:
             drop_attribution["bom_zone"] = n_excl
+            _kept_ids = {id(r) for r in rooms}
+            drop_detail["bom_zone"] = [_room_desc(r) for r in _pre_excl_rooms if id(r) not in _kept_ids]
             logger.info(f"FIX-4: dropped {n_excl} room(s) with centroid in BOM/title-block zone")
 
     # Step 0-pre: FIX-9 — same BOM/title-block protection for objectDetections
@@ -1488,6 +1740,7 @@ def prepare_sft_annotation(
         n_shape_excl = pre_shape - len(object_detections)
         if n_shape_excl:
             drop_attribution["window_shape_mismatch"] = n_shape_excl
+
             logger.info(
                 f"FIX-9b: dropped {n_shape_excl} objectDetection(s) tagged "
                 f"window with a non-elongated (door-like) bbox"
@@ -1505,25 +1758,31 @@ def prepare_sft_annotation(
             try:
                 with Image.open(img_path) as im:
                     gray = im.convert("L")
+                _pre_ink = list(rooms)
                 rooms, n_ink = _filter_low_ink_rooms(
                     rooms,
                     gray,
-                    INK_MIN_FRAC,
-                    INK_BINARISE_MAX,
+                    _rf.min_ink_frac,
+                    _rf.ink_binarise_max,
                     exempt_sam_expanded=exempt_sam_expanded_from_ink_filter,
                 )
                 if n_ink:
                     drop_attribution["low_ink"] = n_ink
+                    _kept_ids = {id(r) for r in rooms}
+                    drop_detail["low_ink"] = [_room_desc(r) for r in _pre_ink if id(r) not in _kept_ids]
                     logger.info(
                         f"FIX-5: dropped {n_ink} room(s) placed over non-drawing region"
                     )
 
                 # FIX-6: drop rooms whose centroid lands in a ruled table (BOM/
                 # schedule). Reuses the image already loaded for FIX-5.
-                tables = _detect_ruled_tables(gray, INK_BINARISE_MAX)
+                tables = _detect_ruled_tables(gray, _rf.ink_binarise_max)
+                _pre_table = list(rooms)
                 rooms, n_table = _filter_rooms_in_tables(rooms, tables)
                 if n_table:
                     drop_attribution["ruled_table"] = n_table
+                    _kept_ids = {id(r) for r in rooms}
+                    drop_detail["ruled_table"] = [_room_desc(r) for r in _pre_table if id(r) not in _kept_ids]
                     logger.info(
                         f"FIX-6: dropped {n_table} room(s) placed over a ruled table"
                     )
@@ -1609,8 +1868,8 @@ def prepare_sft_annotation(
     #   (d) Area exceeds MAX_ROOM_FRAC of image — mislocalized giant blobs
     #       (e.g. SAM grabs a 43% floor plate from a single label centroid).
     #       A single labelled room cannot physically occupy >30% of a floor.
-    MIN_ROOM_AREA_PX = 10_000  # ~0.5"×0.5" at 200 DPI; excludes all text labels
-    MAX_ROOM_FRAC    = 0.30    # >30% of image = mislocalized blob, not one room
+    MIN_ROOM_AREA_PX = _rf.min_room_area_px
+    MAX_ROOM_FRAC    = _rf.max_room_frac
 
     # DV-3 / Option A: OCR-anchored rooms are exempt from the text-label-shape
     # checks (a)/(b) and use a much lower absolute-area floor for (c).
@@ -1630,6 +1889,7 @@ def prepare_sft_annotation(
     img_h_pre = annotation.get("image_size", {}).get("height", 0)
     img_area_pre = img_w_pre * img_h_pre if img_w_pre and img_h_pre else 0
     pre_geom = len(rooms)
+    geom_pre_snap = list(rooms)
     geom_filtered = []
     for room in rooms:
         bbox = room.get("bbox", [])
@@ -1717,7 +1977,7 @@ def prepare_sft_annotation(
             # A single placed room cannot span >8% of a floor plan. vlm_only rooms
             # above this are mislocalized over multi-room regions or notes.
             # OCR-sourced and merged rooms are exempt — OCR labels are precise.
-            MAX_VLM_UNIT_FRAC = 0.08
+            MAX_VLM_UNIT_FRAC = _rf.max_vlm_unit_frac
             if (img_area_pre > 0
                     and room.get("source") == "vlm_only"
                     and area > img_area_pre * MAX_VLM_UNIT_FRAC):
@@ -1760,12 +2020,15 @@ def prepare_sft_annotation(
     n_geom = pre_geom - len(rooms)
     drop_attribution["geometric"] = n_geom
     if n_geom > 0:
+        _kept_ids = {id(r) for r in rooms}
+        drop_detail["geometric"] = [_room_desc(r) for r in geom_pre_snap if id(r) not in _kept_ids]
         logger.info(f"Fix1: geometric filter removed {n_geom} bbox(es)")
 
     # Remediation Fix #2: Resolve bbox overlaps in non-circulation room types.
     # This must happen AFTER geometric filter but BEFORE semantic filtering
     # to ensure clean spatial geometry for SFT.
     pre_overlap = len(rooms)
+    _pre_overlap_snap = list(rooms)
     rooms = _resolve_bbox_overlaps(rooms)
     # Fix2b (Phase 2): same-type containment dedup — catches nested duplicate
     # boxes (esp. circulation types skipped by _resolve_bbox_overlaps) whose
@@ -1775,23 +2038,61 @@ def prepare_sft_annotation(
     n_resolved = pre_overlap - len(rooms)
     drop_attribution["overlap"] = n_resolved
     if n_resolved > 0:
+        _kept_ids = {id(r) for r in rooms}
+        drop_detail["overlap"] = [_room_desc(r) for r in _pre_overlap_snap if id(r) not in _kept_ids]
         logger.info(f"Remediation Fix #2: overlap resolution merged/removed {n_resolved} room(s)")
+
+    # Step 0d: Split out OCR candidates where a room-number tag was found but
+    # the descriptive room-name text was never resolved — see
+    # quality_checker.py's OCR_NAME_EMPTY check. Root cause is case-by-case:
+    # confirmed 2026-09-15 to most often be a room_name_patterns vocabulary
+    # gap (the name OCR'd fine but matched no known pattern, so it never
+    # became a name candidate to link the number to) rather than an
+    # image-quality issue — do not assume hatch/grid interference without
+    # checking the specific page. These previously fell into the generic
+    # "semantic" bucket below, hiding the cause entirely. Attribute them
+    # separately here so semantic doesn't double-count them.
+    def _name_unresolved(r):
+        return bool(r.get("room_number")) and not (r.get("room_name") or r.get("name") or "").strip()
+
+    pre_unresolved = len(rooms)
+    unresolved_name_rooms = [r for r in rooms if _name_unresolved(r)]
+    if unresolved_name_rooms:
+        rooms = [r for r in rooms if not _name_unresolved(r)]
+        n_unresolved = pre_unresolved - len(rooms)
+        drop_attribution["ocr_name_unresolved"] = n_unresolved
+        drop_detail["ocr_name_unresolved"] = [
+            {"bbox": r.get("bbox"), "room_number": r.get("room_number")}
+            for r in unresolved_name_rooms
+        ]
+        logger.info(
+            f"Step 0d: {n_unresolved} room(s) dropped — room-number found but "
+            f"name never resolved to a known room_name pattern"
+        )
 
     # Step 1: Semantic filtering
     pre_semantic = len(rooms)
-    rooms = validator.filter_rooms(rooms)
+    _pre_semantic_snap = list(rooms)
+    rooms = validator.filter_rooms(
+        rooms, block_single_letter_abbreviations=block_single_letter_abbreviations
+    )
     n_semantic = pre_semantic - len(rooms)
     drop_attribution["semantic"] = n_semantic
     if n_semantic > 0:
+        _kept_ids = {id(r) for r in rooms}
+        drop_detail["semantic"] = [_room_desc(r) for r in _pre_semantic_snap if id(r) not in _kept_ids]
         logger.info(f"Step 1: semantic filter removed {n_semantic} room(s) ({len(rooms)} remaining)")
     logger.debug(f"After semantic filter: {len(rooms)} rooms")
 
     # Step 2: Confidence filtering (preserves VLM rooms with no confidence field)
     pre_confidence = len(rooms)
+    _pre_confidence_snap = list(rooms)
     rooms = filter_by_confidence(rooms, min_confidence=0.85)
     n_confidence = pre_confidence - len(rooms)
     drop_attribution["confidence"] = n_confidence
     if n_confidence > 0:
+        _kept_ids = {id(r) for r in rooms}
+        drop_detail["confidence"] = [_room_desc(r) for r in _pre_confidence_snap if id(r) not in _kept_ids]
         logger.info(f"Step 2: confidence filter removed {n_confidence} room(s) ({len(rooms)} remaining)")
     else:
         logger.debug(f"After confidence filter: {len(rooms)} rooms")
@@ -1811,10 +2112,13 @@ def prepare_sft_annotation(
     img_h = annotation.get("image_size", {}).get("height", 0)
     if img_w > 0 and img_h > 0:
         pre_oob = len(rooms)
+        _pre_oob_snap = list(rooms)
         rooms = [r for r in rooms if _bbox_in_bounds(r.get("bbox", []), img_w, img_h)]
         n_dropped = pre_oob - len(rooms)
         drop_attribution["oob"] = n_dropped
         if n_dropped > 0:
+            _kept_ids = {id(r) for r in rooms}
+            drop_detail["oob"] = [_room_desc(r) for r in _pre_oob_snap if id(r) not in _kept_ids]
             logger.warning(
                 f"Dropped {n_dropped} out-of-bounds room(s) "
                 f"(image={img_w}x{img_h})"
@@ -1840,22 +2144,45 @@ def prepare_sft_annotation(
     for room in rooms:
         room_name = room.get("room_name") or room.get("name", "")
         if room_name:
-            normalized = normalizer.normalize(room_name)
+            normalized = normalizer.normalize(
+                room_name, block_single_letter_abbreviations=block_single_letter_abbreviations
+            )
             room["type"] = normalized
             room["category"] = normalized  # Sync category field for COCO exporter
             logger.debug(f"Normalized '{room_name}' → {normalized}")
 
+    # One room, two boxes: see automation/duplicate_boxes.py. Runs HERE, not
+    # earlier in the chain: the rule pairs a room-extent box with a label box
+    # of the same room type, and a room only has its type once the loop above
+    # has normalised it (measured: placed before this, it silently missed
+    # duplicates whose rooms were not yet typed).
+    if _rf.drop_redundant_room_extent_boxes:
+        rooms, redundant = split_redundant_room_extents(rooms)
+        if redundant:
+            drop_attribution["redundant_room_extent_box"] = len(redundant)
+            drop_detail["redundant_room_extent_box"] = [_room_desc(r) for r in redundant]
+            logger.info(
+                f"dropped {len(redundant)} room-extent box(es) already holding a label box"
+            )
+
     # Step 4: SFT validation
     pre_sft = len(rooms)
     sft_ready = []
+    _sft_validation_dropped: List[Dict[str, Any]] = []
     for room in rooms:
         is_valid, checks = validate_for_sft(room)
         if not is_valid:
             failed_checks = [k for k, v in checks.items() if not v]
             logger.debug(f"Room rejected: {room.get('name')} - {failed_checks}")
+            desc = _room_desc(room)
+            desc["failed_checks"] = failed_checks
+            _sft_validation_dropped.append(desc)
             continue
         sft_ready.append(room)
-    drop_attribution["sft_validation"] = pre_sft - len(sft_ready)
+    n_sft_dropped = pre_sft - len(sft_ready)
+    drop_attribution["sft_validation"] = n_sft_dropped
+    if _sft_validation_dropped:
+        drop_detail["sft_validation"] = _sft_validation_dropped
 
     # Step 4b: Zero-dimension bbox guard.
     # Stripe detection is now handled upstream in hallucination_detector.detect_hallucinations()
@@ -1879,7 +2206,7 @@ def prepare_sft_annotation(
     #       real rooms with walls/fixtures score 0.05-0.19).
     # content_density is attached by SAM refine_annotations. When absent (SAM off),
     # the density check is skipped and area alone applies (backward compatible).
-    ROOM_MIN_AREA = 40_000          # ~200x200px at 200 DPI; separates rooms from labels
+    ROOM_MIN_AREA = _rf.room_min_area
     # Rejects boxes over genuinely blank space (density ~0). NOT raised higher:
     # valid spaces with giant mislocalized boxes (e.g. 2BR units, cd 0.036-0.045)
     # would be discarded — that is a LOCALIZATION problem, fixed upstream by the
@@ -1901,10 +2228,13 @@ def prepare_sft_annotation(
         room["is_room_scale"] = area_ok and density_ok
 
     pre_strip = len(sft_ready)
+    _pre_strip_snap = list(sft_ready)
     sft_ready = [r for r in sft_ready if r.get("is_room_scale")]
     n_stripped = pre_strip - len(sft_ready)
     if n_stripped:
         drop_attribution["not_room_scale"] = n_stripped
+        _kept_ids = {id(r) for r in sft_ready}
+        drop_detail["not_room_scale"] = [_room_desc(r) for r in _pre_strip_snap if id(r) not in _kept_ids]
         logger.info(
             f"F-D: stripped {n_stripped} non-room box(es) "
             f"(area<{ROOM_MIN_AREA} or density<{MIN_CONTENT_DENSITY}); "
@@ -1919,9 +2249,18 @@ def prepare_sft_annotation(
 
     # Step 5: Clean up contamination
     annotation.pop("ocr_rooms", None)  # Remove unfiltered OCR
+    annotation.pop("ocrTextDetections", None)  # raw-annotation replay input only
     annotation.pop("panels", None)  # Remove equipment (not spatial rooms)
 
     # Step 6: Return with corrected sft_ready logic
+    # Stamp what each surviving box encloses. The list mixes two conventions
+    # -- an OCR-anchored room's box is its label text, a vlm_only room's box
+    # is the whole room (the VLM prompt demands wall-to-wall) -- and every
+    # consumer so far re-derived that from `source` or, worse, ignored it and
+    # trained on both as one target. Written once, here, so exporters and
+    # converters read a field instead of each repeating the mapping.
+    for room in sft_ready:
+        room["box_convention"] = box_convention_of(room.get("source"))
     annotation["rooms"] = sft_ready
 
     clean = (
@@ -1956,3 +2295,52 @@ def prepare_sft_annotation(
         f"SFT preparation complete: {len(sft_ready)} rooms, sft_ready={annotation['sft_ready']}"
     )
     return annotation
+
+
+# Raw annotation keys that carry room-name candidates before SFT filtering.
+_RAW_CANDIDATE_KEYS = ("rooms", "ocr_rooms", "roomsRecognized")
+
+NO_ROOM_NAME_CANDIDATES = "NO_ROOM_LABEL_CANDIDATES"
+
+
+def has_room_name_candidate(
+    raw_annotation: Dict, block_single_letter_abbreviations: bool = True
+) -> bool:
+    """True if any raw candidate passes SemanticRoomValidator's room-name gate.
+
+    Call on the annotation BEFORE prepare_sft_annotation (which pops
+    ocr_rooms and shrinks rooms). False means the page offered no vocabulary
+    room name -- MEP tags (LP#15, LT-01, C1-37) alone do not count. It does not
+    mean "label-free floor plan": labelled pages whose labels the OCR missed or
+    the vocabulary lacks also return False (see
+    plan/technology-evaluation-2026-10-11-no-label-fallback.md section 2).
+    """
+    candidates = [
+        room for key in _RAW_CANDIDATE_KEYS for room in raw_annotation.get(key, [])
+    ]
+    return bool(SemanticRoomValidator().filter_rooms(
+        candidates, block_single_letter_abbreviations
+    ))
+
+
+def dropped_page_record(
+    annotation: Dict, has_name_candidate: bool
+) -> Optional[Dict]:
+    """Attribution record for a page that ended with zero rooms, or None.
+
+    Extends the existing drop_attribution/drop_detail record with page_reason
+    when the page had no room-name candidate. Pages with neither filter drops
+    nor that reason produce no record, as before.
+    """
+    drop_attr = annotation.get("drop_attribution")
+    if has_name_candidate and not drop_attr:
+        return None
+    record: Dict[str, Any] = {
+        "image_file": annotation.get("image_file"),
+        "drop_attribution": drop_attr or {},
+    }
+    if annotation.get("drop_detail"):
+        record["drop_detail"] = annotation["drop_detail"]
+    if not has_name_candidate:
+        record["page_reason"] = NO_ROOM_NAME_CANDIDATES
+    return record
