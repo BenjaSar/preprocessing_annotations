@@ -16,6 +16,7 @@ from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
+from preprocessing_annotations.automation.taxonomy import DEFAULT_MANDATORY_TYPE
 from preprocessing_annotations.config import PipelineConfig, SFTDatasetConfig
 from preprocessing_annotations.export.qwen_sft_exporter import _tile_boxes, export, rooms_of
 from preprocessing_annotations.vlm.vlm_backend import UnslothQwenBackend
@@ -333,3 +334,70 @@ def test_room_without_recorded_ocr_confidence_survives_a_floor():
         "label", min_name_ocr_confidence=0.9,
     )
     assert [room.name for room in kept] == ["VLM ROOM"]
+
+
+# --- unplaceable room types (SFTDatasetConfig.resolve_default_types_from_name) ---
+
+def test_default_type_is_re_resolved_from_the_label():
+    """A stored type that is only the taxonomy's default is re-read from the
+    label, so a class added after the run reaches the dataset."""
+    rooms, skipped = rooms_of(
+        {"roomsRecognized": [_room("EXAM RM", [10, 10, 90, 40], room_type=DEFAULT_MANDATORY_TYPE)]},
+        "label", resolve_default_from_name=True,
+    )
+    assert [room.room_type for room in rooms] == ["CLINIC"]
+    assert skipped == {}
+
+
+def test_label_the_taxonomy_cannot_place_is_dropped_not_guessed():
+    rooms, skipped = rooms_of(
+        {"roomsRecognized": [_room("SUITE 200", [10, 10, 90, 40], room_type=DEFAULT_MANDATORY_TYPE)]},
+        "label", resolve_default_from_name=True,
+    )
+    assert rooms == []
+    assert skipped["unresolved_type"] == 1
+
+
+def test_a_real_storage_label_keeps_the_default_type():
+    rooms, _ = rooms_of(
+        {"roomsRecognized": [_room("STOR", [10, 10, 90, 40], room_type=DEFAULT_MANDATORY_TYPE)]},
+        "label", resolve_default_from_name=True,
+    )
+    assert [room.room_type for room in rooms] == [DEFAULT_MANDATORY_TYPE]
+
+
+def test_types_from_elsewhere_than_the_label_are_left_alone():
+    """resolve_context_dependent_types turns LAB into CLINIC on a clinical
+    page; re-reading the label here would undo it."""
+    rooms, _ = rooms_of(
+        {"roomsRecognized": [_room("LAB", [10, 10, 90, 40], room_type="CLINIC")]},
+        "label", resolve_default_from_name=True,
+    )
+    assert [room.room_type for room in rooms] == ["CLINIC"]
+
+
+def test_resolution_is_off_unless_asked_for():
+    rooms, skipped = rooms_of(
+        {"roomsRecognized": [_room("SUITE 200", [10, 10, 90, 40], room_type=DEFAULT_MANDATORY_TYPE)]},
+        "label",
+    )
+    assert [room.room_type for room in rooms] == [DEFAULT_MANDATORY_TYPE]
+    assert skipped == {}
+
+
+def test_export_reports_the_dropped_targets_and_the_flag(tmp_path):
+    run = _run_dir(
+        tmp_path,
+        {"plan_page000": (SMALL_PAGE, [
+            _room("EXAM RM", [100, 100, 260, 140], room_type=DEFAULT_MANDATORY_TYPE),
+            _room("SUITE 200", [300, 100, 460, 140], room_type=DEFAULT_MANDATORY_TYPE),
+        ], [])},
+        {"train": ["plan_page000"], "val": [], "test": []},
+    )
+
+    report = export(run, tmp_path / "dataset")
+
+    assert report["resolve_default_types_from_name"] is True
+    assert report["rooms_skipped"]["unresolved_type"] == 1
+    targets = json.loads(_assistant_text(_examples(tmp_path / "dataset" / "train.jsonl")[0]))
+    assert [t["room_type"] for t in targets] == ["CLINIC"]

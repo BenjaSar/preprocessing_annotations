@@ -19,6 +19,12 @@ D6  A room is a target only in tiles that contain its whole box. Every room
     fits whole in at least one tile, so nothing is lost, and a box clipped
     at a tile edge would teach a truncated target.
 
+Two things this export refuses to pass on silently: a room type that is only
+taxonomy's unplaceable-name default is re-read from the room's own label and
+dropped when nothing places it (SFTDatasetConfig.resolve_default_types_from_name),
+and every export writes a seeded, magnified sample of its own targets
+(export/sft_sample_audit.py) because these corpora have no room GT to score.
+
 Splits come from the run's own coco/{train,val,test}.json, so the group-aware
 assignment (export/group_split.py, GT documents pinned to test) is reused
 rather than reimplemented. Geometry comes from `roomsRecognized` (xyxy, what
@@ -39,8 +45,10 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from PIL import Image
 
+from ..automation.taxonomy import DEFAULT_MANDATORY_TYPE, resolve_mandatory
 from ..config.config import PipelineConfig, SFTDatasetConfig
 from ..export.group_split import SPLIT_NAMES
+from ..export.sft_sample_audit import write_sample_audit
 from ..ingestion.tile_splitter import TileMeta, TileSplitter
 from ..vlm import prompt_templates
 
@@ -135,7 +143,11 @@ def _to_tile(room: Room, tile: Box) -> Dict[str, Any]:
 
 
 def rooms_of(
-    annotation: Dict[str, Any], convention: str, min_name_ocr_confidence: float = 0.0
+    annotation: Dict[str, Any],
+    convention: str,
+    min_name_ocr_confidence: float = 0.0,
+    *,
+    resolve_default_from_name: bool = False,
 ) -> Tuple[List[Room], Counter]:
     """Rooms carrying the trained box convention, and why the rest were skipped.
 
@@ -143,6 +155,12 @@ def rooms_of(
     label was read below `min_name_ocr_confidence` is skipped too (D9): the
     target string is trained verbatim, so a misread name teaches a misreading.
     The default keeps every room, which is the behaviour measured so far.
+
+    With `resolve_default_from_name` (SFTDatasetConfig.
+    resolve_default_types_from_name) a room whose stored type is the
+    taxonomy's unplaceable-name default is re-resolved from its own label and
+    dropped when that resolves to nothing, so the dataset never teaches a
+    guessed class. Every other stored type is kept as the run recorded it.
 
     Skips are counted by reason, not totalled: a dataset that silently shrank
     should say which rule shrank it.
@@ -165,9 +183,16 @@ def rooms_of(
         if not name:
             skipped["no_name"] += 1
             continue
+        room_type = (room.get("type") or "OTHER").strip()
+        if resolve_default_from_name and room_type == DEFAULT_MANDATORY_TYPE:
+            resolved = resolve_mandatory(name)
+            if resolved is None:
+                skipped["unresolved_type"] += 1
+                continue
+            room_type = resolved
         rooms.append(Room(
             name=name,
-            room_type=(room.get("type") or "OTHER").strip(),
+            room_type=room_type,
             box=tuple(float(v) for v in box),
             confidence=float(room.get("confidence", 0.0)),
         ))
@@ -193,7 +218,8 @@ def page_examples(
         return [], []
 
     rooms, skipped = rooms_of(
-        annotation, sft_config.box_convention, sft_config.min_name_ocr_confidence
+        annotation, sft_config.box_convention, sft_config.min_name_ocr_confidence,
+        resolve_default_from_name=sft_config.resolve_default_types_from_name,
     )
     stats.pages += 1
     stats.rooms += len(rooms)
@@ -327,6 +353,7 @@ def export(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     stats = ExportStats()
+    audited: List[Tuple[str, dict]] = []
     for split, file_names in _split_pages(run_dir).items():
         with_rooms, empty = [], []
         for file_name in sorted(file_names):
@@ -356,13 +383,17 @@ def export(
         # Crops only for the examples that survived the empty-tile cap.
         _write_crops(examples, output_dir)
         _write_jsonl(output_dir / f"{split}.jsonl", examples)
+        audited.extend((split, example) for example in with_rooms)
 
     report = {
         "run": str(run_dir),
         "box_convention": sft_config.box_convention,
         "max_empty_tile_fraction": sft_config.max_empty_tile_fraction,
+        "resolve_default_types_from_name": sft_config.resolve_default_types_from_name,
         "prompt_version": prompt_templates.PROMPT_VERSIONS["build_room_prompt_sft_label"],
         **stats.as_dict(),
+        # Written last: the audit reads the tile crops the splits above wrote.
+        "sample_audit": write_sample_audit(audited, output_dir, sft_config),
     }
     (output_dir / "export_report.json").write_text(json.dumps(report, indent=2) + "\n")
     return report

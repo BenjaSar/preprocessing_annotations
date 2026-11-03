@@ -24,18 +24,24 @@ Usage:
 
 import logging
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 try:
     from ..config import OCRConfig, PipelineConfig
     from .ocr_extractor import MEPTextExtractor, RoomCandidate, TextDetection
+    from ..vlm.tiled_rooms import detect_rooms_in_tiles, splitter_for_image
     from ..vlm.vlm_backend import VLMBackend
 except ImportError:
     from config import OCRConfig, PipelineConfig
     from ocr_extractor import MEPTextExtractor, RoomCandidate, TextDetection
+    from tiled_rooms import detect_rooms_in_tiles, splitter_for_image
     from vlm_backend import VLMBackend
 
 logger = logging.getLogger(__name__)
+
+# Centroid distance below which a Pass 1 and a Pass 2 room are the same room.
+# Caller-overridable argument default, kept here so the number has one home.
+DEFAULT_BBOX_MATCH_DISTANCE_PX = 100.0
 
 
 class TwoPassOCRExtractor:
@@ -57,6 +63,7 @@ class TwoPassOCRExtractor:
         vlm_backend: Optional[VLMBackend] = None,
         confidence_threshold: float = 0.92,
         vlm_fallback_enabled: bool = True,
+        tiling_config: Optional[PipelineConfig] = None,
     ):
         """
         Initialize two-pass OCR extractor.
@@ -66,6 +73,9 @@ class TwoPassOCRExtractor:
             vlm_backend: VLMBackend for Pass 2 fallback (optional)
             vlm_fallback_enabled: False skips Pass 2 while leaving the backend
                 (and therefore the local-VLM CPU forcing below) in place.
+            tiling_config: the grid Pass 2 detects on, read by
+                TileSplitter.for_page. None detects the page whole, which is
+                what a caller without a PipelineConfig gets.
             confidence_threshold: Use VLM fallback if confidence < this value (default: 0.92).
                 PaddleOCR typically returns >0.97 on legible floor plan text; 0.92 triggers
                 the fallback only for tokens that are genuinely ambiguous.
@@ -92,6 +102,7 @@ class TwoPassOCRExtractor:
         self.vlm_backend = vlm_backend
         self.confidence_threshold = confidence_threshold
         self.vlm_fallback_enabled = vlm_fallback_enabled
+        self.tiling_config = tiling_config
         
         logger.info(
             f"Initialized TwoPassOCRExtractor with confidence_threshold={confidence_threshold}"
@@ -221,26 +232,44 @@ class TwoPassOCRExtractor:
         merged_rooms = self.refine_with_vlm(image_path, pass1_rooms)
         return merged_rooms, raw_detections
     
+    def _detect_rooms(self, image_path: Path) -> List[Dict[str, Any]]:
+        """Pass-2 detections for one page, in that page's coordinates.
+
+        Tiled when a tiling_config says this page is tiled, because a
+        whole-page call does not ground small room labels: measured on
+        sprint1_verify55, 1 of 712 name-matched Pass-2 candidates had its own
+        OCR token inside its box, against 1773 of 1773 for Pass 1. The tiling
+        itself is the pipeline's (vlm.tiled_rooms), not a second copy of it.
+        """
+        tiling = (
+            splitter_for_image(image_path, self.tiling_config)
+            if self.tiling_config is not None
+            else None
+        )
+        if tiling is None:
+            return self.vlm_backend.detect_rooms(image_path)
+        image, splitter = tiling
+        return detect_rooms_in_tiles(self.vlm_backend, image, splitter, image_path.name)
+
     def _extract_rooms_via_vlm(self, image_path: Path) -> List[RoomCandidate]:
         """
         Extract rooms using VLM backend (Pass 2 fallback).
-        
+
         Args:
             image_path: Path to floor plan image
-        
+
         Returns:
             List of RoomCandidate objects from VLM detection
-        
+
         Raises:
             Exception: If VLM detection fails
         """
         if self.vlm_backend is None:
             return []
-        
+
         try:
-            # Call VLM backend's detect_rooms method
-            vlm_detections = self.vlm_backend.detect_rooms(image_path)
-            
+            vlm_detections = self._detect_rooms(image_path)
+
             if not vlm_detections:
                 logger.warning("VLM detect_rooms returned empty list")
                 return []
@@ -283,83 +312,101 @@ class TwoPassOCRExtractor:
             logger.error(f"VLM room extraction failed: {e}")
             raise
     
+    @staticmethod
+    def _closest_unclaimed(
+        room: RoomCandidate,
+        candidates: List[RoomCandidate],
+        claimed: Set[int],
+        distance_threshold: float,
+    ) -> Optional[int]:
+        """Index of the nearest still-unclaimed candidate within the threshold.
+
+        One rule for "these two are the same room", so the high-confidence and
+        the low-confidence branch cannot drift apart. A claimed candidate is
+        skipped: a Pass 2 room describes one place, so it can stand in for one
+        Pass 1 room, not for every Pass 1 room that happens to sit near it.
+        """
+        def centroid(bbox: Tuple[int, int, int, int]) -> Tuple[float, float]:
+            x, y, w, h = bbox
+            return x + w / 2, y + h / 2
+
+        def distance(first: Tuple[int, int, int, int], second: Tuple[int, int, int, int]) -> float:
+            (cx1, cy1), (cx2, cy2) = centroid(first), centroid(second)
+            return ((cx1 - cx2) ** 2 + (cy1 - cy2) ** 2) ** 0.5
+
+        best_index: Optional[int] = None
+        best_distance = distance_threshold
+        for index, candidate in enumerate(candidates):
+            if index in claimed:
+                continue
+            candidate_distance = distance(room.bbox, candidate.bbox)
+            if candidate_distance < best_distance:
+                best_distance, best_index = candidate_distance, index
+        return best_index
+
     def _merge_room_candidates(
         self,
         pass1_rooms: List[RoomCandidate],
         pass2_rooms: List[RoomCandidate],
-        bbox_distance_threshold: float = 100.0,
+        bbox_distance_threshold: float = DEFAULT_BBOX_MATCH_DISTANCE_PX,
     ) -> List[RoomCandidate]:
         """
         Merge room candidates from Pass 1 (OCR) and Pass 2 (VLM).
-        
+
         Strategy:
-        1. For each low-confidence Pass 1 room, find the closest Pass 2 room (by bbox centroid)
-        2. If distance < threshold, replace Pass 1 with Pass 2 (if higher confidence)
-        3. Otherwise, keep Pass 1 result
-        4. Add unmatched Pass 2 rooms as new candidates
-        
+        1. Every Pass 1 room claims its nearest unclaimed Pass 2 room within the
+           threshold -- the two passes read the same place.
+        2. A high-confidence Pass 1 room keeps its own label and consumes the
+           claim, so the Pass 2 duplicate is not appended a second time.
+        3. A low-confidence Pass 1 room is replaced by the Pass 2 room it
+           claimed, and kept as-is when it claimed nothing.
+        4. Pass 2 rooms nobody claimed are added as new candidates.
+
         Args:
             pass1_rooms: Room candidates from PaddleOCR
             pass2_rooms: Room candidates from VLM
-            bbox_distance_threshold: Max pixel distance to match rooms (default: 100.0)
-        
+            bbox_distance_threshold: Max centroid distance (px) to call two rooms the same
+
         Returns:
             Merged list of RoomCandidate objects
         """
-        def centroid(bbox: Tuple[int, int, int, int]) -> Tuple[float, float]:
-            """Return (cx, cy) centroid of bbox (x, y, w, h)."""
-            x, y, w, h = bbox
-            return x + w / 2, y + h / 2
-        
-        def bbox_distance(bbox1: Tuple[int, int, int, int], bbox2: Tuple[int, int, int, int]) -> float:
-            """Euclidean distance between bbox centroids."""
-            cx1, cy1 = centroid(bbox1)
-            cx2, cy2 = centroid(bbox2)
-            return ((cx1 - cx2) ** 2 + (cy1 - cy2) ** 2) ** 0.5
-        
-        merged = []
-        matched_pass2_indices = set()
-        
-        # Process Pass 1 rooms
+        merged: List[RoomCandidate] = []
+        claimed: Set[int] = set()
+
         for p1_room in pass1_rooms:
-            # If high confidence, keep as-is
+            match_index = self._closest_unclaimed(
+                p1_room, pass2_rooms, claimed, bbox_distance_threshold
+            )
+            if match_index is not None:
+                claimed.add(match_index)
+
             if p1_room.confidence >= self.confidence_threshold:
+                if match_index is not None:
+                    logger.debug(
+                        f"High-confidence OCR ({p1_room.room_name}, conf={p1_room.confidence:.2f}) "
+                        f"kept; VLM duplicate ({pass2_rooms[match_index].room_name}) dropped"
+                    )
                 merged.append(p1_room)
                 continue
-            
-            # Low confidence: find best matching Pass 2 room
-            best_match = None
-            best_distance = bbox_distance_threshold
-            best_idx = -1
-            
-            for idx, p2_room in enumerate(pass2_rooms):
-                dist = bbox_distance(p1_room.bbox, p2_room.bbox)
-                if dist < best_distance:
-                    best_distance = dist
-                    best_match = p2_room
-                    best_idx = idx
-            
-            # If good match found, use Pass 2 result
-            if best_match is not None:
-                logger.debug(
-                    f"Matched low-confidence OCR ({p1_room.room_name}, conf={p1_room.confidence:.2f}) "
-                    f"→ VLM ({best_match.room_name}, conf={best_match.confidence:.2f}), "
-                    f"distance={best_distance:.1f}px"
-                )
-                merged.append(best_match)
-                matched_pass2_indices.add(best_idx)
-            else:
-                # No good match, keep Pass 1 result
+
+            if match_index is None:
                 logger.debug(
                     f"No VLM match for low-confidence OCR ({p1_room.room_name}, "
                     f"conf={p1_room.confidence:.2f}), using OCR result"
                 )
                 merged.append(p1_room)
-        
-        # Add unmatched Pass 2 rooms as new candidates
-        for idx, p2_room in enumerate(pass2_rooms):
-            if idx not in matched_pass2_indices:
+                continue
+
+            p2_room = pass2_rooms[match_index]
+            logger.debug(
+                f"Matched low-confidence OCR ({p1_room.room_name}, conf={p1_room.confidence:.2f}) "
+                f"→ VLM ({p2_room.room_name}, conf={p2_room.confidence:.2f})"
+            )
+            merged.append(p2_room)
+
+        for index, p2_room in enumerate(pass2_rooms):
+            if index not in claimed:
                 logger.debug(f"Adding unmatched VLM result: {p2_room.room_name} (conf={p2_room.confidence:.2f})")
                 merged.append(p2_room)
-        
+
         return merged

@@ -157,11 +157,23 @@ def apply_gate(
         }
     missing_documents = sorted(set(worst_per_document) - set(candidate_per_document))
 
+    # Comparability: every run in a verdict should come from the same pipeline
+    # code. Measured 2026-10-29/30 -- baselines, control and adapter ran hours
+    # apart while other work edited the pipeline, and nothing flagged it. An
+    # "unknown" fingerprint (runs predating the field) cannot be checked, so it
+    # is reported but does not by itself fail the check.
+    fingerprints = {
+        report.get("run_code_fingerprint", "unknown")
+        for report in list(baselines) + [candidate]
+    }
+    known = {f for f in fingerprints if f != "unknown"}
+
     checks = {
         "recall_above_baseline_spread": candidate_recall > recalls["max"],
         "precision_within_tolerance": candidate_precision >= precisions["median"] - tolerance,
         "category_within_tolerance": candidate_category >= categories["median"] - tolerance,
         "no_document_lost_recall": not regressed and not missing_documents,
+        "one_pipeline_version": len(known) <= 1,
     }
     return {
         "tolerance": tolerance,
@@ -183,6 +195,7 @@ def apply_gate(
             "label_precision": round(candidate_precision - precisions["median"], 4),
             "category_accuracy": round(candidate_category - categories["median"], 4),
         },
+        "code_fingerprints": sorted(fingerprints),
         "documents_losing_recall": regressed,
         "documents_missing_from_candidate": missing_documents,
         "checks": checks,
@@ -250,9 +263,14 @@ def scored_report(report: Dict[str, Any], section: str) -> Dict[str, Any]:
             f"report has neither top-level scores nor a {section!r} section; "
             f"has {sorted(report)[:6]}"
         )
-    # run_dir lives at the replay report's top level, but the verdict and the
-    # MLflow params identify the candidate by it, so carry it into the section.
-    return {"run_dir": report.get("run_dir"), **report[section]}, section
+    # run_dir and the producing code's fingerprint live at the replay report's
+    # top level; the verdict identifies the candidate by one and checks
+    # comparability by the other, so carry both into the section.
+    return {
+        "run_dir": report.get("run_dir"),
+        "run_code_fingerprint": report.get("run_code_fingerprint", "unknown"),
+        **report[section],
+    }, section
 
 
 def load_reports(paths: Sequence[Path], section: str) -> List[Dict[str, Any]]:

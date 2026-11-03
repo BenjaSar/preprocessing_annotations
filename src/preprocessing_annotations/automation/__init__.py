@@ -12,7 +12,6 @@ from .label_normalizer import LabelNormalizer, normalize_label
 from .quality_checker import QualityChecker, ValidationIssue
 from .region_extractor import RegionExtractor
 from .sft_validator import (
-    ImageResizer,
     SemanticRoomValidator,
     TaxonomyNormalizer,
     filter_by_confidence,
@@ -33,7 +32,6 @@ __all__ = [
     "QualityChecker",
     "ValidationIssue",
     "RegionExtractor",
-    "ImageResizer",
     "SemanticRoomValidator",
     "TaxonomyNormalizer",
     "filter_by_confidence",

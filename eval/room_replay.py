@@ -229,6 +229,21 @@ def room_count_changes(
     }
 
 
+def recorded_code_fingerprint(run_dir: Path) -> str:
+    """The code fingerprint a run recorded, or "unknown" for older runs.
+
+    Runs made before 2026-10-30 carry no fingerprint; "unknown" says so
+    rather than implying they match anything.
+    """
+    config_path = Path(run_dir) / "pipeline_config.json"
+    if not config_path.exists():
+        return "unknown"
+    try:
+        return json.loads(config_path.read_text()).get("code_fingerprint", "unknown")
+    except (OSError, ValueError):
+        return "unknown"
+
+
 def evaluate_replay(
     eval_config: RoomGtEvalConfig, run_dir: Path, pipeline_config: PipelineConfig,
     variant_filter: RoomFilterConfig,
@@ -254,6 +269,11 @@ def evaluate_replay(
     }
     return {
         "run_dir": str(run_dir),
+        # The code that PRODUCED the run's annotations. Replay re-runs the
+        # filter stage under current code, so filter edits are neutralised,
+        # but OCR/VLM-stage edits are baked into those annotations -- which is
+        # why a comparison needs to know this even for replayed numbers.
+        "run_code_fingerprint": recorded_code_fingerprint(run_dir),
         "gt_coco_path": str(eval_config.gt_coco_path),
         "pages_replayed": len(runs["variant"][0]),
         "pages_scored": len(scored["variant"]),

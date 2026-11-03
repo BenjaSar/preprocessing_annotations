@@ -229,6 +229,48 @@ def test_a_report_without_the_section_is_refused(tmp_path):
         scored_report({"as_run": _report(0.57)}, "baseline")
 
 
+def _coded(recall, fingerprint, **kwargs):
+    return {**_report(recall, **kwargs), "run_code_fingerprint": fingerprint}
+
+
+def test_runs_from_one_pipeline_version_pass_the_comparability_check():
+    verdict = apply_gate([_coded(0.570, "abc"), _coded(0.575, "abc")],
+                         _coded(0.640, "abc"), TOLERANCE)
+    assert verdict["checks"]["one_pipeline_version"]
+    assert verdict["passed"]
+
+
+def test_a_candidate_built_by_different_code_fails():
+    """Measured 2026-10-29/30: baselines, control and adapter ran hours apart
+    while other work edited the pipeline, and nothing flagged it."""
+    verdict = apply_gate([_coded(0.570, "abc"), _coded(0.575, "abc")],
+                         _coded(0.640, "def"), TOLERANCE)
+
+    assert not verdict["checks"]["one_pipeline_version"]
+    assert verdict["code_fingerprints"] == ["abc", "def"]
+    assert not verdict["passed"]
+
+
+def test_baselines_disagreeing_with_each_other_also_fail():
+    verdict = apply_gate([_coded(0.570, "abc"), _coded(0.575, "def")],
+                         _coded(0.640, "abc"), TOLERANCE)
+    assert not verdict["checks"]["one_pipeline_version"]
+
+
+def test_unknown_fingerprints_do_not_fail_the_check():
+    """Runs predating the field cannot be checked; reported, not punished."""
+    verdict = apply_gate([_report(0.570), _report(0.575)], _report(0.640), TOLERANCE)
+
+    assert verdict["checks"]["one_pipeline_version"]
+    assert verdict["code_fingerprints"] == ["unknown"]
+
+
+def test_one_known_version_mixed_with_unknown_still_passes():
+    verdict = apply_gate([_coded(0.570, "abc"), _report(0.575)],
+                         _coded(0.640, "abc"), TOLERANCE)
+    assert verdict["checks"]["one_pipeline_version"]
+
+
 def test_the_gate_needs_a_baseline():
     with pytest.raises(ValueError):
         apply_gate([], _report(0.640), TOLERANCE)

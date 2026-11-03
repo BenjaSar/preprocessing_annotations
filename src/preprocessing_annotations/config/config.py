@@ -874,6 +874,42 @@ class SFTDatasetConfig:
     # is no ground truth for label strings in this project.
     min_name_ocr_confidence: float = 0.0
 
+    # The room type stored by a run is taxonomy.normalize_to_mandatory's
+    # answer, which never says "I could not place this name": an unplaceable
+    # label becomes taxonomy.DEFAULT_MANDATORY_TYPE. Training on that teaches
+    # the model to call unknown rooms storage.
+    #
+    # With this on, a room whose stored type IS that default is re-resolved
+    # from its own label through taxonomy.resolve_mandatory: a real match
+    # replaces the stored type, and no match drops the room (counted as
+    # unresolved_type). Any other stored type is kept untouched, so a type
+    # that came from somewhere other than the label -- a VLM category, or
+    # taxonomy.resolve_context_dependent_types' LAB -> CLINIC -- is never
+    # second-guessed from the label here.
+    #
+    # Measured by re-exporting corpus_batch2_v2 with it on (2026-10-29),
+    # against the 631-target export of 2026-10-27: 26 targets change class
+    # (EXAM RM 9, DRAW 8, TRIAGE 5, NURSE STATION 3, PROCEDURE 1, all
+    # STORAGE ROOM -> CLINIC now that the clinic entries exist), 3 are
+    # dropped ("Suite 200"), 0 are added, 628 remain. The 15 "STOR" labels
+    # keep STORAGE ROOM: that abbreviation was added to the taxonomy's own
+    # variant list in the same change, since it was reaching the class
+    # through the fallback this flag refuses to trust.
+    resolve_default_types_from_name: bool = True
+
+    # Per-export sample audit: the training corpora have no room GT, so the
+    # only check on a target's label and box is looking at it. The exporter
+    # writes a seeded sample of targets as crops, magnified at least
+    # audit_min_scale, and lists them in export_report.json, so every dataset
+    # ships with a reviewable sample instead of an unexamined one.
+    #
+    # audit_context_frac expands each box by that fraction of its longest
+    # edge before cropping, so the room's surroundings scale with the room.
+    audit_sample_size: int = 24
+    audit_sample_seed: int = 20261029
+    audit_min_scale: float = 2.0
+    audit_context_frac: float = 1.0
+
 
 @dataclass
 class MissedRoomOcrConfig:
@@ -2144,6 +2180,14 @@ class RoomFilterConfig:
     # Slack (px) when matching an OCR candidate's box to a VLM room's box:
     # two_pass_ocr_extractor truncates the VLM box to int when it builds the
     # candidate.
+    #
+    # Revisited 2026-10-29 before giving Pass 2 the pipeline's tiling: on
+    # sprint1_verify55, 105 of its 1331 Pass-2 candidates (7.9%) match a VLM
+    # room's box within this tolerance. So the echo skip is not what empties
+    # Pass 2 -- the other 92% are independently placed boxes -- and tiled
+    # Pass-2 candidates, drawn from a separate sampled inference, will mostly
+    # not be exact echoes either. Left as is; no measurement supports widening
+    # the tolerance, and widening it would drop OCR candidates on live runs.
     vlm_echo_bbox_tolerance_px: int = 1
 
 
@@ -2267,6 +2311,20 @@ class PipelineConfig:
     #   gained, 12 are "UNIT TYPE - x" labels inside real apartments and 3
     #   more are real rooms; 2 are questionable (a grid bubble, a box next to
     #   "RESIDENTIAL STORAGE").
+    #
+    # 2026-10-29, measured on sprint1_verify55's own annotations (the run that
+    # had Pass 2 on; <scratch>/pass2_space_probe.py): of the 712 Pass-2
+    # candidates whose name also appears as an OCR token on the page, exactly
+    # 1 has that token inside its box, against 1773 of 1773 for Pass-1
+    # candidates. Their boxes sit in the top-left of the sheet (median
+    # extent 0.25 x 0.28 of the page) but no single factor rescues them:
+    # scaling every box by the best uniform factor (3.0) lands 73 of 712.
+    # So this is NOT a fixable coordinate-space mapping -- the full-page VLM
+    # call simply does not ground small labels, and the pipeline's own room
+    # detection avoids it by tiling (tile_trigger_px). Enabling this flag
+    # needs Pass 2 to detect on the same tiles the pipeline uses, not a
+    # transform applied to what it returns today.
+    #
     # True restores Pass 2 (--ocr-vlm-fallback). Either way OCR device
     # selection is unchanged: it depends on the VLM backend being present.
     use_ocr_vlm_fallback: bool = False
