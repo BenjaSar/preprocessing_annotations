@@ -6,8 +6,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
-
 from preprocessing_annotations.config import PipelineConfig
 from preprocessing_annotations.ingestion.ocr_extractor import RoomCandidate
 from preprocessing_annotations.ingestion.two_pass_ocr_extractor import TwoPassOCRExtractor

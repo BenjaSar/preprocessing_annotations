@@ -7,12 +7,8 @@ training target, so the fallback was teaching a wrong class.
 """
 
 import re
-import sys
-from pathlib import Path
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from preprocessing_annotations.automation.taxonomy import (
     normalize_to_mandatory,

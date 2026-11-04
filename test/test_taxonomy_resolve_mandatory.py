@@ -5,12 +5,8 @@ pipeline types rooms through it -- while a caller that cannot afford a guess
 (the SFT exporter) can now see that a name was never placed.
 """
 
-import sys
-from pathlib import Path
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from preprocessing_annotations.automation.taxonomy import (
     DEFAULT_MANDATORY_TYPE,

@@ -3,12 +3,8 @@
 Census basis: plan/technology-evaluation-2026-10-11-no-label-fallback.md section 2.
 """
 
-import sys
-from pathlib import Path
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from preprocessing_annotations.ingestion.ocr_extractor import _is_excluded_token  # noqa: E402
 from preprocessing_annotations.automation.sft_validator import (

@@ -8,13 +8,10 @@ same boxes, or the dataset is training a format the pipeline cannot consume.
 """
 
 import json
-import sys
 from pathlib import Path
 
 import pytest
 from PIL import Image
-
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from preprocessing_annotations.automation.taxonomy import DEFAULT_MANDATORY_TYPE
 from preprocessing_annotations.config import PipelineConfig, SFTDatasetConfig
@@ -281,6 +278,106 @@ def test_empty_tiles_are_capped(tmp_path):
     assert empty / len(_examples(tmp_path / "out" / "train.jsonl")) <= (
         SFTDatasetConfig().max_empty_tile_fraction + 1e-9
     )
+
+
+def _doc_pages(stem, count, rooms_per_page):
+    """`count` small pages of one document, each carrying `rooms_per_page` rooms."""
+    return {
+        f"{stem}_page{index:03d}": (
+            SMALL_PAGE,
+            [_room(f"R{index}_{n}", [100 + n * 150, 100, 180 + n * 150, 130])
+             for n in range(rooms_per_page)],
+            [],
+        )
+        for index in range(count)
+    }
+
+
+def _targets_by_document(path):
+    counts = {}
+    for example in _examples(path):
+        stem = Path(example["metadata"]["source_page"]).stem.rsplit("_page", 1)[0]
+        counts[stem] = counts.get(stem, 0) + example["metadata"]["rooms"]
+    return counts
+
+
+def test_no_document_cap_by_default(tmp_path):
+    """Every dataset exported before the cap existed must stay reproducible."""
+    pages = _doc_pages("hog", 6, 4)
+    run = _run_dir(tmp_path, pages, {"train": list(pages)})
+
+    report = export(run, tmp_path / "out")
+
+    assert SFTDatasetConfig().max_targets_per_document is None
+    assert report["targets_dropped_by_document_cap"] == {}
+    assert _targets_by_document(tmp_path / "out" / "train.jsonl")["hog"] == 24
+
+
+def test_an_over_contributing_document_is_capped(tmp_path):
+    """G-TGT-2: measured, one document held 952 of 2816 train targets (34%)
+    and 573 of the 577 CL labels. The cap bounds that share."""
+    pages = {**_doc_pages("hog", 6, 4), **_doc_pages("small", 2, 2)}
+    run = _run_dir(tmp_path, pages, {"train": list(pages)})
+    config = SFTDatasetConfig()
+    config.max_targets_per_document = 10
+
+    report = export(run, tmp_path / "out", sft_config=config)
+
+    per_document = _targets_by_document(tmp_path / "out" / "train.jsonl")
+    assert per_document["hog"] <= 10, "the over-contributing document is not capped"
+    assert per_document["small"] == 4, "a document under the cap must be untouched"
+    assert report["targets_dropped_by_document_cap"] == {"hog": 24 - per_document["hog"]}
+
+
+def test_the_cap_drops_whole_tiles_and_never_edits_an_answer(tmp_path):
+    """The reason the cap is per-document and not per-label. An answer lists
+    every room visible in its tile; dropping one target from a tile whose crop
+    still shows that label would train a false negative. Measured on the real
+    corpus, 555 of 577 CL targets share a tile with another label, so a
+    per-label cap could only work by doing exactly that."""
+    pages = _doc_pages("hog", 6, 4)
+    run = _run_dir(tmp_path, pages, {"train": list(pages)})
+    config = SFTDatasetConfig()
+    config.max_targets_per_document = 8
+
+    export(run, tmp_path / "out", sft_config=config)
+
+    for example in _examples(tmp_path / "out" / "train.jsonl"):
+        answer = json.loads(_assistant_text(example))
+        assert len(answer) == example["metadata"]["rooms"]
+        # Every page here carries 4 rooms in one tile; a partially-emptied
+        # answer would show up as a surviving tile with fewer.
+        assert len(answer) in (0, 4), f"answer was trimmed to {len(answer)} targets"
+
+
+def test_the_cap_is_seeded(tmp_path):
+    pages = _doc_pages("hog", 6, 4)
+    run = _run_dir(tmp_path, pages, {"train": list(pages)})
+    config = SFTDatasetConfig()
+    config.max_targets_per_document = 12
+
+    export(run, tmp_path / "a", sft_config=config)
+    export(run, tmp_path / "b", sft_config=config)
+
+    assert (tmp_path / "a" / "train.jsonl").read_text() == (
+        tmp_path / "b" / "train.jsonl").read_text()
+
+
+def test_the_empty_cap_is_computed_after_the_document_cap(tmp_path):
+    """Emptiness is a share of what is kept, so the two caps compose in one
+    order only -- otherwise capping a document raises the empty share above
+    max_empty_tile_fraction without anything saying so."""
+    pages = {"hog_page000": (TILED_PAGE, [_room(f"R{n}", [100 + n * 200, 100, 180 + n * 200, 130])
+                                          for n in range(3)], [])}
+    run = _run_dir(tmp_path, pages, {"train": list(pages)})
+    config = SFTDatasetConfig()
+    config.max_targets_per_document = 3
+
+    export(run, tmp_path / "out", sft_config=config)
+
+    examples = _examples(tmp_path / "out" / "train.jsonl")
+    empty = sum(1 for e in examples if e["metadata"]["rooms"] == 0)
+    assert empty / len(examples) <= SFTDatasetConfig().max_empty_tile_fraction + 1e-9
 
 
 def test_export_is_reproducible(tmp_path):

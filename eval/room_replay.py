@@ -44,6 +44,7 @@ from room_gt_eval import (
     load_gt_category_map,
     load_gt_polygons,
     load_run_rooms,
+    macro_average,
     page_key,
     score_category,
     score_extent,
@@ -205,6 +206,9 @@ def _summary(
         "category": category.to_dict(),
         "drop_attribution": dict(sorted(drops.items(), key=lambda kv: -kv[1])),
         "per_document": {doc: s.to_dict() for doc, s in sorted(per_document.items())},
+        # One vote per document, so a single large drawing cannot set the
+        # headline on its own (see room_gt_eval.macro_average).
+        "per_document_macro": macro_average(per_document),
     }, per_document
 
 

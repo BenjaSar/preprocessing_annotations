@@ -8,10 +8,6 @@ targets boxed blank wall and notes text. The VLM paths resize in memory and
 map their boxes back themselves, so nothing needs the file to shrink.
 """
 
-import sys
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 import preprocessing_annotations.automation as automation
 

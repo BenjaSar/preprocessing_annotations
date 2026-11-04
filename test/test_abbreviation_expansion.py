@@ -6,12 +6,8 @@ never match and "<ABBREV> <WORD>" never expanded: "JAN" and "JAN 101" expanded
 while "JAN CLOSET" did not, leaving a janitor closet classified as CLOSET.
 """
 
-import sys
-from pathlib import Path
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from preprocessing_annotations.automation.abbreviations import expand_abbreviation
 from preprocessing_annotations.automation.sft_validator import (

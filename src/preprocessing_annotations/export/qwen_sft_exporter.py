@@ -47,7 +47,7 @@ from PIL import Image
 
 from ..automation.taxonomy import DEFAULT_MANDATORY_TYPE, resolve_mandatory
 from ..config.config import PipelineConfig, SFTDatasetConfig
-from ..export.group_split import SPLIT_NAMES
+from ..export.group_split import SPLIT_NAMES, document_key
 from ..export.sft_sample_audit import write_sample_audit
 from ..ingestion.tile_splitter import TileMeta, TileSplitter
 from ..vlm import prompt_templates
@@ -84,12 +84,16 @@ class ExportStats:
     empty_tiles_available: int = 0
     empty_tiles_kept: int = 0
     empty_tiles_in_exclusion_zone: int = 0
+    targets_dropped_by_document_cap: Counter = field(default_factory=Counter)
     per_split: Dict[str, int] = field(default_factory=dict)
 
     def as_dict(self) -> Dict[str, Any]:
         return {
             **self.__dict__,
             "rooms_skipped": dict(sorted(self.rooms_skipped.items())),
+            "targets_dropped_by_document_cap": dict(
+                sorted(self.targets_dropped_by_document_cap.items())
+            ),
             "per_split": dict(sorted(self.per_split.items())),
         }
 
@@ -340,6 +344,52 @@ def _capped_empty(
     return (in_zone + rest)[:budget]
 
 
+def _capped_by_document(
+    with_rooms: List[dict], sft_config: SFTDatasetConfig
+) -> Tuple[List[dict], Dict[str, int]]:
+    """Tiles kept after no document may exceed max_targets_per_document.
+
+    Whole tiles are dropped, never individual targets: the answer has to list
+    every room visible in the tile, so removing one target from a tile that
+    still shows its label trains a false negative. See the config field for
+    the measurement that rules the per-label alternative out.
+
+    Within an over-budget document, tiles are taken densest-first after a
+    seeded shuffle, so the cap keeps the most targets per tile (and per crop
+    written) while staying reproducible.
+    """
+    cap = sft_config.max_targets_per_document
+    if cap is None:
+        return with_rooms, {}
+
+    by_document: Dict[str, List[dict]] = {}
+    for example in with_rooms:
+        key = document_key(Path(example["metadata"]["source_page"]).name)
+        by_document.setdefault(key, []).append(example)
+
+    kept, dropped = [], {}
+    shuffler = random.Random(sft_config.document_cap_sample_seed)
+    for key, examples in sorted(by_document.items()):
+        total = sum(e["metadata"]["rooms"] for e in examples)
+        if total <= cap:
+            kept.extend(examples)
+            continue
+        shuffler.shuffle(examples)
+        examples.sort(key=lambda e: e["metadata"]["rooms"], reverse=True)
+        running, taken = 0, []
+        for example in examples:
+            if running + example["metadata"]["rooms"] > cap:
+                continue
+            taken.append(example)
+            running += example["metadata"]["rooms"]
+        kept.extend(taken)
+        dropped[key] = total - running
+        logger.info(
+            "document cap: %s contributed %d targets, kept %d", key, total, running
+        )
+    return kept, dropped
+
+
 def export(
     run_dir: Path,
     output_dir: Path,
@@ -369,6 +419,13 @@ def export(
             with_rooms.extend(page_with_rooms)
             empty.extend(page_empty)
 
+        # Before the empty-tile cap, so the empty budget is computed against
+        # the tiles that actually survive (the two caps compose in one order
+        # only: emptiness is a share of what is kept).
+        with_rooms, dropped_by_cap = _capped_by_document(with_rooms, sft_config)
+        for key, count in dropped_by_cap.items():
+            stats.targets_dropped_by_document_cap[key] += count
+
         stats.empty_tiles_available += len(empty)
         kept_empty = _capped_empty(empty, len(with_rooms), sft_config)
         stats.empty_tiles_kept += len(kept_empty)
@@ -389,6 +446,7 @@ def export(
         "run": str(run_dir),
         "box_convention": sft_config.box_convention,
         "max_empty_tile_fraction": sft_config.max_empty_tile_fraction,
+        "max_targets_per_document": sft_config.max_targets_per_document,
         "resolve_default_types_from_name": sft_config.resolve_default_types_from_name,
         "prompt_version": prompt_templates.PROMPT_VERSIONS["build_room_prompt_sft_label"],
         **stats.as_dict(),
@@ -412,7 +470,12 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Build the Qwen3-VL SFT dataset from a run")
     parser.add_argument("--run", type=Path, required=True, help="Run dir with coco/ and processed_annotations/")
     parser.add_argument("--out", type=Path, required=True, help="Directory for the JSONL splits")
+    parser.add_argument(
+        "--max-targets-per-document", type=int, default=None,
+        help="SFTDatasetConfig.max_targets_per_document (default: off)",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
-    print(json.dumps(export(args.run, args.out), indent=2))
+    sft_config = SFTDatasetConfig(max_targets_per_document=args.max_targets_per_document)
+    print(json.dumps(export(args.run, args.out, sft_config=sft_config), indent=2))

@@ -2,12 +2,9 @@
 and pinned groups land in test."""
 
 import json
-import sys
 from pathlib import Path
 
 from PIL import Image
-
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from preprocessing_annotations.export.exporters import COCOExporter
 from preprocessing_annotations.export.group_split import GroupMap

@@ -566,10 +566,32 @@ class VLMConfig:
     do_sample: bool = field(default_factory=_get_vlm_do_sample)
 
     # Token budgets per task type for local VLM backends.
-    # Room budget is tight (768 tokens = ~25 rooms at 30 tokens/room)
-    # to truncate autoregressive hallucination loops early.
-    # Doors/windows need more because instances are numerous.
+    # Room budget is tight to truncate autoregressive hallucination loops
+    # early. Doors/windows need more because instances are numerous.
+    #
+    # G-EVAL-3 (2026-11-03): this is a FLOOR, not the budget actually used.
+    # room_token_budget() raises it to whatever max_rooms costs, because the
+    # two were inconsistent: the budget was sized on an estimate of 30
+    # tokens/room, and a real answer from the shipped dataset measures 51
+    # (median over 245 answers, Qwen3-VL tokenizer; mean 51.1, max 59). At
+    # 1024 the model could emit ~20 rooms while the prompt asked for up to
+    # max_rooms=25, so the ask and the budget disagreed by 5 rooms and
+    # nothing reconciled them.
+    #
+    # Truncation itself is graceful -- _parse_room_response salvages every
+    # complete object from an unterminated array (verified 2026-11-03 at 5,
+    # 10, 15, 20 and 21 rooms, all fully recovered) -- so a tight budget
+    # silently caps dense tiles rather than failing loudly. On the GT pages
+    # 15 of 401 tiles hold more than max_rooms rooms, 172 GT rooms (11.5%)
+    # sit beyond that cap, and 6 of Rockaway's 12 tiles are over it, one
+    # holding 66.
     room_max_new_tokens: int = 1024
+
+    # Measured cost of one room record in the trained answer format
+    # ({"room_name","room_type","bbox","confidence"}). Named so the budget
+    # and max_rooms cannot drift apart again: re-measure this if the answer
+    # schema changes, and room_token_budget() follows.
+    room_tokens_per_room: int = 51
     door_max_new_tokens: int = 4096
     window_max_new_tokens: int = 4096
 
@@ -601,6 +623,21 @@ class VLMConfig:
     def __post_init__(self):
         if self.qwen_device is None:
             self.qwen_device = _detect_device()
+
+    def room_token_budget(self, is_thinking: bool = False) -> int:
+        """Generation budget for room detection: enough to emit max_rooms.
+
+        One place decides it, so the prompt's "Maximum N rooms" and the
+        budget that has to carry N rooms cannot drift apart (G-EVAL-3: they
+        had, by 5 rooms). room_max_new_tokens stays a floor, so lowering
+        max_rooms never shrinks the budget below its tested value.
+
+        Thinking checkpoints keep their own budget untouched: theirs is
+        sized for a reasoning preamble, not for the answer.
+        """
+        if is_thinking:
+            return self.room_max_new_tokens_thinking
+        return max(self.room_max_new_tokens, self.max_rooms * self.room_tokens_per_room)
 
     @property
     def active_model(self) -> str:
@@ -859,6 +896,29 @@ class SFTDatasetConfig:
     # dataset is reproducible.
     max_empty_tile_fraction: float = 119 / 400
     empty_tile_sample_seed: int = 42
+
+    # G-TGT-2: cap how many targets any ONE source document may contribute to
+    # a split. Measured 2026-11-03 on the five assembled datasets: of 2816
+    # train targets, "CL" is 577 (20.5%), and a single document -- CCC PHASE
+    # 1A 12096 FLATLANDS AVE BKLYN -- holds 573 of those 577 and 952 targets
+    # in all, 34% of the split, 60% of them closets. The skew is one
+    # residential document, not a property of the corpus.
+    #
+    # The cap is per DOCUMENT, not per label, because a per-label cap cannot
+    # be applied safely here. An answer must list every room visible in its
+    # tile, and 555 of the 577 CL targets share a tile with BR1/BR2/BR/BATH:
+    # deleting those targets would train the model to miss a label that is
+    # plainly in the crop. Dropping whole tiles instead keeps every retained
+    # answer complete. Capping by label that way was measured too and does
+    # nothing -- only 22 CL targets sit in CL-only tiles, so it moves CL from
+    # 20.5% to 19.9%.
+    #
+    # Whole tiles are dropped, seeded, from the documents that exceed the cap,
+    # fewest-targets-first so the tiles that survive are the dense ones. None
+    # disables the cap, which is the behaviour of every dataset exported
+    # before this field existed.
+    max_targets_per_document: Optional[int] = None
+    document_cap_sample_seed: int = 42
 
     # D9: drop a room from the SFT targets when PaddleOCR's own text
     # confidence for its label (confidence_detail.ocr) is below this. The SFT

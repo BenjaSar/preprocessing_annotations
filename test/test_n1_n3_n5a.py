@@ -6,12 +6,8 @@ N5a: RoomFilterConfig drives prepare_sft_annotation / _merge_vlm_and_ocr;
      defaults equal the former literals.
 """
 
-import sys
-from pathlib import Path
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from preprocessing_annotations.automation.sft_validator import (
     SemanticRoomValidator,

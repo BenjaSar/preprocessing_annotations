@@ -9,7 +9,6 @@ import pytest
 from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "eval"))
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from candidate_replay import (
     BASELINE,

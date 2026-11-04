@@ -11,13 +11,9 @@ a live pipeline or training job.
 """
 
 import importlib.util
-import sys
-from pathlib import Path
 
 import numpy as np
 import pytest
-
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from preprocessing_annotations.automation.annotation_schema import SFTAnnotationBuilder
 from preprocessing_annotations.automation.taxonomy import add_window_suffix

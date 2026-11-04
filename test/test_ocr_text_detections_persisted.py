@@ -3,12 +3,8 @@
 prepare_sft_annotation, so processed annotations and exports are unchanged."""
 
 import json
-import sys
-from pathlib import Path
 
 from PIL import Image
-
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from preprocessing_annotations.automation.sft_validator import prepare_sft_annotation
 from preprocessing_annotations.config import PipelineConfig

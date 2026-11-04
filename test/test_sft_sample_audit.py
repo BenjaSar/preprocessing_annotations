@@ -6,12 +6,9 @@ the same targets, so two reviews can be compared.
 """
 
 import json
-import sys
 from pathlib import Path
 
 from PIL import Image
-
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from preprocessing_annotations.config import SFTDatasetConfig
 from preprocessing_annotations.export.sft_sample_audit import AUDIT_SUBDIR, write_sample_audit

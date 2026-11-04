@@ -8,10 +8,6 @@ label-scale boxes of an SFT-tuned model exposed it by leaving no VLM match at
 all. See the measured case in the function's own comment.
 """
 
-import sys
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from preprocessing_annotations.automation.sft_validator import _merge_vlm_and_ocr
 

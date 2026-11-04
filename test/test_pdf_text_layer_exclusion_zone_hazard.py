@@ -24,14 +24,12 @@ Uses the real project PDF + real PaddleOCR (CPU) -- no GPU/VLM needed.
 Skips gracefully if the fixture isn't present on this machine.
 """
 
-import sys
 import warnings
 from pathlib import Path
 
 import pytest
 
 warnings.filterwarnings("ignore")
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from preprocessing_annotations.config import OCRConfig
 from preprocessing_annotations.ingestion.ocr_extractor import _centroid

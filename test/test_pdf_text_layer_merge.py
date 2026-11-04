@@ -23,11 +23,8 @@ across two responsibilities:
 This file covers the fetch-only half.
 """
 
-import sys
 from pathlib import Path
 from unittest.mock import MagicMock
-
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from preprocessing_annotations.config import PipelineConfig
 from preprocessing_annotations.orchestration.pipeline import AnnotationPipeline

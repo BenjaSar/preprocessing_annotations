@@ -8,11 +8,8 @@ the base model.
 """
 
 import sys
-from pathlib import Path
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from preprocessing_annotations.config import PipelineConfig, VLMConfig
 from preprocessing_annotations.orchestration.pipeline import AnnotationPipeline

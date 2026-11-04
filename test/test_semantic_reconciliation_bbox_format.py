@@ -40,10 +40,6 @@ page stayed correctly small (15-220px). No prior test exercised either
 path -- why both shipped undetected.
 """
 
-import sys
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from preprocessing_annotations.config import PipelineConfig
 from preprocessing_annotations.ingestion.ocr_extractor import RoomCandidate

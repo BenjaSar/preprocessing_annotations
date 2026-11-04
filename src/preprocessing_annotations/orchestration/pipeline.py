@@ -2706,6 +2706,12 @@ class AnnotationPipeline:
                 "top_k": self.config.vlm.top_k,
                 "presence_penalty": self.config.vlm.presence_penalty,
                 "repetition_penalty": self.config.vlm.repetition_penalty,
+                # The inputs of VLMConfig.room_token_budget(): runs before
+                # 2026-11-04 cannot say which budget they generated under,
+                # and that budget changed (1024 -> 1275) between them.
+                "room_max_new_tokens": self.config.vlm.room_max_new_tokens,
+                "room_tokens_per_room": self.config.vlm.room_tokens_per_room,
+                "max_rooms": self.config.vlm.max_rooms,
             },
             "sam": {
                 "model_type": self.config.sam.model_type,

@@ -2,12 +2,8 @@
 pinned groups land in test, and assignment is deterministic."""
 
 import json
-import sys
-from pathlib import Path
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from preprocessing_annotations.export.group_split import (
     SPLIT_NAMES,

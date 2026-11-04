@@ -14,13 +14,9 @@ The reader is faked, which the port explicitly allows (any implementation
 swappable, string out, never raises).
 """
 
-import sys
-from pathlib import Path
 
 import pytest
 from PIL import Image
-
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from preprocessing_annotations.config import CropRereadConfig, PipelineConfig  # noqa: E402
 from preprocessing_annotations.ingestion.ocr_extractor import (  # noqa: E402

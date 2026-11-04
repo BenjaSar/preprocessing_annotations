@@ -6,14 +6,10 @@ token, against 1773 of 1773 for Pass 1), so every caller that wants page
 coordinates detects over TileSplitter's grid and merges once.
 """
 
-import sys
-from pathlib import Path
 from typing import Any, Dict, List
 
 import pytest
 from PIL import Image
-
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from preprocessing_annotations.config import PipelineConfig
 from preprocessing_annotations.ingestion.tile_splitter import TileSplitter

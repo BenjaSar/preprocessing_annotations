@@ -1,14 +1,11 @@
 """Door detections on wiring: detection/door_layer_filter.py and its pipeline
 wiring. Synthetic layered PDFs are built with PyMuPDF; no model is loaded."""
 
-import sys
 from pathlib import Path
 
 import fitz
 import pytest
 from PIL import Image
-
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from preprocessing_annotations.config import DoorLayerFilterConfig, PipelineConfig
 from preprocessing_annotations.detection.door_layer_filter import DoorLayerFilter

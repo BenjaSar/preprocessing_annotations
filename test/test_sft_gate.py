@@ -8,7 +8,6 @@ from pathlib import Path
 import pytest
 
 project_root = Path(__file__).parent.parent
-sys.path.insert(0, str(project_root / "src"))
 sys.path.insert(0, str(project_root / "eval"))
 
 from sft_gate import apply_gate, load_reports, scored_report

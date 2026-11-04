@@ -23,11 +23,7 @@ Covers:
     config.vlm.backend selects
 """
 
-import sys
-from pathlib import Path
 from unittest.mock import MagicMock
-
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from preprocessing_annotations.config import PipelineConfig
 from preprocessing_annotations.orchestration.pipeline import AnnotationPipeline

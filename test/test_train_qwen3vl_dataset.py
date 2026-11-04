@@ -10,7 +10,6 @@ from pathlib import Path
 import pytest
 
 project_root = Path(__file__).parent.parent
-sys.path.insert(0, str(project_root / "src"))
 sys.path.insert(0, str(project_root / "scripts"))
 
 from train_qwen3vl_unsloth import build_parser, load_datasets, load_split, select_examples

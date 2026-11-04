@@ -10,12 +10,9 @@ Covers the hard constraints from that plan's risk table:
     rooms with no mapping match completely untouched
 """
 
-import sys
 from pathlib import Path
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from preprocessing_annotations.automation.annotation_schema import ConfidenceComputer
 from preprocessing_annotations.orchestration.pipeline import AnnotationPipeline
@@ -151,10 +148,18 @@ def test_apply_object_attributes_nonzero_weight_boosts_matched_only():
     assert "attributes" not in result[1].get("coordinates", {})
 
 
-_REAL_FIXTURE = Path(
-    "/home/ubuntu/floorplan_classifier/VLM/t_q1q5_verify_test3/annotations/"
-    "326 ROCKAWAY - AVI-ON LAYOUT_page001.json"
-)
+# Frozen beside the tests. These two tests used to read a scratch run directory
+# (t_q1q5_verify_test3/), which no longer exists, so they skipped on every
+# checkout and guarded nothing. The fixture is the `rooms` and `objectDetections`
+# of one real page from a production run (corpus_batch2_v2, El Cerrito Mayfair
+# page 3) and nothing else -- the only two fields the loader below reads.
+#
+# The assertions are relations (a default weight moves nothing; a non-zero one
+# raises at least one room and lowers none), not counts, so any real page
+# carrying object evidence serves. The page was chosen by running both tests
+# against candidates; a page with too few detections would pass the no-op test
+# and fail the boost one.
+_REAL_FIXTURE = Path(__file__).parent / "fixtures" / "corroboration_page.json"
 
 
 def _real_rooms_and_mappings():
@@ -188,9 +193,9 @@ def _skip_if_real_fixture_missing():
 
 
 def test_corroboration_default_weight_is_noop_on_real_production_data():
-    """T-1 spike-lite: real page, real persisted YOLO detections (31),
-    real rooms (39) -- not synthetic. Default weights must not move
-    confidence even though this page has genuine object evidence."""
+    """T-1 spike-lite: real page, real persisted YOLO detections and real
+    rooms -- not synthetic. Default weights must not move confidence even
+    though this page has genuine object evidence."""
     _skip_if_real_fixture_missing()
     rooms, mappings = _real_rooms_and_mappings()
     assert mappings, "sanity: this real fixture must produce mappings"

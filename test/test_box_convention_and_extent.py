@@ -17,7 +17,6 @@ from pathlib import Path
 import pytest
 from shapely.geometry import Polygon
 
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 sys.path.insert(0, str(Path(__file__).parent.parent / "eval"))
 
 from preprocessing_annotations.automation import prepare_sft_annotation  # noqa: E402
