@@ -20,8 +20,14 @@ a visible signal to update this file and reconsider the feature's
 status, instead of the fix landing silently with no regression guard
 noticing either way.
 
-Uses the real project PDF + real PaddleOCR (CPU) -- no GPU/VLM needed.
-Skips gracefully if the fixture isn't present on this machine.
+Uses the real project PDF + real PaddleOCR (CPU) -- no GPU/VLM needed. The
+page image is RENDERED from that PDF by the pipeline's own PDFExtractor, so
+the test carries its own fixture and runs wherever the PDF is checked out.
+
+It did not always: the page used to be read from a pre-rendered PNG under
+/tmp, and the 2026-11-05 host reboot deleted it. The test then self-skipped
+for four days and nothing noticed, because a skip reads as green in a summary
+line. A fixture outside the project is a test that silently stops running.
 """
 
 import warnings
@@ -38,10 +44,6 @@ from preprocessing_annotations.ingestion.two_pass_ocr_extractor import TwoPassOC
 
 pytestmark = pytest.mark.slow  # runs real PaddleOCR
 
-_IMG = Path(
-    "/tmp/track2_spotcheck/batch2_input/"
-    "BP-1 Lake Shore High School Electrical Pages_page002.png"
-)
 _PDF = Path(
     "/home/ubuntu/floorplan_classifier/VLM/test_input/"
     "BP-1 Lake Shore High School Electrical Pages.pdf"
@@ -50,9 +52,26 @@ _PAGE_INDEX = 2
 _MERGE_TOL_PX = 20  # matches AnnotationPipeline._PDF_TEXT_LAYER_MERGE_TOL_PX
 
 
-def _skip_if_missing():
-    if not _IMG.exists() or not _PDF.exists():
-        pytest.skip(f"project fixtures not present ({_IMG}, {_PDF})")
+@pytest.fixture(scope="module")
+def page_image(tmp_path_factory):
+    """The page under test, rendered from the project PDF.
+
+    PDFExtractor is the pipeline's own rasterizer, so the image the test
+    scores is the image production would score -- including the dpi-to-edge
+    scaling in PDFExtractor._page_scale. Rendering beats storing a PNG: one
+    fixture to keep in step, and nothing to lose to a reboot.
+    """
+    if not _PDF.exists():
+        pytest.skip(f"project PDF not present ({_PDF})")
+
+    for image, page_number in PDFExtractor().extract(_PDF):
+        if page_number != _PAGE_INDEX:
+            continue
+        path = tmp_path_factory.mktemp("page") / f"{_PDF.stem}_page{_PAGE_INDEX:03d}.png"
+        image.save(path)
+        return path
+
+    raise AssertionError(f"{_PDF.name} has no page at index {_PAGE_INDEX}")
 
 
 @pytest.mark.xfail(
@@ -66,15 +85,14 @@ def _skip_if_missing():
     ),
     strict=True,
 )
-def test_pdf_merge_does_not_explode_exclusion_zone_count():
-    _skip_if_missing()
+def test_pdf_merge_does_not_explode_exclusion_zone_count(page_image):
     from PIL import Image
 
     extractor = TwoPassOCRExtractor(
         OCRConfig(backend="paddleocr", confidence_threshold=0.5), vlm_backend=None
     )
-    pass1_rooms, raw_detections = extractor.find_rooms_pass1(_IMG)
-    w, h = Image.open(_IMG).size
+    pass1_rooms, raw_detections = extractor.find_rooms_pass1(page_image)
+    w, h = Image.open(page_image).size
 
     zones_before = extractor.ocr_extractor.compute_exclusion_zones(
         raw_detections, w, h

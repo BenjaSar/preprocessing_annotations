@@ -273,3 +273,67 @@ def test_one_known_version_mixed_with_unknown_still_passes():
 def test_the_gate_needs_a_baseline():
     with pytest.raises(ValueError):
         apply_gate([], _report(0.640), TOLERANCE)
+
+
+# --- a single baseline cannot measure its own noise -------------------------
+#
+# 2026-11-07: gate_sft_cap200_v1_vs_adapter_real_v1.json compared one candidate
+# against ONE baseline run, so baseline_spread.range was 0 and a +.0020 recall
+# delta passed "recall_above_baseline_spread". The five-seed spread measured in
+# the same chain was .0140 -- the delta was a seventh of the noise the gate
+# exists to reject. These tests pin the reporting that makes that visible and
+# the floor that lets a caller enforce it.
+
+
+def test_a_single_baseline_reports_that_the_spread_is_not_measurable():
+    verdict = apply_gate([_report(0.6112)], _report(0.6132), TOLERANCE)
+
+    assert verdict["baselines"] == 1
+    assert not verdict["spread_measurable"]
+    assert verdict["baseline_spread"]["label_recall"]["range"] == 0
+
+
+def test_two_baselines_can_measure_their_own_spread():
+    verdict = apply_gate([_report(0.570), _report(0.580)], _report(0.640), TOLERANCE)
+
+    assert verdict["spread_measurable"]
+
+
+def test_the_margin_over_the_best_baseline_is_reported():
+    """The number a reader needs to judge a win, next to the pass/fail."""
+    verdict = apply_gate([_report(0.6112)], _report(0.6132), TOLERANCE)
+
+    assert verdict["recall_margin_over_best_baseline"] == 0.002
+
+
+def test_a_noise_floor_rejects_a_win_smaller_than_the_measured_spread():
+    """The cap200-vs-adapter case, re-judged against the 5-seed spread."""
+    verdict = apply_gate([_report(0.6112)], _report(0.6132), TOLERANCE,
+                         noise_floor=0.0140)
+
+    assert not verdict["checks"]["recall_above_baseline_spread"]
+    assert not verdict["passed"]
+
+
+def test_a_win_larger_than_the_noise_floor_still_passes():
+    verdict = apply_gate([_report(0.6112)], _report(0.6500), TOLERANCE,
+                         noise_floor=0.0140)
+
+    assert verdict["checks"]["recall_above_baseline_spread"]
+    assert verdict["passed"]
+
+
+def test_the_default_floor_leaves_every_published_verdict_unchanged():
+    """Regression guard: the six gates already written to rebaseline_1275/
+    were produced with no floor, and must still read the same way."""
+    baselines = [_report(0.570), _report(0.580)]
+
+    assert apply_gate(baselines, _report(0.640), TOLERANCE)["passed"]
+    assert apply_gate(baselines, _report(0.640), TOLERANCE, noise_floor=0.0)["passed"]
+    assert not apply_gate(baselines, _report(0.576), TOLERANCE)["passed"]
+
+
+def test_the_floor_is_reported_in_the_verdict():
+    verdict = apply_gate([_report(0.570)], _report(0.640), TOLERANCE, noise_floor=0.0140)
+
+    assert verdict["noise_floor"] == 0.0140

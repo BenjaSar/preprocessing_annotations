@@ -7,7 +7,9 @@ not necessarily done anything. The gate therefore compares the candidate
 against the SPREAD of several baseline runs that differ only in VLM_SEED.
 
 D8, as agreed 2026-10-27:
-  - label recall above the baseline spread (strictly above the best baseline)
+  - label recall above the baseline spread (strictly above the best baseline,
+    plus --noise-floor; one baseline has no spread of its own, so supply the
+    floor there or the check passes on any positive delta)
   - label precision no more than `tolerance` below the baseline median
   - category accuracy no more than `tolerance` below the baseline median
   - no document loses recall against the worst baseline for that document
@@ -91,9 +93,21 @@ def _spread(values: Sequence[float]) -> Dict[str, float]:
 
 def apply_gate(
     baselines: Sequence[Dict[str, Any]], candidate: Dict[str, Any], tolerance: float,
-    min_rooms_lost: int = 2,
+    min_rooms_lost: int = 2, noise_floor: float = 0.0,
 ) -> Dict[str, Any]:
     """Score the candidate against the baseline spread. Pure; returns the verdict.
+
+    noise_floor: how far above the best baseline the candidate's recall must
+    land. The gate's whole premise is that a win smaller than run-to-run noise
+    is not a win, and it reads that noise off the baseline spread -- but ONE
+    baseline has a spread of zero, so `> max` then passes on any positive
+    delta, however small. Measured case 2026-11-07: sft_cap200_v1 beat
+    adapter_real_v1 by .0020 in a one-baseline gate and passed, while the
+    five-seed spread measured that same week was .0140 -- the "win" was a
+    seventh of the noise. Pass the spread measured elsewhere as the floor when
+    comparing against a single run. Default 0.0 keeps the published behaviour;
+    `spread_measurable` in the verdict says whether the baselines could supply
+    a floor on their own.
 
     min_rooms_lost: a document counts as regressed only when it falls below
     every baseline AND loses at least this many GT rooms. Measured on the
@@ -169,7 +183,7 @@ def apply_gate(
     known = {f for f in fingerprints if f != "unknown"}
 
     checks = {
-        "recall_above_baseline_spread": candidate_recall > recalls["max"],
+        "recall_above_baseline_spread": candidate_recall > recalls["max"] + noise_floor,
         "precision_within_tolerance": candidate_precision >= precisions["median"] - tolerance,
         "category_within_tolerance": candidate_category >= categories["median"] - tolerance,
         "no_document_lost_recall": not regressed and not missing_documents,
@@ -179,6 +193,12 @@ def apply_gate(
         "tolerance": tolerance,
         "min_rooms_lost": min_rooms_lost,
         "baselines": len(baselines),
+        "noise_floor": noise_floor,
+        # A single baseline cannot measure its own run-to-run noise, so a
+        # verdict built on one says so rather than reporting range 0 as if
+        # that meant the candidate cleared something.
+        "spread_measurable": len(baselines) >= 2,
+        "recall_margin_over_best_baseline": round(candidate_recall - recalls["max"], 4),
         "baseline_spread": {
             "label_recall": recalls,
             "label_precision": precisions,
@@ -221,6 +241,8 @@ def gate_metrics(verdict: Dict[str, Any]) -> Dict[str, float]:
         metrics.update({f"baseline_{name}_{stat}": value for stat, value in spread.items()})
     metrics.update({f"check_{name}": float(ok) for name, ok in verdict["checks"].items()})
     metrics["passed"] = float(verdict["passed"])
+    metrics["spread_measurable"] = float(verdict["spread_measurable"])
+    metrics["recall_margin_over_best_baseline"] = verdict["recall_margin_over_best_baseline"]
     metrics["documents_losing_recall"] = float(len(verdict["documents_losing_recall"]))
     metrics["documents_missing_from_candidate"] = float(
         len(verdict["documents_missing_from_candidate"])
@@ -236,6 +258,7 @@ def log_verdict(verdict: Dict[str, Any], config: Any, report_path: Optional[Path
             "tolerance": verdict["tolerance"],
             "min_rooms_lost": verdict["min_rooms_lost"],
             "baselines": verdict["baselines"],
+            "noise_floor": verdict["noise_floor"],
             "candidate_run_dir": verdict["candidate"]["run_dir"],
         })
         log_metrics(MLFLOW_STAGE, gate_metrics(verdict))
@@ -304,6 +327,12 @@ if __name__ == "__main__":
                              "baseline AND loses at least this many GT rooms "
                              "(default 2; 1-room swings occur between baseline "
                              "seeds, so 1 would flag noise). 1 = the old strict rule.")
+    parser.add_argument("--noise-floor", type=float, default=0.0,
+                        help="How far above the best baseline the candidate's recall "
+                             "must land (default 0.0). One baseline has a spread of "
+                             "zero, so the recall check then passes on any positive "
+                             "delta; pass the seed spread measured elsewhere as the "
+                             "floor to compare a candidate against a single run.")
     parser.add_argument("--replay-section", default="baseline",
                         help="Which section of an eval/room_replay.py report to score "
                              "(default: baseline, i.e. replayed under current code). "
@@ -315,7 +344,8 @@ if __name__ == "__main__":
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     reports = load_reports(list(args.baselines) + [args.candidate], args.replay_section)
-    verdict = apply_gate(reports[:-1], reports[-1], args.tolerance, args.min_rooms_lost)
+    verdict = apply_gate(reports[:-1], reports[-1], args.tolerance, args.min_rooms_lost,
+                         args.noise_floor)
     verdict["replay_section"] = args.replay_section
     emit_report(verdict, args.out)
     log_verdict(verdict, mlflow_config_from_args(args), args.out)
