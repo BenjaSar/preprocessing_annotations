@@ -337,3 +337,125 @@ def test_the_floor_is_reported_in_the_verdict():
     verdict = apply_gate([_report(0.570)], _report(0.640), TOLERANCE, noise_floor=0.0140)
 
     assert verdict["noise_floor"] == 0.0140
+
+
+# --- a candidate band is judged on its worst member -------------------------
+#
+# 2026-11-10: sft_cap200_v1 scored .6132 / .6025 / .6086 over three seeds and
+# adapter_real_v1 .6112 / .6072 / .6106. A gate handed only cap200's .6132 run
+# passed -- the candidate's luckiest seed deciding the verdict, which is the
+# same error on the candidate side that one baseline is on the baseline side.
+
+
+def _adapter_band():
+    """adapter_real_v1's three measured runs, as the baseline side."""
+    return [_report(0.6112), _report(0.6072), _report(0.6106)]
+
+
+def test_a_band_is_judged_on_its_worst_member():
+    """The real case: cap200's best clears the adapter band, its worst does not."""
+    cap200 = [_report(0.6132), _report(0.6025), _report(0.6086)]
+
+    verdict = apply_gate(_adapter_band(), cap200, TOLERANCE)
+
+    assert verdict["candidates"] == 3
+    assert verdict["candidate"]["label_recall"] == 0.6025
+    assert not verdict["checks"]["recall_above_baseline_spread"]
+    assert not verdict["passed"]
+
+
+def test_the_same_band_passes_if_only_its_best_run_is_handed_over():
+    """Pinning the defect this change fixes: cherry-picking still passes, so
+    the fix is in WHAT a caller passes as well as in the gate."""
+    verdict = apply_gate(_adapter_band(), _report(0.6132), TOLERANCE)
+
+    assert verdict["passed"]
+
+
+def test_one_candidate_report_behaves_exactly_as_before():
+    """Regression guard: the worst of one member is that member, so every
+    verdict already written keeps its meaning."""
+    baselines = [_report(0.570), _report(0.575)]
+
+    as_report = apply_gate(baselines, _report(0.640), TOLERANCE)
+    as_band = apply_gate(baselines, [_report(0.640)], TOLERANCE)
+
+    assert as_report["passed"] and as_band["passed"]
+    assert as_report["candidate"] == as_band["candidate"]
+    assert as_report["checks"] == as_band["checks"]
+
+
+def test_a_single_candidate_keeps_a_plain_run_dir():
+    """Not wrapped in a list, so existing readers of the field still work."""
+    verdict = apply_gate([_report(0.570)], _report(0.640), TOLERANCE)
+
+    assert verdict["candidate"]["run_dir"] == "run"
+
+
+def test_a_band_reports_every_member_s_run_dir():
+    verdict = apply_gate([_report(0.570)], [_report(0.640), _report(0.650)], TOLERANCE)
+
+    assert verdict["candidate"]["run_dir"] == ["run", "run"]
+
+
+def test_the_candidate_spread_is_reported():
+    """So a reader sees the band's width beside the baselines'."""
+    verdict = apply_gate(_adapter_band(), [_report(0.6132), _report(0.6025)], TOLERANCE)
+
+    spread = verdict["candidate_spread"]["label_recall"]
+    assert spread["min"] == 0.6025
+    assert spread["max"] == 0.6132
+    assert spread["range"] == pytest.approx(0.0107)
+
+
+def test_the_worst_member_is_taken_per_metric_not_per_run():
+    """A run can hold the lowest recall and the highest precision at once;
+    ranking whole runs would let the other metric ride in on its coat-tails."""
+    band = [_report(0.640, precision=0.900), _report(0.700, precision=0.935)]
+
+    verdict = apply_gate([_report(0.570)], band, TOLERANCE)
+
+    assert verdict["candidate"]["label_recall"] == 0.640
+    assert verdict["candidate"]["label_precision"] == 0.900
+    assert not verdict["checks"]["precision_within_tolerance"]
+
+
+def test_a_document_lost_by_any_member_is_lost():
+    """Averaging it away across luckier seeds is how a per-document
+    regression hides inside a band that looks fine in total."""
+    baselines = [_report(0.570, per_document={"doc_a": 0.50, "doc_b": 0.70})]
+    band = [
+        _report(0.640, per_document={"doc_a": 0.80, "doc_b": 0.75}),
+        _report(0.640, per_document={"doc_a": 0.80, "doc_b": 0.40}),
+    ]
+
+    verdict = apply_gate(baselines, band, TOLERANCE)
+
+    assert "doc_b" in verdict["documents_losing_recall"]
+    assert not verdict["passed"]
+
+
+def test_a_document_missing_from_any_member_is_missing():
+    baselines = [_report(0.570, per_document={"doc_a": 0.50, "doc_b": 0.70})]
+    band = [
+        _report(0.640, per_document={"doc_a": 0.80, "doc_b": 0.90}),
+        _report(0.640, per_document={"doc_a": 0.80}),
+    ]
+
+    verdict = apply_gate(baselines, band, TOLERANCE)
+
+    assert verdict["documents_missing_from_candidate"] == ["doc_b"]
+    assert not verdict["passed"]
+
+
+def test_every_member_s_fingerprint_is_checked():
+    """A band assembled from two code versions is not one candidate."""
+    verdict = apply_gate([_coded(0.570, "abc")],
+                         [_coded(0.640, "abc"), _coded(0.650, "def")], TOLERANCE)
+
+    assert not verdict["checks"]["one_pipeline_version"]
+
+
+def test_the_gate_needs_a_candidate():
+    with pytest.raises(ValueError):
+        apply_gate([_report(0.570)], [], TOLERANCE)

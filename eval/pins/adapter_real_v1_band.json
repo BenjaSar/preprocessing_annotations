@@ -1,0 +1,21 @@
+{
+  "_why": "The shipped adapter's measured recall band. Nothing else in the suite fails if a pipeline change silently moves this number, and one has: the 2026-10-28 merge fix lifted every baseline by ~.025 and was only noticed because someone re-ran the baselines by hand. Re-scoring these stored runs is deterministic -- the model does not run again -- so any drift here is a change in the scoring or filtering code, which is exactly what this pins.",
+  "_fingerprint_note": "code_fingerprint identifies the code that PRODUCED the runs, recorded in each run's pipeline_config.json and carried into the replay report. Re-scoring under new code keeps it unchanged, so it pins the inputs, not the scorer. The recall band is what pins the scorer.",
+  "adapter": "sft_real_v1",
+  "code_fingerprint": "92ac4c7a44d3",
+  "replay_section": "baseline",
+  "metric": "localization.label_recall",
+  "measured_on": "2026-11-10",
+  "measured_by": "rebaseline_1275.sh (seed 1234) and separate_adapters.sh (seeds 31337, 777)",
+  "runs": {
+    "adapter_real_v1_b1275": 0.6112224448897795,
+    "adapter_real_v1_b1275_s31337": 0.6072144288577155,
+    "adapter_real_v1_b1275_s777": 0.6105544422177689
+  },
+  "band": {
+    "min": 0.6072144288577155,
+    "max": 0.6112224448897795
+  },
+  "tolerance": 0.0005,
+  "_tolerance_note": "Replay is deterministic given stored predictions, so the expected drift is zero; .0005 is an eighth of the .0040 band width and a twenty-eighth of the .0140 baseline seed spread -- wide enough for float and ordering noise, far too narrow to admit a real scoring change."
+}
