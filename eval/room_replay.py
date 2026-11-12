@@ -44,6 +44,7 @@ from room_gt_eval import (
     load_gt_category_map,
     load_gt_polygons,
     load_run_rooms,
+    macro_average,
     page_key,
     score_category,
     score_extent,
@@ -205,6 +206,9 @@ def _summary(
         "category": category.to_dict(),
         "drop_attribution": dict(sorted(drops.items(), key=lambda kv: -kv[1])),
         "per_document": {doc: s.to_dict() for doc, s in sorted(per_document.items())},
+        # One vote per document, so a single large drawing cannot set the
+        # headline on its own (see room_gt_eval.macro_average).
+        "per_document_macro": macro_average(per_document),
     }, per_document
 
 
@@ -227,6 +231,21 @@ def room_count_changes(
         page: [len(baseline[page]), len(variant[page])]
         for page in sorted(baseline) if len(baseline[page]) != len(variant[page])
     }
+
+
+def recorded_code_fingerprint(run_dir: Path) -> str:
+    """The code fingerprint a run recorded, or "unknown" for older runs.
+
+    Runs made before 2026-10-30 carry no fingerprint; "unknown" says so
+    rather than implying they match anything.
+    """
+    config_path = Path(run_dir) / "pipeline_config.json"
+    if not config_path.exists():
+        return "unknown"
+    try:
+        return json.loads(config_path.read_text()).get("code_fingerprint", "unknown")
+    except (OSError, ValueError):
+        return "unknown"
 
 
 def evaluate_replay(
@@ -254,6 +273,11 @@ def evaluate_replay(
     }
     return {
         "run_dir": str(run_dir),
+        # The code that PRODUCED the run's annotations. Replay re-runs the
+        # filter stage under current code, so filter edits are neutralised,
+        # but OCR/VLM-stage edits are baked into those annotations -- which is
+        # why a comparison needs to know this even for replayed numbers.
+        "run_code_fingerprint": recorded_code_fingerprint(run_dir),
         "gt_coco_path": str(eval_config.gt_coco_path),
         "pages_replayed": len(runs["variant"][0]),
         "pages_scored": len(scored["variant"]),

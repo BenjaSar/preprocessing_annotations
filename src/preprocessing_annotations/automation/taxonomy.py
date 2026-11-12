@@ -208,6 +208,12 @@ MANDATORY_CLASSES: Dict[str, List[str]] = {
         # only via the unknown-token fallback; made explicit so it does not
         # break silently if the fallback default ever changes.
         "VAULT",
+        # STOR: the printed abbreviation, 15 of corpus_batch2_v2's 631 SFT
+        # targets (2026-10-29). Four characters, so the short-token guard
+        # needed an exact variant: it was reaching STORAGE ROOM through the
+        # unknown-token fallback, which an SFT exporter must treat as "no
+        # label at all". Same reasoning as VAULT and ZOOM above.
+        "STOR",
     ],
     "JANITOR CLOSET": [
         "JANITOR", "JANITOR CLOSET", "JANITOR ROOM",
@@ -476,6 +482,12 @@ EXTENDED_TYPES: Dict[str, List[str]] = {
 # Flat set of valid mandatory class names (for SFT output validation)
 VALID_TYPES: Set[str] = set(MANDATORY_CLASSES.keys())
 
+# The class a room takes when nothing in this module places its name: the
+# least-intrusive mandatory type. normalize_to_mandatory returns it so every
+# room carries a valid class; resolve_mandatory returns None instead, so a
+# caller that must not train on a guess can tell the two apart.
+DEFAULT_MANDATORY_TYPE: str = "STORAGE ROOM"
+
 # Flat set of valid extended class names
 EXTENDED_ONLY_TYPES: Set[str] = set(EXTENDED_TYPES.keys())
 
@@ -724,7 +736,7 @@ for _mandatory, _variants in MANDATORY_CLASSES.items():
     for _v in _variants:
         _EXACT_VARIANT_TO_MANDATORY.setdefault(_v.upper(), _mandatory)
 for _extended, _variants in EXTENDED_TYPES.items():
-    _mapped = _EXTENDED_TO_MANDATORY.get(_extended, "STORAGE ROOM")
+    _mapped = _EXTENDED_TO_MANDATORY.get(_extended, DEFAULT_MANDATORY_TYPE)
     for _v in _variants:
         _EXACT_VARIANT_TO_MANDATORY.setdefault(_v.upper(), _mapped)
 
@@ -760,13 +772,14 @@ def normalize_to_mandatory(raw: str) -> str:
     """
     Normalize any raw room type string to a mandatory SFT class.
 
-    Resolution order:
-    1. Already a mandatory type → return as-is.
-    2. VLM category map → translate directly.
-    3. Surface-form exact match (case-insensitive) → map to mandatory.
-    4. Substring match in mandatory classes.
-    5. Substring match in extended classes → map to nearest mandatory.
-    6. Fallback → "STORAGE ROOM" (least-intrusive default).
+    Resolution order: see resolve_mandatory, which does the work. A string
+    this module cannot place becomes DEFAULT_MANDATORY_TYPE, the
+    least-intrusive class, so every caller gets an SFT-compliant type.
+
+    A caller that must tell a real resolution apart from that default --
+    an SFT exporter deciding whether a target's label is trustworthy -- uses
+    resolve_mandatory instead; this wrapper exists so the pipeline's own
+    behaviour is unchanged.
 
     Args:
         raw: Raw room type string from any source (OCR, VLM, abbreviation, etc.)
@@ -774,8 +787,27 @@ def normalize_to_mandatory(raw: str) -> str:
     Returns:
         Mandatory class name from VALID_TYPES, guaranteed to be SFT-compliant.
     """
+    return resolve_mandatory(raw) or DEFAULT_MANDATORY_TYPE
+
+
+def resolve_mandatory(raw: str) -> Optional[str]:
+    """
+    Resolve a raw room type string to a mandatory SFT class, or None.
+
+    Resolution order:
+    1. Already a mandatory type → return as-is.
+    2. VLM category map → translate directly.
+    3. Surface-form exact match (case-insensitive) → map to mandatory.
+    4. Substring match in mandatory classes.
+    5. Substring match in extended classes → map to nearest mandatory.
+    6. Unresolved → None.
+
+    None means "this module has no opinion", not "storage": an empty string,
+    a short noise token with no exact variant, or a name none of the tables
+    place. normalize_to_mandatory turns that into DEFAULT_MANDATORY_TYPE.
+    """
     if not raw:
-        return "STORAGE ROOM"
+        return None
 
     raw_stripped = raw.strip()
     raw_lower = raw_stripped.lower()
@@ -809,8 +841,8 @@ def normalize_to_mandatory(raw: str) -> str:
     if len(raw_upper) <= 4:
         if raw_upper in _EXACT_VARIANT_TO_MANDATORY:
             return _EXACT_VARIANT_TO_MANDATORY[raw_upper]
-        logger.debug(f"Short token '{raw}' no exact match → STORAGE ROOM")
-        return "STORAGE ROOM"
+        logger.debug(f"Short token '{raw}' no exact match → unresolved")
+        return None
 
     # 4. Substring containment in mandatory classes.
     # Short variants (<=4 chars: DIN, BR, LR, WC, LAB, GYM...) must match on a
@@ -835,10 +867,10 @@ def normalize_to_mandatory(raw: str) -> str:
                     f"Substring match (extended): '{raw}' → '{extended}', "
                     f"mapping to nearest mandatory"
                 )
-                return _EXTENDED_TO_MANDATORY.get(extended, "STORAGE ROOM")
+                return _EXTENDED_TO_MANDATORY.get(extended, DEFAULT_MANDATORY_TYPE)
 
-    logger.debug(f"No match for room type: '{raw}' → STORAGE ROOM (fallback)")
-    return "STORAGE ROOM"
+    logger.debug(f"No match for room type: '{raw}' → unresolved")
+    return None
 
 
 # Labels whose class depends on the drawing they sit in, not on their own

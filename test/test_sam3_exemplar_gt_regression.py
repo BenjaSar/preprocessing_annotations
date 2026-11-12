@@ -38,11 +38,37 @@ scored as a false positive (measured: IoU 0.67-0.95 against the YOLO
 box, i.e. far above seed_overlap_iou). Fixed in P13; that defect, not
 concept-matching error, was a third of test_pcs's marginal FP.
 
-CURRENT (post-P13):
+REPINNED A FOURTH TIME (2026-11-04, D3): test_pcs door false positives fell
+112 -> 104 (YOLO) and 120 -> 111 (union) with true positives unchanged
+(81 / 88). Not a regression and not noise: commit ac9990d (2026-10-10) added
+_drop_area_outliers to yolo_detector._merge_per_category, and the tiled
+detector this file scores now runs it. It drops a door box whose area is an
+outlier against the page's own other doors (D3, 2026-09-07).
+
+Attributed, not guessed. Bisecting the package source across the 12 commits
+since these numbers were taken put the change at ac9990d (1271a0f, the first
+commit after the 08-18 pins, reproduces FP=112 exactly; so does e966ad0).
+Then, in-process, with the filters patched out one at a time:
+  both ON                    YOLO FP=104   union FP=111  (union repeated: 111)
+  _drop_area_outliers OFF    YOLO FP=112
+  _drop_containment_unions OFF only   YOLO FP=104   (removes 1 of 415 boxes)
+  BOTH OFF                   YOLO FP=112   union FP=120
+_drop_area_outliers removes 8 of 193 door boxes on this set, none of them a
+true positive. The other filter added in the same commit,
+_drop_containment_unions, is irrelevant here. Three earlier explanations were
+tested and refuted before this one: the door-layer filter (this eval path
+never applies it), min_area_px / the shape floor (FP stays 104 at
+min_area_px=0), and a library or checkpoint change (neither moved since July).
+FloorPlanCAD is unaffected: its pins below still hold.
+
+Note the pins were never failing because the model got worse: precision rose
+(.4197 -> .4378 YOLO, .4231 -> .4422 union) at identical recall.
+
+CURRENT (post-D3):
 
 test_pcs (10 commercial images, exact reproduction):
-  YOLO   P=.419689 R=.223140 TP=81 FP=112
-  union  P=.423077 R=.242424 TP=88 FP=120
+  YOLO   P=.437838 R=.223140 TP=81 FP=104
+  union  P=.442211 R=.242424 TP=88 FP=111
 
 FloorPlanCAD (40-image sample, residential+commercial -- independent
 of test_pcs, where sam3_confidence_threshold=0.70 was picked):
@@ -83,7 +109,6 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "eval"))
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 import argparse
 
@@ -133,8 +158,8 @@ def test_test_pcs_yolo_baseline_pinned():
     door = _door_scores(_DATASET_TEST_PCS, args, build_yolo_finetuned_tiled_predict_fn)
 
     assert door.true_positives == 81
-    assert door.false_positives == 112
-    assert door.precision == pytest.approx(0.41968911917098445, abs=1e-6)
+    assert door.false_positives == 104
+    assert door.precision == pytest.approx(0.43783783783783786, abs=1e-6)
     assert door.recall == pytest.approx(0.2231404958677686, abs=1e-6)
 
 
@@ -149,11 +174,14 @@ def test_test_pcs_sam3_union_beats_baseline_on_both_axes():
     door = _door_scores(_DATASET_TEST_PCS, args, build_sam3_exemplar_tiled_predict_fn)
 
     assert door.true_positives == 88
-    assert door.false_positives == 120
-    assert door.precision == pytest.approx(0.423077, abs=1e-6)
-    assert door.recall == pytest.approx(0.242424, abs=1e-6)
+    assert door.false_positives == 111
+    assert door.precision == pytest.approx(0.44221105527638194, abs=1e-6)
+    assert door.recall == pytest.approx(0.24242424242424243, abs=1e-6)
 
-    assert door.precision > 0.41968911917098445
+    # Against the CURRENT YOLO-alone baseline (test_test_pcs_yolo_baseline_pinned),
+    # not the pre-D3 one: comparing to a stale, weaker baseline would let the
+    # claim hold even if the union had stopped helping.
+    assert door.precision > 0.43783783783783786
     assert door.recall > 0.2231404958677686
 
 

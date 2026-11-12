@@ -2,12 +2,8 @@
 a room name are removed for room-candidate matching, and nowhere else."""
 
 import dataclasses
-import sys
-from pathlib import Path
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from preprocessing_annotations.config import PipelineConfig
 from preprocessing_annotations.ingestion.ocr_extractor import MEPTextExtractor, TextDetection

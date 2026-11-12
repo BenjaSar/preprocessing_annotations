@@ -317,10 +317,9 @@ class VLMAnnotator:
         orig_width, orig_height = self._get_image_dimensions(image_path)
 
         # Prepare image for API: resize in memory if needed, encode to base64.
-        # This is the single authoritative resize step — it runs regardless of
-        # whether the pipeline already called resize_in_place.  It operates
-        # entirely in memory so PermissionError on read-only source files is
-        # impossible.
+        # This is the only resize of the page: it operates entirely in memory,
+        # leaving the stored image (and the coordinate space every earlier
+        # stage recorded against it) untouched.
         image_data, sent_width, sent_height = self._prepare_image_for_api(image_path)
 
         # Determine media type (always PNG after in-memory encode)

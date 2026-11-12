@@ -3,12 +3,8 @@ extended along both ends of its long axis (default) or only toward the nearer
 page edge."""
 
 import dataclasses
-import sys
-from pathlib import Path
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from preprocessing_annotations.config import PipelineConfig
 from preprocessing_annotations.ingestion.ocr_extractor import (

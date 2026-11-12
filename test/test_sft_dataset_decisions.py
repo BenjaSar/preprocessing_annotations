@@ -3,12 +3,8 @@ grid the dataset exporter will share with inference (TileSplitter.for_page)
 is the grid the pipeline has always used."""
 
 import hashlib
-import sys
-from pathlib import Path
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from preprocessing_annotations.automation.annotation_schema import LABEL_BOX
 from preprocessing_annotations.config import (

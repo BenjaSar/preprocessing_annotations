@@ -10,7 +10,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Tuple, Optional
 from PIL import Image
-import io
 import logging
 import math
 
@@ -41,91 +40,6 @@ except ImportError:
     from annotation_schema import box_convention_of
     from detection.window_evidence import is_window_shaped
     from config import WindowEvidenceConfig, RoomFilterConfig
-
-
-class ImageResizer:
-    """Resize images to fit Claude API 5MB limit."""
-
-    @staticmethod
-    def resize_for_vlm(image_path: str | Path, max_kb: int = 3500, max_dimension: int = 4500) -> Image.Image:
-        """
-        Resize image to fit Claude API constraints (5MB file size AND 8000px dimension limit).
-        Targets 3.5MB to account for base64 expansion (3.5MB * 1.33 ≈ 4.7MB post-encoding).
-
-        Args:
-            image_path: Path to image file
-            max_kb: Maximum file size in KB (default: 3500 = safe margin under 5MB post-encoding)
-            max_dimension: Maximum image dimension (default: 4500px for aggressive reduction)
-
-        Returns:
-            Resized PIL Image object
-        """
-        img = Image.open(image_path)
-        original_size = (img.width, img.height)
-        current_max = max(original_size)
-
-        # Phase 1: Dimension reduction
-        while current_max > max_dimension:
-            scale_factor = max_dimension / current_max
-            new_width = int(img.width * scale_factor)
-            new_height = int(img.height * scale_factor)
-            img = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
-            current_max = max(img.width, img.height)
-            logger.debug(f"  Dimension reduction: {img.width}x{img.height}px")
-
-        # Phase 2: File size reduction (iterative)
-        iteration = 0
-        while current_max > 400 and iteration < 10:
-            buffer = io.BytesIO()
-            img.save(buffer, format="PNG", optimize=True)
-            kb = len(buffer.getvalue()) / 1024
-
-            if kb <= max_kb:
-                logger.debug(f"  Final size: {img.width}x{img.height}px = {kb:.1f}KB (base64: {kb*1.33:.1f}KB) ✓")
-                return img
-
-            # Reduce dimensions by 10% per iteration
-            current_max = int(current_max * 0.9)
-            scale_factor = current_max / max(img.width, img.height)
-            img = img.resize(
-                (int(img.width * scale_factor), int(img.height * scale_factor)),
-                Image.Resampling.LANCZOS
-            )
-            iteration += 1
-            logger.debug(f"  Iteration {iteration}: {img.width}x{img.height}px = {kb:.1f}KB (target: {max_kb}KB)")
-
-        logger.warning(f"  Could not compress below {max_kb}KB (final: {kb:.1f}KB)")
-        return img
-
-    @staticmethod
-    def resize_in_place(image_path: str | Path, max_kb: int = 3500) -> None:
-        """Resize image to fit API size constraints, writing atomically via a temp file.
-
-        Uses a temp file + rename so the original is never partially overwritten,
-        and the source image is not destroyed if a PermissionError or OOM occurs.
-        """
-        import tempfile
-        import os
-        image_path = Path(image_path)
-        resized = ImageResizer.resize_for_vlm(image_path, max_kb)
-
-        # Write to a temp file in the same directory, then rename atomically.
-        # Same-directory placement ensures the rename is on the same filesystem
-        # (cross-device renames would fail with OSError on some platforms).
-        tmp_fd, tmp_path = tempfile.mkstemp(
-            suffix=".png", dir=image_path.parent, prefix=".resize_tmp_"
-        )
-        try:
-            os.close(tmp_fd)
-            resized.save(tmp_path, "PNG", optimize=True)
-            os.replace(tmp_path, image_path)
-            logger.info(f"Resized {image_path.name} to fit API constraints")
-        except Exception:
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
-            raise
 
 
 class SemanticRoomValidator:

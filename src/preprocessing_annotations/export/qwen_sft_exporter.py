@@ -19,6 +19,12 @@ D6  A room is a target only in tiles that contain its whole box. Every room
     fits whole in at least one tile, so nothing is lost, and a box clipped
     at a tile edge would teach a truncated target.
 
+Two things this export refuses to pass on silently: a room type that is only
+taxonomy's unplaceable-name default is re-read from the room's own label and
+dropped when nothing places it (SFTDatasetConfig.resolve_default_types_from_name),
+and every export writes a seeded, magnified sample of its own targets
+(export/sft_sample_audit.py) because these corpora have no room GT to score.
+
 Splits come from the run's own coco/{train,val,test}.json, so the group-aware
 assignment (export/group_split.py, GT documents pinned to test) is reused
 rather than reimplemented. Geometry comes from `roomsRecognized` (xyxy, what
@@ -39,8 +45,10 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from PIL import Image
 
+from ..automation.taxonomy import DEFAULT_MANDATORY_TYPE, resolve_mandatory
 from ..config.config import PipelineConfig, SFTDatasetConfig
-from ..export.group_split import SPLIT_NAMES
+from ..export.group_split import SPLIT_NAMES, document_key
+from ..export.sft_sample_audit import write_sample_audit
 from ..ingestion.tile_splitter import TileMeta, TileSplitter
 from ..vlm import prompt_templates
 
@@ -76,12 +84,16 @@ class ExportStats:
     empty_tiles_available: int = 0
     empty_tiles_kept: int = 0
     empty_tiles_in_exclusion_zone: int = 0
+    targets_dropped_by_document_cap: Counter = field(default_factory=Counter)
     per_split: Dict[str, int] = field(default_factory=dict)
 
     def as_dict(self) -> Dict[str, Any]:
         return {
             **self.__dict__,
             "rooms_skipped": dict(sorted(self.rooms_skipped.items())),
+            "targets_dropped_by_document_cap": dict(
+                sorted(self.targets_dropped_by_document_cap.items())
+            ),
             "per_split": dict(sorted(self.per_split.items())),
         }
 
@@ -135,7 +147,11 @@ def _to_tile(room: Room, tile: Box) -> Dict[str, Any]:
 
 
 def rooms_of(
-    annotation: Dict[str, Any], convention: str, min_name_ocr_confidence: float = 0.0
+    annotation: Dict[str, Any],
+    convention: str,
+    min_name_ocr_confidence: float = 0.0,
+    *,
+    resolve_default_from_name: bool = False,
 ) -> Tuple[List[Room], Counter]:
     """Rooms carrying the trained box convention, and why the rest were skipped.
 
@@ -143,6 +159,12 @@ def rooms_of(
     label was read below `min_name_ocr_confidence` is skipped too (D9): the
     target string is trained verbatim, so a misread name teaches a misreading.
     The default keeps every room, which is the behaviour measured so far.
+
+    With `resolve_default_from_name` (SFTDatasetConfig.
+    resolve_default_types_from_name) a room whose stored type is the
+    taxonomy's unplaceable-name default is re-resolved from its own label and
+    dropped when that resolves to nothing, so the dataset never teaches a
+    guessed class. Every other stored type is kept as the run recorded it.
 
     Skips are counted by reason, not totalled: a dataset that silently shrank
     should say which rule shrank it.
@@ -165,9 +187,16 @@ def rooms_of(
         if not name:
             skipped["no_name"] += 1
             continue
+        room_type = (room.get("type") or "OTHER").strip()
+        if resolve_default_from_name and room_type == DEFAULT_MANDATORY_TYPE:
+            resolved = resolve_mandatory(name)
+            if resolved is None:
+                skipped["unresolved_type"] += 1
+                continue
+            room_type = resolved
         rooms.append(Room(
             name=name,
-            room_type=(room.get("type") or "OTHER").strip(),
+            room_type=room_type,
             box=tuple(float(v) for v in box),
             confidence=float(room.get("confidence", 0.0)),
         ))
@@ -193,7 +222,8 @@ def page_examples(
         return [], []
 
     rooms, skipped = rooms_of(
-        annotation, sft_config.box_convention, sft_config.min_name_ocr_confidence
+        annotation, sft_config.box_convention, sft_config.min_name_ocr_confidence,
+        resolve_default_from_name=sft_config.resolve_default_types_from_name,
     )
     stats.pages += 1
     stats.rooms += len(rooms)
@@ -314,6 +344,52 @@ def _capped_empty(
     return (in_zone + rest)[:budget]
 
 
+def _capped_by_document(
+    with_rooms: List[dict], sft_config: SFTDatasetConfig
+) -> Tuple[List[dict], Dict[str, int]]:
+    """Tiles kept after no document may exceed max_targets_per_document.
+
+    Whole tiles are dropped, never individual targets: the answer has to list
+    every room visible in the tile, so removing one target from a tile that
+    still shows its label trains a false negative. See the config field for
+    the measurement that rules the per-label alternative out.
+
+    Within an over-budget document, tiles are taken densest-first after a
+    seeded shuffle, so the cap keeps the most targets per tile (and per crop
+    written) while staying reproducible.
+    """
+    cap = sft_config.max_targets_per_document
+    if cap is None:
+        return with_rooms, {}
+
+    by_document: Dict[str, List[dict]] = {}
+    for example in with_rooms:
+        key = document_key(Path(example["metadata"]["source_page"]).name)
+        by_document.setdefault(key, []).append(example)
+
+    kept, dropped = [], {}
+    shuffler = random.Random(sft_config.document_cap_sample_seed)
+    for key, examples in sorted(by_document.items()):
+        total = sum(e["metadata"]["rooms"] for e in examples)
+        if total <= cap:
+            kept.extend(examples)
+            continue
+        shuffler.shuffle(examples)
+        examples.sort(key=lambda e: e["metadata"]["rooms"], reverse=True)
+        running, taken = 0, []
+        for example in examples:
+            if running + example["metadata"]["rooms"] > cap:
+                continue
+            taken.append(example)
+            running += example["metadata"]["rooms"]
+        kept.extend(taken)
+        dropped[key] = total - running
+        logger.info(
+            "document cap: %s contributed %d targets, kept %d", key, total, running
+        )
+    return kept, dropped
+
+
 def export(
     run_dir: Path,
     output_dir: Path,
@@ -327,6 +403,7 @@ def export(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     stats = ExportStats()
+    audited: List[Tuple[str, dict]] = []
     for split, file_names in _split_pages(run_dir).items():
         with_rooms, empty = [], []
         for file_name in sorted(file_names):
@@ -342,6 +419,13 @@ def export(
             with_rooms.extend(page_with_rooms)
             empty.extend(page_empty)
 
+        # Before the empty-tile cap, so the empty budget is computed against
+        # the tiles that actually survive (the two caps compose in one order
+        # only: emptiness is a share of what is kept).
+        with_rooms, dropped_by_cap = _capped_by_document(with_rooms, sft_config)
+        for key, count in dropped_by_cap.items():
+            stats.targets_dropped_by_document_cap[key] += count
+
         stats.empty_tiles_available += len(empty)
         kept_empty = _capped_empty(empty, len(with_rooms), sft_config)
         stats.empty_tiles_kept += len(kept_empty)
@@ -356,13 +440,18 @@ def export(
         # Crops only for the examples that survived the empty-tile cap.
         _write_crops(examples, output_dir)
         _write_jsonl(output_dir / f"{split}.jsonl", examples)
+        audited.extend((split, example) for example in with_rooms)
 
     report = {
         "run": str(run_dir),
         "box_convention": sft_config.box_convention,
         "max_empty_tile_fraction": sft_config.max_empty_tile_fraction,
+        "max_targets_per_document": sft_config.max_targets_per_document,
+        "resolve_default_types_from_name": sft_config.resolve_default_types_from_name,
         "prompt_version": prompt_templates.PROMPT_VERSIONS["build_room_prompt_sft_label"],
         **stats.as_dict(),
+        # Written last: the audit reads the tile crops the splits above wrote.
+        "sample_audit": write_sample_audit(audited, output_dir, sft_config),
     }
     (output_dir / "export_report.json").write_text(json.dumps(report, indent=2) + "\n")
     return report
@@ -381,7 +470,12 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Build the Qwen3-VL SFT dataset from a run")
     parser.add_argument("--run", type=Path, required=True, help="Run dir with coco/ and processed_annotations/")
     parser.add_argument("--out", type=Path, required=True, help="Directory for the JSONL splits")
+    parser.add_argument(
+        "--max-targets-per-document", type=int, default=None,
+        help="SFTDatasetConfig.max_targets_per_document (default: off)",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
-    print(json.dumps(export(args.run, args.out), indent=2))
+    sft_config = SFTDatasetConfig(max_targets_per_document=args.max_targets_per_document)
+    print(json.dumps(export(args.run, args.out, sft_config=sft_config), indent=2))

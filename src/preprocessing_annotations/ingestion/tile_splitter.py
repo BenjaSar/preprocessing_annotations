@@ -75,7 +75,19 @@ class TileSplitter:
         return cls(cols=cols, rows=rows, overlap_pct=config.tile_overlap_pct)
 
     def split(self, image: Image.Image) -> List[Tuple[Image.Image, TileMeta]]:
-        """Return (tile_img, TileMeta) list, left-to-right top-to-bottom."""
+        """Return (tile_img, TileMeta) list, left-to-right top-to-bottom.
+
+        Known, deliberately kept (2026-11-04): with more than 2 columns (rows)
+        the stride is base minus overlap, so the grid stops (cols-2)*overlap
+        short of the right (bottom) edge -- 5% of every tiled GT page, 8.1% on
+        Rockaway. OCR, YOLO, SAM3, VLM rooms and the SFT exporter all tile
+        here and none has a whole-page fallback, so nothing reads that strip.
+        It holds no GT room (0/1497) and is title block / scale bar / border
+        on every page sampled (4 GT, 23 corpus strips): an accidental
+        title-block mask. Closing the gap exposes text the room prompt
+        excludes and shifts every last-column/row crop, so audit the strip
+        and re-baseline before changing it.
+        """
         full_w, full_h = image.size
         base_w = full_w / self.cols
         base_h = full_h / self.rows

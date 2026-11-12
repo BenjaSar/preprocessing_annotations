@@ -9,7 +9,6 @@ from PIL import Image
 from shapely.geometry import box
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "eval"))
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from missed_room_ocr import (
     NO_TEXT,

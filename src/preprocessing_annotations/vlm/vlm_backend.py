@@ -1295,10 +1295,8 @@ class UnslothQwenBackend(VLMBackend):
              
              # Run inference with config-driven generation parameters
              logger.debug(f"Running Unsloth Qwen room detection on {Path(image_path).name}")
-             room_max_new_tokens = (
-                 self.config.room_max_new_tokens_thinking
-                 if self._is_thinking_variant()
-                 else self.config.room_max_new_tokens
+             room_max_new_tokens = self.config.room_token_budget(
+                 self._is_thinking_variant()
              )
              self._seed_generation()
              with torch.no_grad():

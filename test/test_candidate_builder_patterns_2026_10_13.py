@@ -2,12 +2,8 @@
 GT rooms (eval/missed_room_ocr.py) now becomes a room candidate, and the
 plural lounge form maps to the same class as the singular."""
 
-import sys
-from pathlib import Path
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from preprocessing_annotations.automation.taxonomy import normalize_to_mandatory
 from preprocessing_annotations.config import PipelineConfig

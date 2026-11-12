@@ -7,7 +7,9 @@ not necessarily done anything. The gate therefore compares the candidate
 against the SPREAD of several baseline runs that differ only in VLM_SEED.
 
 D8, as agreed 2026-10-27:
-  - label recall above the baseline spread (strictly above the best baseline)
+  - label recall above the baseline spread (strictly above the best baseline,
+    plus --noise-floor; one baseline has no spread of its own, so supply the
+    floor there or the check passes on any positive delta)
   - label precision no more than `tolerance` below the baseline median
   - category accuracy no more than `tolerance` below the baseline median
   - no document loses recall against the worst baseline for that document
@@ -15,9 +17,14 @@ D8, as agreed 2026-10-27:
 Reads reports written by eval/room_gt_eval.py; it does not re-score. Run that
 first for every baseline and for the candidate.
 
+Both sides take several runs. Repeat --candidate to pass seeds of one
+candidate: the band is then judged on its worst member, not its luckiest.
+
 Usage:
     python eval/sft_gate.py --baseline a.json --baseline b.json \\
         --candidate adapter.json
+    python eval/sft_gate.py --baseline a.json --baseline b.json \\
+        --candidate adapter_s1.json --candidate adapter_s2.json
 """
 
 import argparse
@@ -89,11 +96,41 @@ def _spread(values: Sequence[float]) -> Dict[str, float]:
     }
 
 
+def _as_band(candidate: Any) -> List[Dict[str, Any]]:
+    """One report, or several runs of the same candidate. Callers pass either."""
+    return [candidate] if isinstance(candidate, dict) else list(candidate)
+
+
 def apply_gate(
-    baselines: Sequence[Dict[str, Any]], candidate: Dict[str, Any], tolerance: float,
-    min_rooms_lost: int = 2,
+    baselines: Sequence[Dict[str, Any]], candidate: Any, tolerance: float,
+    min_rooms_lost: int = 2, noise_floor: float = 0.0,
 ) -> Dict[str, Any]:
     """Score the candidate against the baseline spread. Pure; returns the verdict.
+
+    candidate: one report, or SEVERAL runs of the same candidate differing only
+    by seed. A band is judged on its WORST member, metric by metric -- lowest
+    recall, lowest precision, lowest category accuracy, and a document counts
+    as lost if ANY member loses it. Measured 2026-11-10: sft_cap200_v1 scored
+    .6132 / .6025 / .6086 over three seeds against adapter_real_v1's
+    .6112 / .6072 / .6106, and a gate handed only the .6132 run passed. That
+    is the same error on the candidate side that one baseline is on the other
+    -- a verdict decided by which seed was luckiest. Judged as a band it
+    fails, because .6025 does not clear .6112. Taking the worst per metric
+    rather than ranking runs avoids choosing which metric defines "worst": a
+    run can hold the lowest recall and the highest precision at once.
+    One report reproduces the old behaviour exactly -- the worst of one is it.
+
+    noise_floor: how far above the best baseline the candidate's recall must
+    land. The gate's whole premise is that a win smaller than run-to-run noise
+    is not a win, and it reads that noise off the baseline spread -- but ONE
+    baseline has a spread of zero, so `> max` then passes on any positive
+    delta, however small. Measured case 2026-11-07: sft_cap200_v1 beat
+    adapter_real_v1 by .0020 in a one-baseline gate and passed, while the
+    five-seed spread measured that same week was .0140 -- the "win" was a
+    seventh of the noise. Pass the spread measured elsewhere as the floor when
+    comparing against a single run. Default 0.0 keeps the published behaviour;
+    `spread_measurable` in the verdict says whether the baselines could supply
+    a floor on their own.
 
     min_rooms_lost: a document counts as regressed only when it falls below
     every baseline AND loses at least this many GT rooms. Measured on the
@@ -109,14 +146,22 @@ def apply_gate(
     """
     if not baselines:
         raise ValueError("the gate needs at least one baseline report")
+    band = _as_band(candidate)
+    if not band:
+        raise ValueError("the gate needs at least one candidate report")
 
     recalls = _spread([_overall(b, RECALL) for b in baselines])
     precisions = _spread([_overall(b, PRECISION) for b in baselines])
     categories = _spread([_category_accuracy(b) for b in baselines])
 
-    candidate_recall = _overall(candidate, RECALL)
-    candidate_precision = _overall(candidate, PRECISION)
-    candidate_category = _category_accuracy(candidate)
+    # The band's worst showing on each metric: a candidate that only sometimes
+    # clears the bar has not cleared it.
+    candidate_recalls = _spread([_overall(c, RECALL) for c in band])
+    candidate_precisions = _spread([_overall(c, PRECISION) for c in band])
+    candidate_categories = _spread([_category_accuracy(c) for c in band])
+    candidate_recall = candidate_recalls["min"]
+    candidate_precision = candidate_precisions["min"]
+    candidate_category = candidate_categories["min"]
 
     # Worst baseline per document: a document only "loses" if the candidate
     # falls below every baseline run, not merely below the luckiest one.
@@ -133,8 +178,25 @@ def apply_gate(
             worst_located_per_document[document] = (
                 None if previous is None or located is None else min(previous, located)
             )
-    candidate_per_document = _document_recall(candidate)
-    candidate_located = _document_located(candidate)
+    # Mirror of the baseline side: the band's WORST showing per document, so a
+    # document lost by any member is lost, not averaged away by its luckier
+    # seeds. A document missing from any member is missing.
+    candidate_per_document: Dict[str, float] = {}
+    candidate_located: Dict[str, Optional[int]] = {}
+    for member in band:
+        for document, recall in _document_recall(member).items():
+            candidate_per_document[document] = min(
+                candidate_per_document.get(document, recall), recall
+            )
+        for document, located in _document_located(member).items():
+            previous = candidate_located.get(document, located)
+            candidate_located[document] = (
+                None if previous is None or located is None else min(previous, located)
+            )
+    documents_in_every_member = set.intersection(
+        *({*_document_recall(member)} for member in band)
+    )
+
     regressed = {}
     for document, worst in worst_per_document.items():
         if document not in candidate_per_document:
@@ -155,34 +217,61 @@ def apply_gate(
             "worst_baseline": round(worst, 4),
             "rooms_lost": rooms_lost,
         }
-    missing_documents = sorted(set(worst_per_document) - set(candidate_per_document))
+    missing_documents = sorted(set(worst_per_document) - documents_in_every_member)
+
+    # Comparability: every run in a verdict should come from the same pipeline
+    # code. Measured 2026-10-29/30 -- baselines, control and adapter ran hours
+    # apart while other work edited the pipeline, and nothing flagged it. An
+    # "unknown" fingerprint (runs predating the field) cannot be checked, so it
+    # is reported but does not by itself fail the check.
+    fingerprints = {
+        report.get("run_code_fingerprint", "unknown")
+        for report in list(baselines) + band
+    }
+    known = {f for f in fingerprints if f != "unknown"}
 
     checks = {
-        "recall_above_baseline_spread": candidate_recall > recalls["max"],
+        "recall_above_baseline_spread": candidate_recall > recalls["max"] + noise_floor,
         "precision_within_tolerance": candidate_precision >= precisions["median"] - tolerance,
         "category_within_tolerance": candidate_category >= categories["median"] - tolerance,
         "no_document_lost_recall": not regressed and not missing_documents,
+        "one_pipeline_version": len(known) <= 1,
     }
     return {
         "tolerance": tolerance,
         "min_rooms_lost": min_rooms_lost,
         "baselines": len(baselines),
+        "noise_floor": noise_floor,
+        # A single baseline cannot measure its own run-to-run noise, so a
+        # verdict built on one says so rather than reporting range 0 as if
+        # that meant the candidate cleared something.
+        "spread_measurable": len(baselines) >= 2,
+        "recall_margin_over_best_baseline": round(candidate_recall - recalls["max"], 4),
         "baseline_spread": {
             "label_recall": recalls,
             "label_precision": precisions,
             "category_accuracy": categories,
         },
+        "candidates": len(band),
+        # The worst member per metric -- what every check above was applied to.
         "candidate": {
             "label_recall": candidate_recall,
             "label_precision": candidate_precision,
             "category_accuracy": candidate_category,
-            "run_dir": candidate.get("run_dir"),
+            "run_dir": band[0].get("run_dir") if len(band) == 1
+                       else [member.get("run_dir") for member in band],
+        },
+        "candidate_spread": {
+            "label_recall": candidate_recalls,
+            "label_precision": candidate_precisions,
+            "category_accuracy": candidate_categories,
         },
         "deltas_vs_baseline_median": {
             "label_recall": round(candidate_recall - recalls["median"], 4),
             "label_precision": round(candidate_precision - precisions["median"], 4),
             "category_accuracy": round(candidate_category - categories["median"], 4),
         },
+        "code_fingerprints": sorted(fingerprints),
         "documents_losing_recall": regressed,
         "documents_missing_from_candidate": missing_documents,
         "checks": checks,
@@ -206,8 +295,12 @@ def gate_metrics(verdict: Dict[str, Any]) -> Dict[str, float]:
     )
     for name, spread in verdict["baseline_spread"].items():
         metrics.update({f"baseline_{name}_{stat}": value for stat, value in spread.items()})
+    for name, spread in verdict["candidate_spread"].items():
+        metrics.update({f"candidate_{name}_{stat}": value for stat, value in spread.items()})
     metrics.update({f"check_{name}": float(ok) for name, ok in verdict["checks"].items()})
     metrics["passed"] = float(verdict["passed"])
+    metrics["spread_measurable"] = float(verdict["spread_measurable"])
+    metrics["recall_margin_over_best_baseline"] = verdict["recall_margin_over_best_baseline"]
     metrics["documents_losing_recall"] = float(len(verdict["documents_losing_recall"]))
     metrics["documents_missing_from_candidate"] = float(
         len(verdict["documents_missing_from_candidate"])
@@ -223,6 +316,8 @@ def log_verdict(verdict: Dict[str, Any], config: Any, report_path: Optional[Path
             "tolerance": verdict["tolerance"],
             "min_rooms_lost": verdict["min_rooms_lost"],
             "baselines": verdict["baselines"],
+            "candidates": verdict["candidates"],
+            "noise_floor": verdict["noise_floor"],
             "candidate_run_dir": verdict["candidate"]["run_dir"],
         })
         log_metrics(MLFLOW_STAGE, gate_metrics(verdict))
@@ -250,9 +345,14 @@ def scored_report(report: Dict[str, Any], section: str) -> Dict[str, Any]:
             f"report has neither top-level scores nor a {section!r} section; "
             f"has {sorted(report)[:6]}"
         )
-    # run_dir lives at the replay report's top level, but the verdict and the
-    # MLflow params identify the candidate by it, so carry it into the section.
-    return {"run_dir": report.get("run_dir"), **report[section]}, section
+    # run_dir and the producing code's fingerprint live at the replay report's
+    # top level; the verdict identifies the candidate by one and checks
+    # comparability by the other, so carry both into the section.
+    return {
+        "run_dir": report.get("run_dir"),
+        "run_code_fingerprint": report.get("run_code_fingerprint", "unknown"),
+        **report[section],
+    }, section
 
 
 def load_reports(paths: Sequence[Path], section: str) -> List[Dict[str, Any]]:
@@ -277,8 +377,11 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Apply the D8 gate to a fine-tuned run")
     parser.add_argument("--baseline", type=Path, action="append", required=True,
                         dest="baselines", help="room_gt_eval report for a baseline run; repeat")
-    parser.add_argument("--candidate", type=Path, required=True,
-                        help="room_gt_eval report for the adapter run")
+    parser.add_argument("--candidate", type=Path, action="append", required=True,
+                        dest="candidates",
+                        help="room_gt_eval report for the adapter run; repeat to pass "
+                             "several seeds of the SAME candidate, which are then judged "
+                             "on their worst member rather than on whichever ran best")
     parser.add_argument("--tolerance", type=float, default=0.01,
                         help="Allowed drop in precision and category accuracy (default 0.01)")
     parser.add_argument("--min-rooms-lost", type=int, default=2,
@@ -286,6 +389,12 @@ if __name__ == "__main__":
                              "baseline AND loses at least this many GT rooms "
                              "(default 2; 1-room swings occur between baseline "
                              "seeds, so 1 would flag noise). 1 = the old strict rule.")
+    parser.add_argument("--noise-floor", type=float, default=0.0,
+                        help="How far above the best baseline the candidate's recall "
+                             "must land (default 0.0). One baseline has a spread of "
+                             "zero, so the recall check then passes on any positive "
+                             "delta; pass the seed spread measured elsewhere as the "
+                             "floor to compare a candidate against a single run.")
     parser.add_argument("--replay-section", default="baseline",
                         help="Which section of an eval/room_replay.py report to score "
                              "(default: baseline, i.e. replayed under current code). "
@@ -296,8 +405,10 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
-    reports = load_reports(list(args.baselines) + [args.candidate], args.replay_section)
-    verdict = apply_gate(reports[:-1], reports[-1], args.tolerance, args.min_rooms_lost)
+    reports = load_reports(list(args.baselines) + list(args.candidates), args.replay_section)
+    split = len(args.baselines)
+    verdict = apply_gate(reports[:split], reports[split:], args.tolerance,
+                         args.min_rooms_lost, args.noise_floor)
     verdict["replay_section"] = args.replay_section
     emit_report(verdict, args.out)
     log_verdict(verdict, mlflow_config_from_args(args), args.out)

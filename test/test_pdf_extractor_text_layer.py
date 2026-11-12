@@ -10,12 +10,9 @@ this machine (matches the skip pattern used by other real-fixture
 tests in this suite, e.g. test_sam3_exemplar_integration.py).
 """
 
-import sys
 from pathlib import Path
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from preprocessing_annotations.ingestion.pdf_extractor import PDFExtractor
 

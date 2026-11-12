@@ -566,10 +566,32 @@ class VLMConfig:
     do_sample: bool = field(default_factory=_get_vlm_do_sample)
 
     # Token budgets per task type for local VLM backends.
-    # Room budget is tight (768 tokens = ~25 rooms at 30 tokens/room)
-    # to truncate autoregressive hallucination loops early.
-    # Doors/windows need more because instances are numerous.
+    # Room budget is tight to truncate autoregressive hallucination loops
+    # early. Doors/windows need more because instances are numerous.
+    #
+    # G-EVAL-3 (2026-11-03): this is a FLOOR, not the budget actually used.
+    # room_token_budget() raises it to whatever max_rooms costs, because the
+    # two were inconsistent: the budget was sized on an estimate of 30
+    # tokens/room, and a real answer from the shipped dataset measures 51
+    # (median over 245 answers, Qwen3-VL tokenizer; mean 51.1, max 59). At
+    # 1024 the model could emit ~20 rooms while the prompt asked for up to
+    # max_rooms=25, so the ask and the budget disagreed by 5 rooms and
+    # nothing reconciled them.
+    #
+    # Truncation itself is graceful -- _parse_room_response salvages every
+    # complete object from an unterminated array (verified 2026-11-03 at 5,
+    # 10, 15, 20 and 21 rooms, all fully recovered) -- so a tight budget
+    # silently caps dense tiles rather than failing loudly. On the GT pages
+    # 15 of 401 tiles hold more than max_rooms rooms, 172 GT rooms (11.5%)
+    # sit beyond that cap, and 6 of Rockaway's 12 tiles are over it, one
+    # holding 66.
     room_max_new_tokens: int = 1024
+
+    # Measured cost of one room record in the trained answer format
+    # ({"room_name","room_type","bbox","confidence"}). Named so the budget
+    # and max_rooms cannot drift apart again: re-measure this if the answer
+    # schema changes, and room_token_budget() follows.
+    room_tokens_per_room: int = 51
     door_max_new_tokens: int = 4096
     window_max_new_tokens: int = 4096
 
@@ -601,6 +623,21 @@ class VLMConfig:
     def __post_init__(self):
         if self.qwen_device is None:
             self.qwen_device = _detect_device()
+
+    def room_token_budget(self, is_thinking: bool = False) -> int:
+        """Generation budget for room detection: enough to emit max_rooms.
+
+        One place decides it, so the prompt's "Maximum N rooms" and the
+        budget that has to carry N rooms cannot drift apart (G-EVAL-3: they
+        had, by 5 rooms). room_max_new_tokens stays a floor, so lowering
+        max_rooms never shrinks the budget below its tested value.
+
+        Thinking checkpoints keep their own budget untouched: theirs is
+        sized for a reasoning preamble, not for the answer.
+        """
+        if is_thinking:
+            return self.room_max_new_tokens_thinking
+        return max(self.room_max_new_tokens, self.max_rooms * self.room_tokens_per_room)
 
     @property
     def active_model(self) -> str:
@@ -860,6 +897,29 @@ class SFTDatasetConfig:
     max_empty_tile_fraction: float = 119 / 400
     empty_tile_sample_seed: int = 42
 
+    # G-TGT-2: cap how many targets any ONE source document may contribute to
+    # a split. Measured 2026-11-03 on the five assembled datasets: of 2816
+    # train targets, "CL" is 577 (20.5%), and a single document -- CCC PHASE
+    # 1A 12096 FLATLANDS AVE BKLYN -- holds 573 of those 577 and 952 targets
+    # in all, 34% of the split, 60% of them closets. The skew is one
+    # residential document, not a property of the corpus.
+    #
+    # The cap is per DOCUMENT, not per label, because a per-label cap cannot
+    # be applied safely here. An answer must list every room visible in its
+    # tile, and 555 of the 577 CL targets share a tile with BR1/BR2/BR/BATH:
+    # deleting those targets would train the model to miss a label that is
+    # plainly in the crop. Dropping whole tiles instead keeps every retained
+    # answer complete. Capping by label that way was measured too and does
+    # nothing -- only 22 CL targets sit in CL-only tiles, so it moves CL from
+    # 20.5% to 19.9%.
+    #
+    # Whole tiles are dropped, seeded, from the documents that exceed the cap,
+    # fewest-targets-first so the tiles that survive are the dense ones. None
+    # disables the cap, which is the behaviour of every dataset exported
+    # before this field existed.
+    max_targets_per_document: Optional[int] = None
+    document_cap_sample_seed: int = 42
+
     # D9: drop a room from the SFT targets when PaddleOCR's own text
     # confidence for its label (confidence_detail.ocr) is below this. The SFT
     # prompt asks for "exact label text as printed", so a misread string is
@@ -873,6 +933,42 @@ class SFTDatasetConfig:
     # confidences are PaddleOCR's self-reported ones, not accuracy -- there
     # is no ground truth for label strings in this project.
     min_name_ocr_confidence: float = 0.0
+
+    # The room type stored by a run is taxonomy.normalize_to_mandatory's
+    # answer, which never says "I could not place this name": an unplaceable
+    # label becomes taxonomy.DEFAULT_MANDATORY_TYPE. Training on that teaches
+    # the model to call unknown rooms storage.
+    #
+    # With this on, a room whose stored type IS that default is re-resolved
+    # from its own label through taxonomy.resolve_mandatory: a real match
+    # replaces the stored type, and no match drops the room (counted as
+    # unresolved_type). Any other stored type is kept untouched, so a type
+    # that came from somewhere other than the label -- a VLM category, or
+    # taxonomy.resolve_context_dependent_types' LAB -> CLINIC -- is never
+    # second-guessed from the label here.
+    #
+    # Measured by re-exporting corpus_batch2_v2 with it on (2026-10-29),
+    # against the 631-target export of 2026-10-27: 26 targets change class
+    # (EXAM RM 9, DRAW 8, TRIAGE 5, NURSE STATION 3, PROCEDURE 1, all
+    # STORAGE ROOM -> CLINIC now that the clinic entries exist), 3 are
+    # dropped ("Suite 200"), 0 are added, 628 remain. The 15 "STOR" labels
+    # keep STORAGE ROOM: that abbreviation was added to the taxonomy's own
+    # variant list in the same change, since it was reaching the class
+    # through the fallback this flag refuses to trust.
+    resolve_default_types_from_name: bool = True
+
+    # Per-export sample audit: the training corpora have no room GT, so the
+    # only check on a target's label and box is looking at it. The exporter
+    # writes a seeded sample of targets as crops, magnified at least
+    # audit_min_scale, and lists them in export_report.json, so every dataset
+    # ships with a reviewable sample instead of an unexamined one.
+    #
+    # audit_context_frac expands each box by that fraction of its longest
+    # edge before cropping, so the room's surroundings scale with the room.
+    audit_sample_size: int = 24
+    audit_sample_seed: int = 20261029
+    audit_min_scale: float = 2.0
+    audit_context_frac: float = 1.0
 
 
 @dataclass
@@ -2144,6 +2240,14 @@ class RoomFilterConfig:
     # Slack (px) when matching an OCR candidate's box to a VLM room's box:
     # two_pass_ocr_extractor truncates the VLM box to int when it builds the
     # candidate.
+    #
+    # Revisited 2026-10-29 before giving Pass 2 the pipeline's tiling: on
+    # sprint1_verify55, 105 of its 1331 Pass-2 candidates (7.9%) match a VLM
+    # room's box within this tolerance. So the echo skip is not what empties
+    # Pass 2 -- the other 92% are independently placed boxes -- and tiled
+    # Pass-2 candidates, drawn from a separate sampled inference, will mostly
+    # not be exact echoes either. Left as is; no measurement supports widening
+    # the tolerance, and widening it would drop OCR candidates on live runs.
     vlm_echo_bbox_tolerance_px: int = 1
 
 
@@ -2267,6 +2371,20 @@ class PipelineConfig:
     #   gained, 12 are "UNIT TYPE - x" labels inside real apartments and 3
     #   more are real rooms; 2 are questionable (a grid bubble, a box next to
     #   "RESIDENTIAL STORAGE").
+    #
+    # 2026-10-29, measured on sprint1_verify55's own annotations (the run that
+    # had Pass 2 on; <scratch>/pass2_space_probe.py): of the 712 Pass-2
+    # candidates whose name also appears as an OCR token on the page, exactly
+    # 1 has that token inside its box, against 1773 of 1773 for Pass-1
+    # candidates. Their boxes sit in the top-left of the sheet (median
+    # extent 0.25 x 0.28 of the page) but no single factor rescues them:
+    # scaling every box by the best uniform factor (3.0) lands 73 of 712.
+    # So this is NOT a fixable coordinate-space mapping -- the full-page VLM
+    # call simply does not ground small labels, and the pipeline's own room
+    # detection avoids it by tiling (tile_trigger_px). Enabling this flag
+    # needs Pass 2 to detect on the same tiles the pipeline uses, not a
+    # transform applied to what it returns today.
+    #
     # True restores Pass 2 (--ocr-vlm-fallback). Either way OCR device
     # selection is unchanged: it depends on the VLM backend being present.
     use_ocr_vlm_fallback: bool = False

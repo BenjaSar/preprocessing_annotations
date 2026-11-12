@@ -32,6 +32,7 @@ from .room_extent_step import RoomExtentStep
 from ..vlm.vlm_annotator import VLMAnnotator
 from ..vlm.semantic_reconciler import SemanticReconciler
 from ..vlm.vlm_backend import VLMFactory, UnslothQwenBackend
+from ..vlm.tiled_rooms import detect_rooms_in_tiles, splitter_for_image
 from ..vlm.classify import PageClassifier, UnslothPageClassifier
 from ..vlm import prompt_templates
 from ..detection.sam_segmenter import RoomSegmenter
@@ -42,7 +43,7 @@ from ..export.group_split import GroupMap
 from ..export.object_exporter import ObjectDetectionCOCOExporter
 from ..automation import (
     LabelNormalizer, QualityChecker, RegionExtractor,
-    ImageResizer, SemanticRoomValidator, TaxonomyNormalizer,
+    SemanticRoomValidator, TaxonomyNormalizer,
     filter_by_confidence, validate_for_sft, prepare_sft_annotation,
     SFTAnnotationBuilder, build_annotation_json, ConfidenceComputer
 )
@@ -51,6 +52,7 @@ from ..automation.sft_validator import (
     dropped_page_record,
     has_room_name_candidate,
 )
+from .code_fingerprint import source_fingerprint
 from ..automation.taxonomy import (
     get_extended_type,
     normalize_to_mandatory,
@@ -300,6 +302,7 @@ class AnnotationPipeline:
                 vlm_backend=vlm_backend,
                 confidence_threshold=0.92,  # PaddleOCR routinely returns >0.97; trigger VLM fallback only for genuinely uncertain tokens
                 vlm_fallback_enabled=self.config.use_ocr_vlm_fallback,
+                tiling_config=self.config,
             )
         return self._ocr_extractor
 
@@ -844,25 +847,21 @@ class AnnotationPipeline:
 
                 _t0_vlm = time.time()
                 try:
-                    # Step 3a: Pre-resize image on disk to reduce I/O for the
-                    # VLM annotator.  This is best-effort: if it fails (e.g.
-                    # read-only source file, OOM), vlm_annotator.annotate()
-                    # enforces its own in-memory dimension limit and will still
-                    # produce a valid result.  Log the failure so it is visible
-                    # in the pipeline log, but do not abort the annotation step.
-                    try:
-                        ImageResizer.resize_in_place(img_path, max_kb=4500)
-                    except PermissionError:
-                        logger.info(
-                            f"  {img_path.name}: pre-resize skipped "
-                            f"(read-only file — annotator will resize in memory)"
-                        )
-                    except Exception as resize_error:
-                        logger.warning(
-                            f"  {img_path.name}: pre-resize failed "
-                            f"({type(resize_error).__name__}: {resize_error}) "
-                            f"— annotator will resize in memory"
-                        )
+                    # The page image is NOT resized on disk here. It used to be
+                    # (ImageResizer.resize_in_place, "to reduce I/O"), and that
+                    # silently corrupted coordinates: STEP 2 had already read
+                    # the page at its rendered size, so every OCR-derived room
+                    # on a page the shrink actually touched stayed in the old
+                    # space while the stored image and its recorded image_size
+                    # moved. Measured 2026-10-29 on corpus_batch2_v2: 2 of 100
+                    # pages stored smaller than rendered (Project Rimrock flat
+                    # p000 1.524x, p001 1.111x), 49 of 628 SFT targets, their
+                    # boxes landing on blank wall and notes text. Both VLM
+                    # paths resize in memory and map boxes back themselves
+                    # (vlm_annotator._prepare_image_for_api, "the single
+                    # authoritative resize step"; UnslothQwenBackend.
+                    # detect_rooms' resize_scale), so nothing needed the
+                    # on-disk copy to be small.
 
                     # Get VLM result (handles both Claude and Qwen backends)
                     result = self._get_vlm_result(
@@ -1870,59 +1869,12 @@ class AnnotationPipeline:
         Hallucination detection and the 25-room cap run AFTER tile merge (global),
         not per-tile, so the limits apply to the full-image result.
         """
-        if not self.config.use_tiling:
+        tiling = splitter_for_image(img_path, self.config)
+        if tiling is None:
             return vlm.detect_rooms(img_path)
 
-        from PIL import Image as _PIL
-        try:
-            full_img = _PIL.open(img_path).convert("RGB")
-        except Exception as e:
-            logger.warning(f"Tiling: could not open {img_path.name}: {e}. Falling back.")
-            return vlm.detect_rooms(img_path)
-
-        full_w, full_h = full_img.size
-        try:
-            from ..ingestion.tile_splitter import TileSplitter
-        except ImportError:
-            logger.warning("tile_splitter not importable — falling back to full-image")
-            return vlm.detect_rooms(img_path)
-
-        splitter = TileSplitter.for_page(full_w, full_h, self.config)
-        if splitter is None:
-            logger.debug(
-                f"Tiling skipped: {full_w}x{full_h} <= trigger {self.config.tile_trigger_px}px"
-            )
-            return vlm.detect_rooms(img_path)
-
-        tiles = splitter.split(full_img)
-        logger.info(
-            f"{img_path.name}: tiling {full_w}x{full_h} -> "
-            f"{len(tiles)} tiles ({splitter.cols}x{splitter.rows}, "
-            f"overlap={self.config.tile_overlap_pct:.0%})"
-        )
-
-        all_rooms: List[dict] = []
-        for tile_img, meta in tiles:
-            try:
-                tile_rooms = vlm.detect_rooms_from_image(tile_img)
-                tile_rooms = splitter.rescale_rooms(tile_rooms, meta)
-                logger.debug(
-                    f"  Tile ({meta.col},{meta.row}): {len(tile_rooms)} rooms detected"
-                )
-                all_rooms.extend(tile_rooms)
-            except Exception as e:
-                logger.warning(f"  Tile ({meta.col},{meta.row}) failed: {e} — skipping")
-
-        # Global hallucination check + NMS merge AFTER all tiles collected.
-        # Cap 40 (not 25): dense residential floors carry 30+ units; a 25 cap
-        # would discard real rooms that finer adaptive tiling just recovered.
-        all_rooms = vlm.detect_hallucinations(all_rooms)
-        merged = splitter.merge(all_rooms, iou_threshold=0.30, max_rooms=40)
-        logger.info(
-            f"{img_path.name}: tiling complete — {len(all_rooms)} raw -> "
-            f"{len(merged)} after NMS"
-        )
-        return merged
+        full_img, splitter = tiling
+        return detect_rooms_in_tiles(vlm, full_img, splitter, img_path.name)
 
     def _qwen_dicts_to_vlm_result(self, rooms_dicts: List[dict], img_path: Path):
         """Convert Qwen backend dict output to VLMAnnotationResult."""
@@ -2718,6 +2670,10 @@ class AnnotationPipeline:
         pipeline_config.json (_save_config) and the run manifest (Q1) --
         one place to list config fields, not two drifting copies."""
         return {
+            # Which code produced this run. Two runs compared against each
+            # other must share it; see code_fingerprint.py for the incident
+            # that motivated recording it.
+            "code_fingerprint": source_fingerprint(),
             "pdf": {"dpi": self.config.pdf.dpi},
             "ocr": {
                 "backend": self.config.ocr.backend,
@@ -2750,6 +2706,12 @@ class AnnotationPipeline:
                 "top_k": self.config.vlm.top_k,
                 "presence_penalty": self.config.vlm.presence_penalty,
                 "repetition_penalty": self.config.vlm.repetition_penalty,
+                # The inputs of VLMConfig.room_token_budget(): runs before
+                # 2026-11-04 cannot say which budget they generated under,
+                # and that budget changed (1024 -> 1275) between them.
+                "room_max_new_tokens": self.config.vlm.room_max_new_tokens,
+                "room_tokens_per_room": self.config.vlm.room_tokens_per_room,
+                "max_rooms": self.config.vlm.max_rooms,
             },
             "sam": {
                 "model_type": self.config.sam.model_type,

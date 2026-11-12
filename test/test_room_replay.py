@@ -8,7 +8,6 @@ import pytest
 from shapely.geometry import box
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "eval"))
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from preprocessing_annotations.config import PipelineConfig, RoomFilterConfig, RoomGtEvalConfig
 from room_gt_eval import LocalizationScore

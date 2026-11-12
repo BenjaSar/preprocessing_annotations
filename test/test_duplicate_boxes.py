@@ -2,10 +2,6 @@
 around a label box of the same room type — keeps only the label box."""
 
 import dataclasses
-import sys
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from preprocessing_annotations.automation.duplicate_boxes import split_redundant_room_extents
 from preprocessing_annotations.config import PipelineConfig

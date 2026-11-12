@@ -4,10 +4,7 @@ persisted under `unattachedObjectDetections`; `objectDetections` is unchanged
 """
 
 import json
-import sys
 from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from preprocessing_annotations.config import AttachmentConfig, PipelineConfig
 from preprocessing_annotations.detection.attachment import AttachmentPolicyFactory

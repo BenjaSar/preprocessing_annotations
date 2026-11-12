@@ -6,7 +6,6 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "eval"))
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from held_out import leave_one_document_out
 from room_gt_eval import LocalizationScore

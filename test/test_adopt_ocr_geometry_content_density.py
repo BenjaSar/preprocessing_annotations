@@ -13,10 +13,6 @@ unrelated density. Measured 16/16 (100%) of vlm_ocr_merged rooms stale
 on a real 3-page run (max drift 0.2848) before this fix.
 """
 
-import sys
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from preprocessing_annotations.automation.sft_validator import _adopt_ocr_geometry
 

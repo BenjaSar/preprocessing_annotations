@@ -1,0 +1,59 @@
+{
+  "name": "rooms-sft-real-v1",
+  "_what": "One release of the room-annotation pipeline: which pipeline code, which fine-tuned adapter, and how that adapter must be asked. deploy/release.py reads this; nothing here is duplicated in code.",
+
+  "code_fingerprint": "92ac4c7a44d3",
+  "_code_fingerprint": "sha256 over src/**/*.py, 12 hex. The band below was measured on THIS code; the 2026-10-28 merge fix moved every baseline ~.025, so a band from other code says nothing about this one.",
+
+  "adapter": {
+    "path": "../trained_adapters/sft_real_v1",
+    "digests": {
+      "adapter_model.safetensors": "7301e6476ca6d24a87e09f6ec9e592651c8be3f28935151ad0f691940d121c82",
+      "adapter_config.json": "0cdcf82d66adb0aec14dee4da29aac0918a1413643bdf2fbf5dc1c55e17b9dd8"
+    },
+    "_path": "Relative to this file's parent's parent (the repo root), so a checkout elsewhere still resolves. Override with --adapter-root.",
+    "_digests": "The pipeline raises only when the adapter directory is MISSING. A present-but-wrong adapter loads happily and reports success, so the weights are pinned by content, not by path.",
+    "_nested_copy_warning": "trained_adapters/sft_real_v1/ contains a byte-identical nested copy at sft_real_v1/sft_real_v1/ and in checkpoint-948/. Point at the parent. All three share md5 46bf22fee037dcb157c4797cf8772b80."
+  },
+
+  "invocation": {
+    "flags": [
+      "--use-vlm",
+      "--vlm-backend", "unsloth",
+      "--unsloth-model", "qwen3-vl-8b",
+      "--unsloth-room-prompt", "sft_label",
+      "--use-yolo-objects",
+      "--use-sam3-exemplar",
+      "--export-object-detections"
+    ],
+    "env": {
+      "VLM_SEED": "1234",
+      "VLM_DO_SAMPLE": "true",
+      "VLM_TEMPERATURE": "1.0"
+    },
+    "_flags": "What the production chains actually pass, not what config defaults to -- those differ (use_sam3_exemplar defaults False but every real run enables it). --unsloth-adapter is appended by release.py from the resolved adapter path.",
+    "_prompt": "sft_label is NOT optional. The adapter was trained on it; asked with the default 'production' prompt it degrades silently -- no error, just worse output. This pairing is the single most important thing this manifest enforces.",
+    "_seed": "Seeded sampling here is deterministic end-to-end: a fresh 3h28m GPU re-run on 2026-11-12 reproduced the entire scored report bit-identically. Pinning the seed makes a release reproducible, not merely repeatable."
+  },
+
+  "expectations": {
+    "band_pin": "eval/pins/adapter_real_v1_band.json",
+    "_band_pin": "The recall band is NOT copied here. It lives in one file, read by the CPU regression test, the GPU pin chain and this release. A band in two places is a band that will disagree with itself.",
+    "config_must_match": [
+      "vlm.unsloth_room_prompt",
+      "vlm.backend",
+      "vlm.unsloth_model",
+      "vlm.seed",
+      "vlm.do_sample",
+      "vlm.temperature"
+    ],
+    "_config_must_match": "Checked post-run against the run's own pipeline_config.json. Preflight proves intent; this proves what actually ran. A flag silently dropped by a future CLI change is caught here and nowhere else."
+  },
+
+  "known_limits": {
+    "label_recall": "~0.611 on the 13-document GT set; the band file holds the exact interval.",
+    "room_extent": "NOT produced. gt_rooms_iou_matched is 0 and extent_f1 is 0.0 -- this release localizes room LABELS, not room spatial extents. Any consumer expecting polygons will get none.",
+    "export_surface": "Exporters read the legacy `rooms` structure, not `roomsRecognized`.",
+    "_why_here": "A deployable unit that does not state what it cannot do gets deployed against the wrong expectation."
+  }
+}

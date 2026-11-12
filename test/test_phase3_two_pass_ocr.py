@@ -13,18 +13,19 @@ Test Coverage:
 """
 
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from typing import List, Tuple
 from unittest.mock import Mock, patch, MagicMock
 
-import pytest
 
 # Add the package dir (parent of test/) so `preprocessing_annotations` resolves.
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from preprocessing_annotations.config import OCRConfig
+from preprocessing_annotations.config import OCRConfig, PipelineConfig
 from preprocessing_annotations.ingestion.ocr_extractor import RoomCandidate, TextDetection
+from preprocessing_annotations.ingestion.tile_splitter import TileSplitter
 from preprocessing_annotations.ingestion.two_pass_ocr_extractor import TwoPassOCRExtractor
 
 
@@ -113,18 +114,6 @@ class TestMergeRoomCandidates(unittest.TestCase):
             raw_text=name,
         )
     
-    @pytest.mark.xfail(
-        reason="Pre-existing, unrelated to SAM3 work: _merge_room_candidates "
-        "only checks pass2 rooms against pass1 rooms BELOW "
-        "confidence_threshold (two_pass_ocr_extractor.py, high-confidence "
-        "branch does `merged.append(p1_room); continue` with no pass2 "
-        "lookup at all) -- an overlapping high-confidence pass2 duplicate "
-        "is never deduped, so this test's premise does not match current "
-        "behavior. Found while repairing test collection (T1); not fixed "
-        "here -- production merge logic for a live component, out of "
-        "scope for the SAM3 exemplar work.",
-        strict=True,
-    )
     def test_merge_all_high_confidence_ocr(self):
         """Test merging when all OCR results are high-confidence."""
         pass1_rooms = [
@@ -174,13 +163,6 @@ class TestMergeRoomCandidates(unittest.TestCase):
         room_names = {r.room_name for r in merged}
         self.assertEqual(room_names, {"BR", "KITCHEN"})
     
-    @pytest.mark.xfail(
-        reason="Same root cause as test_merge_all_high_confidence_ocr above: "
-        "the high-confidence pass1 branch never checks pass2 for an "
-        "overlapping duplicate, so OFFICE_VLM at the same bbox as OFFICE "
-        "is treated as unmatched and added, giving 3 not 2.",
-        strict=True,
-    )
     def test_merge_adds_unmatched_vlm_results(self):
         """Test that unmatched VLM results are added to merged list."""
         pass1_rooms = [
@@ -223,6 +205,23 @@ class TestMergeRoomCandidates(unittest.TestCase):
             bbox_distance_threshold=500.0,  # Loose threshold
         )
         self.assertEqual(len(merged), 1)  # VLM replaces OCR
+
+    def test_one_vlm_room_is_claimed_by_one_ocr_room_only(self):
+        """Two OCR rooms near one VLM room must not both become that VLM room."""
+        pass1_rooms = [
+            self._create_room_candidate((100, 100, 50, 50), "BR", 0.5),
+            self._create_room_candidate((140, 100, 50, 50), "BA", 0.5),
+        ]
+        pass2_rooms = [
+            self._create_room_candidate((105, 105, 50, 50), "BEDROOM", 0.95),
+        ]
+
+        merged = self.extractor._merge_room_candidates(pass1_rooms, pass2_rooms)
+
+        room_names = [r.room_name for r in merged]
+        self.assertEqual(len(merged), 2)
+        self.assertEqual(room_names.count("BEDROOM"), 1)
+        self.assertIn("BA", room_names)
 
 
 class TestTwoPassOCRExtraction(unittest.TestCase):
@@ -422,6 +421,60 @@ class TestIntegrationWithPipeline(unittest.TestCase):
         # Should have extract_and_find_rooms_with_vlm_fallback method
         self.assertTrue(hasattr(extractor, "extract_and_find_rooms_with_vlm_fallback"))
         self.assertTrue(callable(getattr(extractor, "extract_and_find_rooms_with_vlm_fallback")))
+
+
+class TestPass2DetectionGeometry(unittest.TestCase):
+    """Pass 2 must see the page the way the pipeline's own detection does.
+
+    A whole-page call does not ground small labels (sprint1_verify55: 1 of 712
+    name-matched Pass-2 candidates held its own OCR token, against 1773 of 1773
+    for Pass 1), so with a tiling config Pass 2 detects over the same grid.
+    """
+
+    def setUp(self):
+        from PIL import Image
+
+        self.ocr_config = OCRConfig(backend="paddleocr", device="cpu")
+        self.tmp_dir = tempfile.TemporaryDirectory()
+        self.page = Path(self.tmp_dir.name) / "page.png"
+        config = PipelineConfig()
+        Image.new("RGB", (config.tile_trigger_px + 500, 3000), "white").save(self.page)
+        self.config = config
+
+    def tearDown(self):
+        self.tmp_dir.cleanup()
+
+    def _backend(self):
+        backend = Mock()
+        backend.detect_rooms.return_value = []
+        backend.detect_rooms_from_image.return_value = []
+        backend.detect_hallucinations.side_effect = lambda rooms, **kwargs: rooms
+        return backend
+
+    def test_without_a_tiling_config_the_page_is_detected_whole(self):
+        backend = self._backend()
+        extractor = TwoPassOCRExtractor(ocr_config=self.ocr_config, vlm_backend=backend)
+
+        extractor._detect_rooms(self.page)
+
+        backend.detect_rooms.assert_called_once_with(self.page)
+        backend.detect_rooms_from_image.assert_not_called()
+
+    def test_with_a_tiling_config_every_tile_is_detected(self):
+        backend = self._backend()
+        extractor = TwoPassOCRExtractor(
+            ocr_config=self.ocr_config, vlm_backend=backend, tiling_config=self.config
+        )
+        splitter = TileSplitter.for_page(
+            self.config.tile_trigger_px + 500, 3000, self.config
+        )
+
+        extractor._detect_rooms(self.page)
+
+        backend.detect_rooms.assert_not_called()
+        self.assertEqual(
+            backend.detect_rooms_from_image.call_count, splitter.cols * splitter.rows
+        )
 
 
 if __name__ == "__main__":

@@ -477,6 +477,31 @@ def _score_per_document(
     return per_document
 
 
+def macro_average(per_document: Mapping[str, "LocalizationScore"]) -> Dict[str, float]:
+    """Each document counted once, instead of each room counted once.
+
+    The headline numbers pool every GT room, so a document contributes in
+    proportion to its size. Measured 2026-11-03: 326_rockaway holds 559 of
+    1497 GT rooms (37%) and scores .249, which it does because the detector
+    returns 1 room on a tile holding 66, not because of anything a model
+    change can reach. Pooled, that one drawing sets the ceiling for every
+    comparison run on this GT.
+
+    Reported beside the pooled figure, never instead of it: the pooled one
+    is still the honest answer to "how many rooms does this find", and
+    dropping a hard document to make a number move would be gaming. This
+    answers the different question of how the pipeline does on a typical
+    document, which is the one a per-document regression is visible in.
+    """
+    if not per_document:
+        return {}
+    scores = list(per_document.values())
+    return {
+        metric: sum(score.to_dict()[metric] for score in scores) / len(scores)
+        for metric in ("label_precision", "label_recall", "label_f1")
+    }
+
+
 def _attachment_configs(
     pages: List[_ScoredPage], percentiles: Sequence[int],
 ) -> Dict[str, AttachmentConfig]:
@@ -531,6 +556,7 @@ def evaluate(
             )
         attachment[name] = score.to_dict()
 
+    per_document = _score_per_document(pages, config)
     return {
         "run_dir": str(run_dir),
         "gt_coco_path": str(config.gt_coco_path),
@@ -545,8 +571,11 @@ def evaluate(
         # not page, because pages of one drawing set are not independent.
         "per_document": {
             document: score.to_dict()
-            for document, score in sorted(_score_per_document(pages, config).items())
+            for document, score in sorted(per_document.items())
         },
+        # One vote per document. See macro_average for why the pooled figure
+        # above is not the whole story on this GT.
+        "per_document_macro": macro_average(per_document),
         "extent_size": {
             "max_box_to_gt_area_ratio": config.max_box_to_gt_area_ratio,
             **extent.to_dict(),

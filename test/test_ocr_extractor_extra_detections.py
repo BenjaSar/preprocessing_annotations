@@ -22,11 +22,7 @@ Stubs extract_text() to avoid a real OCR/model call -- these tests
 check the merge logic, not OCR itself.
 """
 
-import sys
-from pathlib import Path
 from unittest.mock import MagicMock, patch
-
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from preprocessing_annotations.config import OCRConfig
 from preprocessing_annotations.ingestion.ocr_extractor import MEPTextExtractor, TextDetection

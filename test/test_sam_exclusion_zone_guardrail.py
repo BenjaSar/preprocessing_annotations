@@ -25,10 +25,6 @@ Covers:
 """
 
 import logging
-import sys
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from preprocessing_annotations.detection.sam_segmenter import RoomSegmenter, SegmentationResult
 

@@ -31,12 +31,8 @@ Contract this file locks down:
      opening rather than shipping as two.
 """
 
-import sys
-from pathlib import Path
 
 import numpy as np
-
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from preprocessing_annotations.detection.window_strip_detector import (
     WindowStripDetectorConfig,
