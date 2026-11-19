@@ -98,6 +98,76 @@ class TestConventionIsStamped:
         assert carried == {"OFFICE": ROOM_EXTENT_BOX, "STORAGE": LABEL_BOX}
 
 
+class TestExtentReachesTheCocoExport:
+    """The extent is computed onto roomsRecognized and mirrored onto rooms[];
+    this is the other half of the path -- rooms[] is what COCOExporter reads,
+    so without these attributes the extent stops at the run directory."""
+
+    EXTENT = {
+        "bbox": [50, 50, 600, 600],                                   # xyxy, as stored
+        "polygon": [[50, 50], [600, 50], [600, 600], [50, 600], [50, 50]],
+        "source": "pdf_vector_walls",
+    }
+
+    def _export(self, tmp_path, extents):
+        """COCO annotations for two rooms, with `extents` keyed by room name."""
+        processed_dir = tmp_path / "processed"
+        processed_dir.mkdir(parents=True)
+        processed = prepare_sft_annotation(_annotation([
+            _room("OFFICE", (100, 100, 250, 250), "ocr_only"),
+            _room("STORAGE", (800, 800, 250, 250), "ocr_only"),
+        ]))
+        for room in processed["rooms"]:
+            extent = extents.get(room["room_name"])
+            if extent is not None:
+                room["extent"] = extent
+        (processed_dir / "page000.json").write_text(json.dumps(processed))
+
+        out = tmp_path / "coco.json"
+        COCOExporter().export(processed_dir, tmp_path, out, min_annotations_per_image=1)
+        annotations = json.loads(out.read_text())["annotations"]
+        return {a["attributes"]["room_name"]: a for a in annotations}
+
+    def test_the_extent_travels_as_its_own_attributes_in_cocos_box_format(self, tmp_path):
+        exported = self._export(tmp_path, {"OFFICE": self.EXTENT})["OFFICE"]
+
+        attributes = exported["attributes"]
+        # xywh, like every other box in this file -- not the record's xyxy.
+        assert attributes["extent_bbox"] == [50, 50, 550, 550]
+        assert attributes["extent_segmentation"] == [
+            [50, 50, 600, 50, 600, 600, 50, 600, 50, 50]
+        ]
+        assert attributes["extent_source"] == "pdf_vector_walls"
+
+    def test_the_label_box_this_dataset_was_measured_on_is_left_alone(self, tmp_path):
+        """Substituting the extent moves rooms' centres out of their GT room.
+        It is a second output, so bbox and segmentation must not move."""
+        with_extent = self._export(tmp_path / "a", {"OFFICE": self.EXTENT})["OFFICE"]
+        without = self._export(tmp_path / "b", {})["OFFICE"]
+
+        assert with_extent["bbox"] == without["bbox"]
+        assert with_extent["segmentation"] == without["segmentation"]
+        assert with_extent["area"] == without["area"]
+
+    def test_a_room_with_no_extent_exports_exactly_as_it_did_before(self, tmp_path):
+        """Flag-off output, and every room on a page with no wall layers,
+        must be unchanged -- not carrying empty extent fields."""
+        exported = self._export(tmp_path, {"OFFICE": self.EXTENT})["STORAGE"]
+        unchanged = self._export(tmp_path / "b", {})["STORAGE"]
+
+        assert exported == unchanged
+        assert not [k for k in exported["attributes"] if k.startswith("extent")]
+
+    def test_an_unusable_outline_exports_the_room_without_an_extent(self, tmp_path):
+        """A degenerate polygon is dropped rather than written as a zero-area
+        box that a consumer would read as a real room."""
+        degenerate = dict(self.EXTENT, polygon=[[50, 50], [600, 50]])
+
+        exported = self._export(tmp_path, {"OFFICE": degenerate})["OFFICE"]
+
+        assert not [k for k in exported["attributes"] if k.startswith("extent")]
+
+
 class TestScoreExtent:
     def test_label_scale_box_is_not_oversize(self):
         score = ExtentScore()

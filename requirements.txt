@@ -152,6 +152,7 @@ pyclipper==1.4.0  # Text processing
 # ============================================================================
 segment-anything==1.0
 supervision==0.27.0
+ultralytics==8.4.104  # YOLO door/window detector and SAM3 exemplar detector; both import it lazily, so a stack without it loses them silently
 
 # ============================================================================
 # API CLIENTS & EXTERNAL SERVICES

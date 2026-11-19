@@ -20,6 +20,7 @@ from preprocessing_annotations.orchestration.room_extent_step import (
     EXTENT_SOURCE,
     RoomExtentStep,
     assign_extents,
+    mirror_extents,
 )
 from room_extent_eval import evaluate
 
@@ -116,6 +117,34 @@ def test_step_adds_extent_beside_the_label_box(tmp_path):
     assert "extent" not in rooms[2]["coordinates"]
 
 
+# --- mirror onto the legacy rooms list -----------------------------------------------
+#
+# Extents are attached to roomsRecognized; the COCO export reads only rooms.
+# An extent that is not mirrored reaches no exported annotation at all.
+
+
+def test_mirror_copies_each_extent_onto_the_room_in_the_same_position():
+    recognized = [_room((0, 0, 1, 1)), _room((2, 2, 3, 3))]
+    recognized[0]["coordinates"]["extent"] = {"bbox": list(LEFT_ROOM), "source": EXTENT_SOURCE}
+    rooms = [{"room_name": "OFFICE", "bbox": [0, 0, 1, 1]}, {"room_name": "LOBBY", "bbox": [2, 2, 1, 1]}]
+
+    assert mirror_extents(rooms, recognized) == 1
+    assert rooms[0]["extent"]["bbox"] == list(LEFT_ROOM)
+    assert rooms[0]["bbox"] == [0, 0, 1, 1]      # label box untouched
+    assert "extent" not in rooms[1]
+
+
+def test_mirror_refuses_lists_that_no_longer_correspond():
+    """Position is the only thing making the copy correct. Mismatched lengths
+    mean every extent would land on some other room, so none is copied."""
+    recognized = [_room((0, 0, 1, 1)), _room((2, 2, 3, 3))]
+    recognized[0]["coordinates"]["extent"] = {"bbox": list(LEFT_ROOM), "source": EXTENT_SOURCE}
+    rooms = [{"room_name": "OFFICE", "bbox": [0, 0, 1, 1]}]
+
+    assert mirror_extents(rooms, recognized) is None
+    assert "extent" not in rooms[0]
+
+
 # --- pipeline wiring ------------------------------------------------------------------
 
 def test_pipeline_builds_no_extent_step_by_default():
@@ -133,11 +162,42 @@ def test_pipeline_attaches_extents_and_tallies_outcomes(tmp_path):
     pipeline._input_path = tmp_path
     step = pipeline._room_extent_step()
     counts = Counter()
-    annotation = {"image_size": {"width": 200, "height": 100}, "roomsRecognized": [_room((40, 40, 60, 50))]}
+    annotation = {
+        "image_size": {"width": 200, "height": 100},
+        "rooms": [{"room_name": "OFFICE", "bbox": [40, 40, 20, 10]}],
+        "roomsRecognized": [_room((40, 40, 60, 50))],
+    }
     pipeline._attach_room_extents(step, tmp_path / "plan_page000.json", annotation, counts)
     pipeline._attach_room_extents(step, tmp_path / "other_page000.json", dict(annotation), counts)
     assert counts == {"rooms_with_extent": 1, "pages_with_extent": 1, "pages_without_source_pdf": 1}
     assert annotation["roomsRecognized"][0]["coordinates"]["extent"]["bbox"] == list(LEFT_ROOM)
+    # Mirrored, or the COCO export -- which reads rooms[] -- would carry none.
+    assert annotation["rooms"][0]["extent"]["bbox"] == list(LEFT_ROOM)
+
+
+def test_pipeline_reports_a_page_whose_extents_could_not_be_mirrored(tmp_path):
+    """A silent mis-assignment is the worse failure, so the page is tallied
+    and skipped rather than copied by position into a list of another size."""
+    from collections import Counter
+
+    _layered_pdf(tmp_path / "plan.pdf")
+    config = PipelineConfig()
+    config.use_vector_room_extent = True
+    pipeline = AnnotationPipeline(config)
+    pipeline._input_path = tmp_path
+    counts = Counter()
+    annotation = {
+        "image_size": {"width": 200, "height": 100},
+        "rooms": [],                                        # diverged from roomsRecognized
+        "roomsRecognized": [_room((40, 40, 60, 50))],
+    }
+
+    pipeline._attach_room_extents(
+        pipeline._room_extent_step(), tmp_path / "plan_page000.json", annotation, counts
+    )
+
+    assert counts["pages_not_mirrored"] == 1
+    assert counts["rooms_with_extent"] == 1
 
 
 # --- eval -------------------------------------------------------------------------------

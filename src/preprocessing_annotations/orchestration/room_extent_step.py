@@ -54,6 +54,33 @@ def extent_record(face: Polygon) -> Dict[str, Any]:
     }
 
 
+def mirror_extents(
+    rooms: List[Dict[str, Any]], rooms_recognized: List[Dict[str, Any]],
+) -> Optional[int]:
+    """Copy each extent onto the legacy `rooms` entry for the same room.
+
+    Extents are attached to `roomsRecognized`, and the COCO export reads only
+    `rooms`, so an extent left on one list alone reaches no exported
+    annotation at all. Where this runs the two lists describe the same rooms
+    in the same order, because `roomsRecognized` was just rebuilt by
+    enumerating `rooms`.
+
+    Returns how many extents were copied, or None when the lists are no
+    longer the same length -- that correspondence is the only thing making a
+    positional copy correct, and without it every extent would be attached to
+    some other room. Nothing is copied in that case; the caller reports it.
+    """
+    if len(rooms) != len(rooms_recognized):
+        return None
+    copied = 0
+    for room, recognized in zip(rooms, rooms_recognized):
+        extent = (recognized.get("coordinates") or {}).get("extent")
+        if extent is not None:
+            room["extent"] = extent
+            copied += 1
+    return copied
+
+
 class RoomExtentStep:
     """Attaches extents to one page's roomsRecognized entries."""
 

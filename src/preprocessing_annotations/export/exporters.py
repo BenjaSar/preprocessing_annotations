@@ -475,6 +475,31 @@ def _polygon_bounds(flat: List[float]) -> List[float]:
     return [x, y, max(xs) - x, max(ys) - y]
 
 
+def _extent_attributes(extent: Optional[dict]) -> dict:
+    """A room's spatial extent as COCO attributes, or {} when it has none.
+
+    The extent (orchestration/room_extent_step.py: the room outline taken
+    from the source PDF's own wall layers) is a second output beside the
+    label box, never a replacement -- substituting it moves rooms' centres
+    out of their GT room. So it travels as its own attributes and leaves the
+    annotation's `bbox` and `segmentation`, which hold the label box this
+    dataset was measured on, exactly as they were.
+
+    Geometry is derived from the outline through the helpers above rather
+    than copied from the record's own `bbox`, which is xyxy where COCO is
+    xywh. One file carrying both conventions under one name is the defect
+    `box_convention` exists to report.
+    """
+    polygon = _flatten_polygon((extent or {}).get("polygon"))
+    if polygon is None or _polygon_area(polygon) <= 0:
+        return {}
+    return {
+        "extent_bbox": _polygon_bounds(polygon),
+        "extent_segmentation": [polygon],
+        "extent_source": extent.get("source"),
+    }
+
+
 class COCOExporter:
     """
     Export SFT-ready annotations in COCO object detection format.
@@ -732,6 +757,10 @@ class COCOExporter:
                         # can keep one convention instead of learning from
                         # both at once; see annotation_schema.box_convention_of.
                         "box_convention": room.get("box_convention"),
+                        # The room's spatial extent, when the run produced
+                        # one (--use-vector-room-extent). Absent otherwise,
+                        # so flag-off output is byte-identical.
+                        **_extent_attributes(room.get("extent")),
                     },
                 })
                 ann_id += 1

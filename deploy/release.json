@@ -2,7 +2,7 @@
   "name": "rooms-sft-real-v1",
   "_what": "One release of the room-annotation pipeline: which pipeline code, which fine-tuned adapter, and how that adapter must be asked. deploy/release.py reads this; nothing here is duplicated in code.",
 
-  "code_fingerprint": "92ac4c7a44d3",
+  "code_fingerprint": "f1aea0934b34",
   "_code_fingerprint": "sha256 over src/**/*.py, 12 hex. The band below was measured on THIS code; the 2026-10-28 merge fix moved every baseline ~.025, so a band from other code says nothing about this one.",
 
   "adapter": {
@@ -24,7 +24,8 @@
       "--unsloth-room-prompt", "sft_label",
       "--use-yolo-objects",
       "--use-sam3-exemplar",
-      "--export-object-detections"
+      "--export-object-detections",
+      "--use-vector-room-extent"
     ],
     "env": {
       "VLM_SEED": "1234",
@@ -32,6 +33,7 @@
       "VLM_TEMPERATURE": "1.0"
     },
     "_flags": "What the production chains actually pass, not what config defaults to -- those differ (use_sam3_exemplar defaults False but every real run enables it). --unsloth-adapter is appended by release.py from the resolved adapter path.",
+    "_extent": "--use-vector-room-extent adds coordinates.extent beside each room's label box, from the source PDF's own wall layers. It is a SECOND output: the label box stays the room's location (substituting the extent box moves 11 rooms' centres out of their GT room, located 915 -> 904), and the extent step writes no other field, so label recall is unaffected. Only CAD-layer PDFs carry extents at all -- see known_limits.room_extent.",
     "_prompt": "sft_label is NOT optional. The adapter was trained on it; asked with the default 'production' prompt it degrades silently -- no error, just worse output. This pairing is the single most important thing this manifest enforces.",
     "_seed": "Seeded sampling here is deterministic end-to-end: a fresh 3h28m GPU re-run on 2026-11-12 reproduced the entire scored report bit-identically. Pinning the seed makes a release reproducible, not merely repeatable."
   },
@@ -47,13 +49,28 @@
       "vlm.do_sample",
       "vlm.temperature"
     ],
-    "_config_must_match": "Checked post-run against the run's own pipeline_config.json. Preflight proves intent; this proves what actually ran. A flag silently dropped by a future CLI change is caught here and nowhere else."
+    "_config_must_match": "Checked post-run against the run's own pipeline_config.json. Preflight proves intent; this proves what actually ran. A flag silently dropped by a future CLI change is caught here and nowhere else.",
+
+    "log_must_not_contain": [
+      "model load failed"
+    ],
+    "_log_must_not_contain": "Phrases a clean run never writes to its pipeline_*.log. Both detectors (yolo_detector.py, sam3_exemplar_detector.py) catch every load failure, log this and return no detections, so the run still 'succeeds'. Preflight proves the detectors can load; this proves they did. test_release.py fails if the phrase leaves the detectors, which would turn this check into a vacuous pass.",
+
+    "summary_must_report": [
+      "room_extent"
+    ],
+    "_summary_must_report": "Keys an optional step this release switches on writes into post_processing_summary.json. A step that never ran leaves no key -- and leaves a run that otherwise looks complete, because nothing downstream requires the field. Checked post-run, like the log.",
+
+    "summary_must_be_zero": [
+      "room_extent.pages_without_source_pdf"
+    ],
+    "_summary_must_be_zero": "Tallies that mean the step ran but could not see its input. The extent step needs the run's source PDF, found from the page-image stem; a deployment that stages PDFs elsewhere produces zero extents and still exits 0. NOT listed here: pages_unreadable and a zero rooms_with_extent, which are properties of the input (a scanned or FLAT PDF carries no wall layers) rather than of the deployment."
   },
 
   "known_limits": {
     "label_recall": "~0.611 on the 13-document GT set; the band file holds the exact interval.",
-    "room_extent": "NOT produced. gt_rooms_iou_matched is 0 and extent_f1 is 0.0 -- this release localizes room LABELS, not room spatial extents. Any consumer expecting polygons will get none.",
-    "export_surface": "Exporters read the legacy `rooms` structure, not `roomsRecognized`.",
+    "room_extent": "PARTIAL, and a second output only. Measured on this release's own code with eval/room_extent_eval.py over adapter_real_v1_b1275_pincheck: 311 of 1072 rooms on 28 of 48 pages get an extent; 286 of 1497 GT rooms are matched at IoU >= .5 -- extent recall .191 at precision .920, against 0 for label boxes. Coverage is bounded by the input, not by tuning: extents come from a CAD PDF's own wall layers, so scanned and FLAT exports carry none (5 of 10 scored documents get zero). The label box remains each room's location.",
+    "export_surface": "Extents reach the COCO export as per-annotation attributes (extent_bbox, extent_segmentation, extent_source), never as the annotation's own bbox or segmentation. The Label Studio export carries none: its regions are bound to the controls in a labeling config this repo does not hold, so a polygon there needs a project change first. The Qwen SFT exporter reads label boxes only -- training on extents would be a different task.",
     "_why_here": "A deployable unit that does not state what it cannot do gets deployed against the wrong expectation."
   }
 }

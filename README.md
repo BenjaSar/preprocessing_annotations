@@ -1,686 +1,537 @@
-# Preprocessing Annotations - MEP Floor Plan Pipeline
+# preprocessing_annotations — Floor Plan Room Annotation Pipeline
 
-A comprehensive Python package for extracting, annotating, and processing MEP (Mechanical, Electrical, Plumbing) floor plans using a combination of PDF extraction, OCR, Vision Language Models, and SAM segmentation.
+Turns architectural/MEP floor plan PDFs into room annotations: a labelled, located
+box per room, exported as COCO, Label Studio JSON, and Qwen3-VL SFT JSONL.
 
-## Features
+The pipeline combines PDF rasterization, OCR, a vision-language model (Claude API or
+a local Qwen3-VL, optionally with a fine-tuned LoRA adapter), SAM label→room
+expansion, and YOLO/SAM3 door-window detection, then reconciles those sources into a
+single annotation per page.
 
-- **PDF Extraction**: High-resolution rasterization (150-300 DPI) of floor plan PDFs
-- **OCR Text Detection**: Extract room labels and text using PaddleOCR (default) or EasyOCR (legacy) with preprocessing
-- **Template Matching**: Multi-scale, rotation-invariant detection of electrical symbols
-- **VLM Annotation**: Zero-shot annotation using Claude (Vision Language Model)
-- **SAM Segmentation**: Precise room boundary refinement using Segment Anything Model
-- **Label Studio Export**: Generate annotated datasets ready for human review
-- **Review Prioritization**: Intelligent flagging of low-confidence annotations
+**What it produces:** room *labels* with *label-sized* boxes.
+**What it does not produce:** room *spatial extents* (polygons). See
+[Known limits](#known-limits) — this is stated up front because a consumer expecting
+polygons will get none.
 
-## Quick Start
+---
 
-### From Project Root
+## Status
 
-```bash
-cd /home/ubuntu/floorplan_classifier/VLM/preprocessing_annotations
+Measured on this checkout, 2026-11-12. Numbers below come from the artifacts and
+commands cited, not from estimates.
 
-# Run with OCR only (fastest)
-python main.py --input ../../floorPlanVisionAIAdaptor/data --output ./results
+| Item | Value | Source |
+|---|---|---|
+| Fast test suite | 729 passed, 1 skipped, 16 deselected (64 s) | `pytest -q` in this directory |
+| Slow (GPU/network) tests | 16, deselected by default | `pytest -m slow --collect-only` |
+| Test files / source modules | 78 / 78 | `test/test_*.py`, `src/preprocessing_annotations/**/*.py` |
+| Shipped release | `rooms-sft-real-v1` | [`deploy/release.json`](deploy/release.json) |
+| Shipped adapter label recall | 0.6072 – 0.6112 over 3 seeds, 13-document GT set | [`eval/pins/adapter_real_v1_band.json`](eval/pins/adapter_real_v1_band.json) |
+| Room extent (IoU) | 0.0 — not produced | `release.json: known_limits.room_extent` |
+| Room taxonomy | 44 mandatory classes, 17 extended types, 24 VLM prompt categories | `automation/taxonomy.py` |
+| Pinned code fingerprint | `92ac4c7a44d3` | `deploy/release.json` |
 
-# Run with VLM annotation (Claude)
-python main.py --input ../../floorPlanVisionAIAdaptor/data --output ./results --use-vlm
+Whole-pipeline determinism is **measured**, not assumed: a fresh 3 h 28 m GPU re-run
+at `VLM_SEED=1234` on 2026-11-12 reproduced the entire scored replay report
+bit-identically (`eval/adapter_pin.py`, `../adapter_pin_check.sh`).
 
-# High-detail mode for small symbols
-python main.py --input ../../floorPlanVisionAIAdaptor/data --output ./results --high-detail --use-vlm
+---
+
+## Repository layout
+
 ```
-
-### Installation
-
-```bash
-cd /home/ubuntu/floorplan_classifier/VLM/preprocessing_annotations
-
-# Install in development mode
-pip install -e .
-
-# Then run from anywhere
-annotate-pipeline --input ./pdfs --output ./results --use-vlm
-```
-
-## VLM Backend Guide
-
-When using `--use-vlm`, you have three backend options:
-
-### Backend Comparison
-
-| Backend | Speed | Cost | VRAM | Internet | Best For |
-|---------|-------|------|------|----------|----------|
-| **Claude** (default) | 2-5 sec/image | ~$0.01-0.05/image | None | Yes | Fast testing, best quality |
-| **Qwen** | 30-60 sec/image | Free | 15 GB | No | No API cost, offline |
-| **Unsloth** | 15-30 sec/image | Free | 8 GB | No | Fast + free (2x faster than Qwen) |
-
-### Quick Commands
-
-```bash
-# Claude API (recommended for testing)
-python3 -m pipeline --input /home/ubuntu/floorplan_classifier/VLM/test_input \
-                    --output ./test_output_claude \
-                    --ocr-backend paddleocr --use-vlm
-
-# Qwen (local, no cost)
-python3 -m pipeline --input /home/ubuntu/floorplan_classifier/VLM/test_input \
-                    --output ./test_output_qwen \
-                    --ocr-backend paddleocr --use-vlm --vlm-backend qwen
-
-# Unsloth (fast + free, requires installation)
-pip install "unsloth[cu121]" --break-system-packages
-python3 -m pipeline --input /home/ubuntu/floorplan_classifier/VLM/test_input \
-                    --output ./test_output_unsloth \
-                    --ocr-backend paddleocr --use-vlm --vlm-backend unsloth
-```
-
-### Verify Backend is Running
-
-After starting the pipeline, check the log:
-```bash
-grep "Creating VLM backend" test_output_*/pipeline.log
+preprocessing_annotations/
+├── main.py                 # CLI entry point → orchestration.pipeline:main
+├── run.sh, QUICK_START.sh  # wrappers that source .env and call main.py
+├── pytest.ini              # testpaths=test, `slow` marker deselected by default
+├── src/preprocessing_annotations/
+│   ├── config/             # all tunables (PDFConfig, OCRConfig, VLMConfig, …)
+│   ├── ingestion/          # PDF extraction, OCR, tiling, crop re-read, vector walls
+│   ├── detection/          # SAM, YOLO, SAM3 exemplar, door/window, attachment
+│   ├── vlm/                # backends, prompts, tiled rooms, reconciliation
+│   ├── export/             # COCO / Label Studio / Qwen SFT / group split
+│   ├── automation/         # taxonomy, schema, validators, abbreviation recovery
+│   ├── bbox/               # validation, metrics, visualization
+│   ├── orchestration/      # pipeline, run lock, code fingerprint, MLflow
+│   └── tools/              # vocabulary and wall-band CLIs
+├── eval/                   # 37 offline evaluation / gate / probe scripts
+│   └── pins/               # pinned metric bands the test suite enforces
+├── deploy/                 # pinned release manifest + preflight/postflight checker
+├── scripts/                # training, splits, QA utilities
+├── test/                   # 78 test files + fixtures
+└── docs/                   # running guide, MLflow setup, cost analysis
 ```
 
 ---
 
-## Command Line Interface
+## Installation
 
 ```bash
-python main.py --help
+# The project venv already carries paddleocr 2.x, PyMuPDF, torch and unsloth.
+source /home/ubuntu/floorplan_classifier/VLM/vlm/bin/activate
+cd /home/ubuntu/floorplan_classifier/VLM/preprocessing_annotations
 ```
 
-### Available Options
-
-```
---input PATH, -i PATH           Input directory containing PDF files (required)
---output PATH, -o PATH          Output directory for results (required)
---use-vlm                       Enable Claude VLM annotation
---use-sam                       Enable SAM boundary refinement
---high-detail                   Use high-detail settings (300 DPI, more scales)
---fast                          Use fast processing settings (150 DPI, fewer scales)
---dpi DPI                       Custom DPI for PDF extraction (default: 200)
---skip-existing                 Skip images that already have annotations
---verbose, -v                   Enable verbose logging
-```
-
-## Usage Examples
-
-### 1. Basic Usage (OCR Only)
+For a fresh environment:
 
 ```bash
-python main.py --input ./pdfs --output ./dataset
+pip install -e .          # installs the `annotate-pipeline` console script
+pip install -r requirements.txt
 ```
 
-Output:
-- Extracted images: `dataset/images/`
-- OCR annotations: `dataset/annotations/`
-- Label Studio import: `dataset/label_studio_import.json`
+`main.py` inserts `src/` on `sys.path`, so the pipeline runs without an editable
+install as well.
 
-### 2. With VLM Annotation
+**Credentials.** Only the `claude` backend needs one:
 
 ```bash
-python main.py --input ./pdfs --output ./dataset --use-vlm --verbose
+export ANTHROPIC_API_KEY=...        # or: source .env
 ```
 
-Requires: `ANTHROPIC_API_KEY` environment variable set
+**Weights** live outside the repository and are addressed by path: the SAM
+checkpoint (`weights/sam_vit_h_4b8939.pth`), the YOLO door/window checkpoint, and
+LoRA adapters under `../trained_adapters/`.
 
-### 3. High-Detail Mode
+---
 
-For floor plans with small electrical symbols:
+## Quick start
 
 ```bash
-python main.py --input ./pdfs --output ./dataset --high-detail --use-vlm
+# 1. Local Qwen3-VL 8B via Unsloth — the flags every production run passes
+python main.py --input ../test_input --output ./results_local \
+  --use-vlm --vlm-backend unsloth --unsloth-model qwen3-vl-8b \
+  --use-yolo-objects --use-sam3-exemplar --export-object-detections --verbose
+
+# 2. OCR only — no VLM, no API cost, fastest
+python main.py --input ../test_input --output ./results
+
+# 3. Claude API backend — the CLI default, but not what production runs use
+python main.py --input ../test_input --output ./results_claude --use-vlm
 ```
 
-Settings:
-- DPI: 300 (vs 200 default)
-- Template scales: 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3, 1.4
-- Rotation angles: 0°, 90°, 180°, 270°
-
-### 4. Fast Processing
-
-For large batches where speed matters:
+Verify which backend started:
 
 ```bash
-python main.py --input ./pdfs --output ./dataset --fast
+grep "Creating VLM backend" results*/pipeline_*.log
 ```
 
-Settings:
-- DPI: 150
-- Template scales: 0.8, 1.0, 1.2
-- No rotation invariance
+### Running the shipped release
 
-### 5. Programmatic Usage
-
-```python
-from preprocessing_annotations import AnnotationPipeline, PipelineConfig
-
-# Create pipeline with custom config
-config = PipelineConfig.for_high_detail()
-config.use_vlm = True
-
-pipeline = AnnotationPipeline(config)
-stats = pipeline.run(
-    input_dir="./pdfs",
-    output_dir="./results",
-    skip_existing=True
-)
-
-print(f"Processed {stats['images_extracted']} images")
-print(f"Flagged {stats['flagged_for_review']} for review")
-```
-
-### 6. VLM Backend Selection
-
-Choose the backend that best fits your needs:
+Do not assemble the flags by hand for a release run — a fine-tuned adapter asked
+with the wrong prompt degrades **silently**. Use the release wrapper:
 
 ```bash
-# Fastest testing (use default Claude backend)
-python main.py --input ./pdfs --output ./dataset --use-vlm
-
-# No API costs (use Qwen backend)
-python main.py --input ./pdfs --output ./dataset --use-vlm --vlm-backend qwen
-
-# Best speed + free (use Unsloth backend - requires installation)
-pip install "unsloth[cu121]" --break-system-packages
-python main.py --input ./pdfs --output ./dataset --use-vlm --vlm-backend unsloth
+python deploy/release.py --check                      # preflight, no GPU
+python deploy/release.py -i ../test_input -o ../run1  # preflight → run → postflight
+python deploy/release.py --verify-run ../run1         # postflight an existing run
 ```
 
-**Expected Processing Times** (for 2 test PDFs):
-- Claude: 15-30 minutes
-- Qwen: 60-120 minutes
-- Unsloth: 30-60 minutes
-- OCR only (no VLM): 5-10 minutes
+Exit 0 = the release is intact; exit 1 names the field that disagrees. Preflight
+checks the code fingerprint, the adapter's content digests, the recall-band pin, and
+that every detector the release enables can load (YOLO weights where the pipeline
+looks, `ultralytics`, the SAM3 checkpoint in the Hugging Face cache). Postflight checks
+the run's recorded config and that its `pipeline_*.log` holds no `model load failed`.
+See [`deploy/README.md`](deploy/README.md).
 
-## Architecture
+---
 
-The preprocessing pipeline transforms raw PDF floor plans into SFT-ready annotations through a multi-stage processing flow with pluggable VLM backends and comprehensive validation.
+## Pipeline stages
 
-### System Overview
+`orchestration/pipeline.py` runs the stages below in order. Stage names are the ones
+printed in the run log.
+
+| Step | Stage | Implementation |
+|---|---|---|
+| 1 | Resolve input to images (PDF → PNG, 150–300 DPI, multi-page) | `ingestion/pdf_extractor.py` |
+| 2 | OCR text extraction + abbreviation recovery | `ingestion/ocr_extractor.py`, `ingestion/two_pass_ocr_extractor.py`, `automation/abbreviation_ocr_recovery.py` |
+| 3 | VLM zero-shot room annotation (tiled above 3000 px), or OCR-only annotation when `--use-vlm` is off | `vlm/vlm_backend.py`, `vlm/tiled_rooms.py`, `ingestion/tile_splitter.py` |
+| 3 (same loop) | VLM crop re-read of OCR fragments that look like room keywords, invoked inside Step 3's per-image loop (`orchestration/pipeline.py:824`) while the VLM is already loaded; on by default with an unsloth backend | `orchestration/crop_reread_step.py` |
+| 3.5 | SAM label→room boundary expansion; object detection → room mapping | `detection/sam_segmenter.py`, `detection/yolo_detector.py`, `detection/sam3_exemplar_detector.py` |
+| 4 | Post-processing: reconciliation, taxonomy resolution, filtering, validation | `vlm/semantic_reconciler.py`, `automation/sft_validator.py`, `bbox/bbox_validator.py` |
+| 6 | Review prioritization | `export/exporters.py` |
+| 7 | Export: COCO, Label Studio, object detections, SFT inputs | `export/exporters.py`, `export/object_exporter.py` |
+
+Supporting behaviour wired into these stages: hallucination detection
+(`vlm/hallucination_detector.py`), the door layer filter that discards wiring
+misread as doors (`detection/door_layer_filter.py`, on by default), the window
+strip detector, and vector-wall room extents (`ingestion/vector_walls.py`, pilot,
+off by default).
+
+### VLM backends
+
+Three backends share one interface (`vlm/vlm_backend.py`). **`unsloth` (Qwen3-VL) is
+the backend this project actually runs**: every baseline, every gated candidate and
+the shipped release use it. `claude` is the CLI *default* — a convenience for a
+quick API-backed smoke run, not the production path.
+
+| Backend | Model | Cost | Hardware | Notes |
+|---|---|---|---|---|
+| `unsloth` | `qwen3-vl-8b` (also `qwen3-vl-2b`, `qwen3-vl-4b`, and `-thinking` variants) | free | 8B occupies the whole T4 (`../rebaseline_1275.sh:wait_for_free_gpu`); ~70% less VRAM than plain transformers (`vlm/vlm_backend.py:1048`) | Production and release backend; the only one that accepts `--unsloth-adapter` |
+| `qwen` | `Qwen/Qwen2.5-VL-7B-Instruct` | free | ~6 GB VRAM at 4-bit (`config/config.py:472`) | HuggingFace transformers path |
+| `claude` (CLI default) | `claude-haiku-4-5-20251001`; override with `--vlm-model` or `$VLM_MODEL` | API | none | Needs `ANTHROPIC_API_KEY` |
+
+A LoRA adapter must be asked with the prompt it was trained on:
+`--unsloth-room-prompt sft_label`. The backend default is `production`. Nothing in
+the pipeline reports the mismatch — `deploy/release.py` is the thing that does.
+
+---
+
+## CLI reference
+
+Produced from `orchestration/pipeline.py`'s argument parser.
+
+**Input/output**
+
+| Flag | Meaning |
+|---|---|
+| `--input`, `-i` | Input directory of PDFs (required) |
+| `--output`, `-o` | Output directory (required) |
+| `--skip-existing` | Skip images that already have annotations |
+| `--verbose`, `-v` | Debug logging (the file handler is always DEBUG) |
+| `--no-wait` | Exit code 3 if another run holds the lock, instead of waiting |
+
+**Rasterization**
+
+| Flag | Meaning |
+|---|---|
+| `--dpi` | Override DPI (default 200) |
+| `--high-detail` / `--fast` | 300 DPI, more template scales / 150 DPI, fewer |
+| `--enforce-min-edge-floor` | Raise DPI so small sheets reach `PDFConfig.min_longest_edge_px` (4500). Off by default |
+
+**OCR**
+
+| Flag | Meaning |
+|---|---|
+| `--ocr-backend {paddleocr,easyocr}` | Default `paddleocr`; `easyocr` is the legacy path |
+| `--ocr-vlm-fallback` | Two-pass OCR Pass 2. Off by default — its boxes are not in page coordinates |
+| `--no-crop-reread` | Disable the VLM crop re-read (on by default with an unsloth backend) |
+
+**VLM**
+
+| Flag | Meaning |
+|---|---|
+| `--use-vlm` | Enable VLM annotation |
+| `--vlm-backend {claude,qwen,unsloth}` | Default `claude` |
+| `--vlm-model` / `--qwen-model` / `--unsloth-model` | Per-backend model id |
+| `--unsloth-adapter PATH` | LoRA adapter directory, trained against the same `--unsloth-model` |
+| `--unsloth-room-prompt NAME` | Room prompt; use `sft_label` with an adapter |
+| `--no-tiling` | Send the full image in one pass (tiling is on above 3000 px for local backends) |
+| `--use-page-type` | Advisory page-type triage; requires `--use-vlm --vlm-backend unsloth` |
+
+**Detection**
+
+| Flag | Meaning |
+|---|---|
+| `--use-sam` | SAM boundary refinement |
+| `--use-windows` | Window detection (Tier 1, PDF layers only) |
+| `--use-yolo-objects` | Fine-tuned YOLO door/window detector. Tag-only: writes `has_door`/`has_windows`, never accepts or rejects a room |
+| `--use-sam3-exemplar` | Tiled SAM3 box-exemplar door detector seeded by YOLO's own detections; no effect without `--use-yolo-objects` |
+| `--corroboration-weight` | Additive object-corroboration bonus on room confidence. Default 0.0 (inert) and unvalidated at any nonzero value |
+| `--use-vector-room-extent` | Pilot: add `coordinates.extent` from the PDF's vector wall layers |
+
+**Reconciliation, export, scoring**
+
+| Flag | Meaning |
+|---|---|
+| `--use-semantic-reconciliation` | No-op; reconciliation is on by default |
+| `--no-semantic-reconciliation` | Turn it off |
+| `--no-door-layer-filter` | Keep door detections the PDF layers show to be wiring |
+| `--export-object-detections` | Also write `coco_objects.json` in its own category id space |
+| `--object-detection-min-confidence` | Threshold for that export only |
+| `--min-rooms` | Minimum rooms per image for `sft_ready=True` (default 1) |
+| `--eval-gt-dir` | Score the finished run against a GT annotations directory; writes `eval_metrics.json` |
+| `--enable-mlflow`, `--mlflow-tracking-uri` | Opt-in run tracking; a missing or unreachable server never fails the run |
+
+Environment variables read at run time: `VLM_SEED`, `VLM_DO_SAMPLE`,
+`VLM_TEMPERATURE`, `VLM_MODEL`, `MLFLOW_ENABLED`, `MLFLOW_TRACKING_URI`,
+`FLOORPLAN_LOCK`, `ANTHROPIC_API_KEY`.
+
+---
+
+## Outputs
+
+A finished run directory:
 
 ```
-                           PDF Input
-                              │
-                              ▼
-              ┌──────────────────────────────┐
-              │ preprocessing_annotations    │
-              │  (Multi-stage Pipeline)      │
-              ├──────────────────────────────┤
-              │ 1. PDF Extract → Images      │
-              │ 2. OCR Detection             │
-              │ 3. VLM Annotation (3 paths)  │
-              │ 4. Reconciliation            │
-              │ 5. Validation & Filtering    │
-              │ 6. Metrics & Quality Check   │
-              │ 7. Export                    │
-              └──────────────────────────────┘
-                    ├──────┬──────┬──────────┐
-                    ▼      ▼      ▼          ▼
-              Processed  COCO  Label    SFT JSONL
-              Annotations    Studio     (with bboxes)
-                    │                       │
-                    └───────┬───────────────┘
-                            ▼
-              ┌──────────────────────────────┐
-              │  Training Pipelines          │
-              ├──────────────────────────────┤
-              │ • paligemma2/ (10-step)      │
-              │ • finetune_qwen.py           │
-              │ • floorPlanVisionAIAdaptor   │
-              │   (production inference)     │
-              └──────────────────────────────┘
+run/
+├── images/                      # extracted page PNGs
+├── annotations/                 # raw per-page annotations (every drop point recorded)
+├── processed_annotations/       # post-processed, SFT-facing annotations
+├── coco/                        # COCO room geometry
+├── coco_objects.json            # door/window geometry (own category id space)
+├── label_studio_import.json
+├── needs_review.json
+├── room_regions/                # cropped room images
+├── quality_reports/
+├── coverage_report.json
+├── post_processing_summary.json
+├── dropped_page_attribution/    # why each dropped page was dropped
+├── skipped_pages/
+├── run_metrics.jsonl
+├── run_manifest_<timestamp>.json
+├── pipeline_config.json         # full resolved config + code_fingerprint
+└── pipeline_<timestamp>.log
 ```
 
-### Pipeline Stages
+`pipeline_config.json` is the audit record: it carries the resolved configuration
+and the source fingerprint, and the release postflight reads it to prove what
+actually ran.
 
-The preprocessing pipeline executes 7 sequential stages:
+### Annotation data model
 
-1. **PDF Extraction** (`pdf_extractor.py`)
-   - Converts floor plan PDFs to high-resolution PNG images (150-300 DPI)
-   - Handles multi-page documents with page-by-page extraction
+Legacy structure, which **the exporters read**:
 
-2. **Text Detection** (`ocr_extractor.py`, `two_pass_ocr_extractor.py`)
-   - Primary: PaddleOCR or EasyOCR for room label extraction
-   - Secondary: Two-pass strategy with VLM fallback for low-confidence regions
-   - Symbol detection (`symbol_detector.py`): Template-based electrical symbol matching
-
-3. **VLM Room Annotation** (3 parallel paths)
-   - **Claude API** (`vlm_annotator.py`): Standalone Anthropic integration, 2-5 sec/image
-   - **Qwen2.5-VL** (`vlm_backend.py`): HuggingFace local inference, 30-60 sec/image
-   - **Unsloth Qwen** (`vlm_backend.py`): Optimized local inference, 15-30 sec/image
-   - Shared hallucination detection (`hallucination_detector.py`): Detects repetitive/grid patterns
-
-4. **Semantic Reconciliation** (`semantic_reconciler.py`)
-   - Hybrid merge of OCR text detections with VLM room polygons
-   - Spatial containment-based label assignment
-   - Resolves conflicts between multiple detection sources
-
-5. **Validation & Filtering** (`automation/sft_validator.py`, `bbox_validator.py`)
-   - OOB (out-of-bounds) bbox detection and filtering
-   - NaN/infinity checks, coordinate normalization
-   - Atomic writes with schema versioning (`bbox_validator.py`)
-
-6. **Quality Evaluation** (`automation/quality_checker.py`, `bbox_metrics.py`)
-   - Field validation, taxonomy synchronization
-   - Confidence thresholding and overlap detection
-   - Comprehensive metrics: mAP, GIoU, DIoU, CIoU, Acc@0.5/0.75
-   - Hallucination rate and coverage analysis
-
-7. **Export** (`exporters.py`, bridge converter)
-   - COCO format for general ML frameworks
-   - Label Studio JSON for human review workflows
-   - SFT-ready JSONL with full provenance and confidence metadata
-   - PaliGemma2 format with native `<locYYYY><locXXXX>` spatial tokens
-
-### VLM Backend Architecture
-
-The pipeline supports three pluggable VLM backends through a common interface:
-
-```
-VLMBackend (Abstract Base Class)
-├── ClaudeBackend
-│   └── Uses Anthropic API
-├── Qwen2_5VLBackend
-│   └── Uses HuggingFace Transformers (local)
-└── UnslothQwenBackend
-    └── Uses Unsloth optimized inference
-
-VLMAnnotator (Standalone Claude path)
-└── Alternative to ClaudeBackend (separate architecture)
-```
-
-**Shared components across all backends:**
-- `detect_hallucinations()`: Detects and truncates autoregressive loops (F4)
-- `_parse_room_response()`: Normalized response parsing with image dimension awareness
-- Bbox coordinate rescaling to original image space (F3)
-
-### Annotation Data Model
-
-The pipeline produces two output formats for different use cases:
-
-**Backward-Compatible Output** (`rooms[]`):
 ```json
 {
   "image_file": "...",
   "image_size": {"width": 4500, "height": 3375},
-  "rooms": [
-    {
-      "room_name": "Office",
-      "category": "office",
-      "bbox": [100, 150, 200, 250]
-    }
-  ]
+  "rooms": [{"room_name": "Office", "category": "office", "bbox": [100, 150, 200, 250]}]
 }
 ```
 
-**SFT-Ready Output** (`roomsRecognized[]`):
+SFT-facing structure (`automation/annotation_schema.py`):
+
 ```json
 {
-  "image_file": "...",
-  "roomsRecognized": [
-    {
-      "id": "room_0",
-      "type": "PRIVATE OFFICE",
-      "name": "Office",
-      "coordinates": {"bbox": [...], "polygon": [...]},
-      "confidence": 0.95,
-      "confidence_detail": {"detection": 0.9, "classification": 0.95, "ocr": 0.9},
-      "coverage": {"spatial_fraction": 0.12, "text_tokens_matched": 4},
-      "provenance": {"detection": {"method": "vlm", "model": "claude", "score": 0.9}},
-      "name_expanded": "Office - A Wing - 01"
-    }
-  ],
+  "roomsRecognized": [{
+    "id": "room_0",
+    "type": "PRIVATE OFFICE",
+    "name": "Office",
+    "coordinates": {"bbox": [100, 150, 200, 250]},
+    "confidence": 0.95,
+    "confidence_detail": {"detection": 0.9, "classification": 0.95, "ocr": 0.9},
+    "provenance": {"detection": {"method": "vlm", "model": "qwen3-vl-8b"}}
+  }],
   "schema_version": "1.0"
 }
 ```
 
-**Room Taxonomy**: 31-class standardized schema (`automation/taxonomy.py`)
-- Commercial: PRIVATE OFFICE, OPEN OFFICE, CONFERENCE, etc.
-- Utility: ELECTRICAL ROOM, MECHANICAL, STORAGE, etc.
-- Circulation: LOBBY, CORRIDOR, STAIRWELL, ELEVATOR, etc.
-- Sanitary: RESTROOM, SHOWER, etc.
-- Special: RESIDENTIAL units with automatic bedroom/bathroom counting
+Two box conventions coexist in the data — label boxes and mixed/oversize boxes —
+and each room carries a `box_convention` tag. The SFT exporter targets label boxes
+only and skips the rest rather than mixing conventions into one training target.
 
-### Module Reference
+### Taxonomy
 
-#### Core Pipeline (5 files)
-| Module | Purpose |
-|--------|---------|
-| `main.py` | CLI entry point; bootstraps and delegates to pipeline |
-| `config.py` | Centralized configuration with PDFConfig, OCRConfig, VLMConfig, SAMConfig dataclasses |
-| `pipeline.py` | Main AnnotationPipeline orchestrator coordinating 7-stage flow |
-| `exporters.py` | COCO format, Label Studio JSON, review prioritization |
-| `__init__.py`, `setup.py` | Package initialization and distribution configuration |
+`automation/taxonomy.py` is the single source of truth: **44 mandatory classes**
+(e.g. `PRIVATE OFFICE`, `OPEN OFFICE`, `CONFERENCE`, `ELECTRICAL ROOM`,
+`MECHANICAL ROOM`, `CORRIDOR`, `STAIRWELL`, `RESTROOM`, `CLASSROOM`, `CLINIC`,
+`PARKING GARAGE`, `RESIDENTIAL UNIT`, `OTHER`), 17 extended types, and 24
+categories exposed in the VLM prompt. Resolution to a mandatory class is mandatory:
+`test/test_taxonomy_resolve_mandatory.py` enforces it.
 
-#### Text Detection (4 files)
-| Module | Purpose |
-|--------|---------|
-| `ocr_extractor.py` | Primary OCR text extraction using PaddleOCR or EasyOCR |
-| `ocr_adapter.py` | Abstraction layer normalizing output from multiple OCR backends |
-| `two_pass_ocr_extractor.py` | Two-pass strategy: baseline + VLM fallback for low-confidence regions |
-| `symbol_detector.py` | Template-based multi-scale, rotation-invariant electrical symbol detection |
+---
 
-#### VLM Annotation (4 files)
-| Module | Purpose |
-|--------|---------|
-| `vlm_annotator.py` | Claude standalone integration (alternative to vlm_backend.py) |
-| `vlm_backend.py` | Pluggable backend abstraction: Claude API, Qwen2.5-VL, Unsloth (1576 lines) |
-| `semantic_reconciler.py` | Hybrid merge of OCR and VLM outputs via spatial containment |
-| `hallucination_detector.py` | Shared detector for repetitive/grid/marching patterns (F4) |
-
-#### Spatial Analysis (3 files)
-| Module | Purpose |
-|--------|---------|
-| `sam_segmenter.py` | SAM (Segment Anything Model) integration for boundary refinement |
-| `window_detector.py` | Three-tier window detection: PDF layers (Tier 1), CubiCasa5K (Tier 2), VLM (Tier 3) |
-| `cubicasa5k_detector.py` | CubiCasa5K multi-task CNN for wall/icon/junction detection |
-
-#### Validation & Metrics (3 files)
-| Module | Purpose |
-|--------|---------|
-| `bbox_validator.py` | OOB/NaN checks, coordinate normalization (F10), atomic writes (F11), filtering (F12) |
-| `bbox_metrics.py` | Comprehensive evaluation: mAP, GIoU/DIoU/CIoU, Acc@0.5/0.75, hallucination rate (F7) |
-| `visualize_bbox.py` | Standalone tool to render color-coded bboxes with labels for visual QA |
-
-#### SFT & Training (2 files)
-| Module | Purpose |
-|--------|---------|
-| `finetune_qwen.py` | Qwen2.5-VL fine-tuning infrastructure with SFT data prep (includes bboxes via F8) |
-| `production_monitor.py` | Production hardening: confidence thresholding, error recovery, quality gates |
-
-#### Automation Subsystem (12 files in `automation/`)
-| Module | Purpose |
-|--------|---------|
-| `taxonomy.py` | Single source of truth: 31-class room taxonomy with mandatory mappings |
-| `annotation_schema.py` | Defines SFT-ready JSON schema (RoomCoordinates, SFTRoom, roomsRecognized) |
-| `label_normalizer.py` | Backward-compatible wrapper around taxonomy |
-| `quality_checker.py` | Room annotation validation: field names, format, taxonomy sync, overlap detection |
-| `sft_validator.py` | SFT-grade validation: confidence thresholds, spatial text filtering (1092 lines) |
-| `region_extractor.py` | Extracts cropped room regions as individual training images |
-| `abbreviations.py` | Canonical abbreviation map (BR→BEDROOM, CONF→CONFERENCE, etc.) |
-| `abbreviation_ocr_recovery.py` | Layer 2 recovery: image preprocessing + upscaling for small text OCR |
-| `residential_unit_detector.py` | Layer 1: VLM-based residential apartment detection (bedroom/bathroom counting) |
-| `synthetic_label_generator.py` | Layer 3: Synthetic label generation when OCR/VLM detection insufficient |
-| `residential_pipeline.py` | Orchestrates 3-layer residential abbreviation recovery |
-
-### Connected Projects
-
-#### PaliGemma2 Training Pipeline (`paligemma2/src/`)
-A complete 10-step fine-tuning pipeline for Google PaliGemma 2 (Vision Language Model):
-- **Steps 1-5**: PDF organization, image conversion, metadata generation, classification/VQA annotations
-- **Step 6**: Detection annotation setup with Label Studio converter to PaliGemma native `<loc0000>...<loc1023>` format
-- **Steps 7-10**: Train/val/test split creation, LoRA fine-tuning, evaluation metrics, error analysis
-- **Bridge**: `convert_preprocessing_to_paligemma.py` reads `processed_annotations/*.json` and outputs PaliGemma JSONL (F1)
-- **Advantage**: Native spatial tokens eliminate custom bbox format invention
-
-#### floorPlanVisionAIAdaptor (Production Inference)
-Production-ready application using Qwen2-VL with 4-bit quantization:
-- Takes PDF floor plans as input, outputs structured JSON analysis
-- Model lifecycle management with context manager support
-- GPU memory optimization via bit-width reduction
-- Configuration management for model selection, inference parameters, system prompts
-
-#### floorPlanVisionAI (Planned Modular Architecture)
-Scaffold-only design documenting a modular production system:
-- Separated concerns: config, preprocessing, detection, refinement, validation, association, orchestration
-- Currently empty; intended as future refactoring target
-- Provides architectural guidance for componentization
-
-### Configuration
-
-All settings are centralized in `config.py` and can be customized per use case (see Configuration section below). Key dataclasses:
-
-- **PDFConfig**: DPI, output format, page range
-- **OCRConfig**: Backend selection, confidence threshold, preprocessing, 53 room name patterns
-- **VLMConfig**: Backend selection (claude/qwen/unsloth), model ID, token limits, room taxonomy
-- **SAMConfig**: Model variant, checkpoint path, device auto-detection
-- **PipelineConfig**: Master config with factory methods (`for_high_detail()`, `for_fast_processing()`)
-
-## Configuration
-
-All settings are centralized in `config.py`. You can customize:
-
-### PDF Extraction
-- `dpi`: Resolution (default: 200)
-- `page_range`: Specific page range to extract
-
-### OCR
-- `confidence_threshold`: Minimum OCR confidence (default: 0.5)
-- `preprocess`: Enable image preprocessing (default: True)
-- `clahe_clip_limit`: Contrast enhancement strength
-
-### Template Matching
-- `threshold`: Detection threshold (default: 0.7)
-- `scales`: Multi-scale factors for matching
-- `rotations`: Rotation angles to try
-
-### VLM
-- `model`: Claude model to use (default: claude-sonnet-4-20250514)
-- `max_tokens`: Response token limit (default: 4096)
-- `max_retries`: API retry attempts (default: 3)
-
-### SAM
-- `model_type`: SAM variant (vit_h, vit_l, vit_b)
-- `checkpoint`: Path to model checkpoint
-
-## Output Structure
-
-After running, results are organized as:
-
-```
-results/
-├── images/                      # Extracted PNG images
-│   ├── document1_page000.png
-│   ├── document1_page001.png
-│   └── ...
-├── annotations/                 # JSON annotations
-│   ├── document1_page000.json   # {rooms, panels, electrical_counts}
-│   ├── document1_page001.json
-│   └── ...
-├── label_studio_import.json     # Ready to import into Label Studio
-├── needs_review.json            # Images flagged for human review
-├── pipeline_config.json         # Configuration used
-└── README.md                    # Results summary
-```
-
-## Environment Setup
-
-### 1. Set Claude API Key
+## SFT dataset and fine-tuning
 
 ```bash
-export ANTHROPIC_API_KEY="your-api-key-here"
+# 1. Export: a finished run dir (coco/ + processed_annotations/) → Qwen3-VL chat
+#    JSONL with group-aware train/val/test splits. The per-document cap is not
+#    optional: without it one document supplied 573/577 of the CL targets.
+python -m preprocessing_annotations.export.qwen_sft_exporter \
+  --run <run dir> --out <dataset dir> --max-targets-per-document 200
+
+# 2. Prove the GT documents are held out — run before every training job
+python eval/sft_holdout.py --dataset <dataset dir> [--dataset ...] \
+  --evaluation-input ../test_input
+
+# 3. Train
+python scripts/train_qwen3vl_unsloth.py --dataset <dataset dir> [--dataset ...] \
+  --out ../trained_adapters/<name> --model qwen3-vl-8b [hyperparameter flags]
+
+# 4a. Score a run against room GT (scores at the report's top level)
+python eval/room_gt_eval.py --run <run dir> --out gt_<run>.json
+
+# 4b. Or replay the filter stage under current code (scores in `as_run` /
+#     `baseline` / `variant` sections) — this is what the production chains feed
+#     the gate, because it re-scores every run under one version of the filter.
+python eval/room_replay.py --run <run dir> --out replay_<run>.json
+
+# 5. Gate the candidate against the baseline spread. Both report kinds are
+#    accepted; a mixed set is refused (sft_gate.py:load_reports).
+python eval/sft_gate.py --baseline replay_base_a.json --baseline replay_base_b.json \
+  --candidate replay_cand.json --out gate_cand.json [--noise-floor <delta>] \
+  [--replay-section baseline]
 ```
 
-Or create a `.env` file:
-```
-export ANTHROPIC_API_KEY=<your-api-key-here>
-```
+Design decisions encoded in the exporter (`export/qwen_sft_exporter.py`), each
+measured before the code existed:
 
-Then load it:
-```bash
-source .env
-```
+- Targets are **label boxes only**; other conventions are skipped, not mixed.
+- One example = one **tile**, the exact view inference gives the model; the grid
+  comes from the same `TileSplitter.for_page` the pipeline uses, so training and
+  inference views cannot drift.
+- Empty tiles are kept as negatives but capped.
+- A room is a target only in tiles that contain its whole box.
 
-### 2. Install Dependencies
+Splits are **group-aware** (`export/group_split.py`): near-duplicate pages of one
+document correlate 0.80–0.93, and related documents share room names at Jaccard
+0.39–0.59, so the split unit is a group (document, or a wider family named in a
+group map), never a page. Groups pinned in the map always land in test — that is
+how the GT pages are kept out of every training set.
 
-```bash
-pip install -e .
-```
+Hyperparameters are all CLI flags with the previous script's documented starting
+points as defaults, because none has been measured on this data. Training loss
+alone has never qualified a model here; scoring is `eval/room_gt_eval.py`.
 
-### 3. Download SAM Checkpoint (optional, for refinement)
+---
 
-```bash
-wget https://dl.fbaipublicfiles.com/segment_anything/sam_vit_h_4b8939.pth
-```
+## Evaluation and gates
 
-Place in `preprocessing_annotations/` directory or specify path in config.
+| Script | What it answers |
+|---|---|
+| `eval/room_gt_eval.py` | Score a run against room-polygon GT (48 pages, 1497 polygons): label localization, extent IoU, extent size, door/window attachment |
+| `eval/room_replay.py` | Re-run the **filter stage only** of a finished run under alternative filter settings, offline, in minutes instead of re-running the pipeline |
+| `eval/sft_gate.py` | Did the fine-tune beat the baseline, or beat the noise? Compares a candidate against the *spread* of several seeded baselines; `--candidate` is repeatable and the band is judged on its worst member. Consumes either report kind (`room_gt_eval` top-level scores, or a `room_replay` section chosen with `--replay-section`) and refuses a mixed set |
+| `eval/adapter_pin.py` | The shipped adapter's pinned recall band, read by both the CPU regression test and the GPU pin chain |
+| `eval/sft_holdout.py` | No GT-scored document may appear in training data. Measured empty intersection 2026-11-09; this turns that measurement into a re-runnable check |
+| `eval/split_integrity.py`, `eval/page_consistency.py` | Split and per-page consistency checks |
+| `eval/dense_tile_probe.py`, `eval/crop_reread_probe.py`, `eval/missed_room_ocr.py` | Targeted diagnostics |
 
-## Performance Considerations
+The gate exists because decoding is sampled (`VLM_DO_SAMPLE=true`,
+temperature 1.0): two runs of identical code on identical pages do not return
+identical numbers, and the measured baseline seed spread is 0.0140 label recall. A
+candidate a point above one baseline run has not necessarily done anything. Supply
+`--noise-floor` when gating against a single baseline — one baseline has no spread
+of its own, so the check otherwise passes on any positive delta.
 
-### Memory Usage
-- OCR Reader: ~500MB GPU memory
-- SAM Model: ~2GB GPU memory
-- Concurrent processing: Configure via `num_workers` in config
+---
 
-### Processing Speed
-
-| Task | Speed | Notes |
-|------|-------|-------|
-| PDF Extraction | ~5-10 sec/page | Depends on DPI |
-| OCR | ~10-30 sec/image | Faster on GPU |
-| VLM Annotation | ~30-60 sec/image | API latency included |
-| SAM Refinement | ~5-10 sec/room | Depends on image complexity |
-
-### GPU vs CPU
-
-The pipeline auto-detects GPU availability:
-- CUDA (NVIDIA)
-- MPS (Apple Silicon)
-- Falls back to CPU if unavailable
-
-## Troubleshooting
-
-### Module not found error
-
-```bash
-# Make sure you're in the right directory
-cd /home/ubuntu/floorplan_classifier/VLM/preprocessing_annotations
-
-# Then run
-python main.py --input ./data --output ./results
-```
-
-### API key not working
-
-```bash
-# Check environment variable is set
-echo $ANTHROPIC_API_KEY
-
-# If not set, source the .env file
-source .env
-```
-
-### Out of memory
-
-- Reduce DPI: `--dpi 150`
-- Use fast mode: `--fast`
-- Process fewer images at a time
-
-### Slow processing
-
-- Use fast mode: `--fast`
-- Disable preprocessing: modify config
-- Reduce template scales
-
-## Frequently Asked Questions (VLM Backends)
-
-### Which VLM backend should I use?
-
-For **Phase 3 Testing**, choose based on your priorities:
-
-1. **Claude API** (Recommended for most users)
-   - Fastest results (2-5 sec/image)
-   - Best quality annotations
-   - Minimal setup
-   - Requires API key and internet
-   - Cost: ~$0.05-0.30 per floorplan
-
-2. **Qwen** (Best for avoiding API costs)
-   - Free to run
-   - Works offline
-   - Slower (30-60 sec/image)
-   - Requires 15 GB VRAM
-   - No installation challenges
-
-3. **Unsloth** (Best of both worlds)
-   - Free and fast (15-30 sec/image)
-   - Works offline
-   - 2x faster than Qwen
-   - Requires 8 GB VRAM
-   - Installation can take time due to compilation
-
-### Why is my pipeline using Claude and not Qwen?
-
-Because `--vlm-backend` defaults to `claude`. You must explicitly add `--vlm-backend qwen` to use Qwen.
-
-### Is Unsloth already installed?
-
-No. Installation requires Unsloth to compile against your CUDA version. You can install it with:
-```bash
-pip install "unsloth[cu121]" --break-system-packages
-```
-
-### Can I use Unsloth without installing it?
-
-No, you must install it first. Once installed, use: `--vlm-backend unsloth`
-
-### How much does Claude API cost?
-
-Approximately:
-- ~$0.01-0.05 per image (depends on complexity)
-- ~$0.05-0.30 per floorplan (varies by page count and room complexity)
-
-### How do I verify which backend is running?
-
-Check the pipeline log after starting:
-```bash
-grep "Creating VLM backend" test_output_*/pipeline.log
-```
-
-Should show:
-- `Creating VLM backend: claude`
-- `Creating VLM backend: qwen`
-- `Creating VLM backend: unsloth`
-
-## Development
-
-### Running Tests
+## Testing
 
 ```bash
-pytest tests/
+pytest -q                     # fast suite — 729 passed, 1 skipped, 16 deselected, 64 s
+pytest -m slow                # GPU/network suite — 16 tests, minutes to hours
+pytest test/test_release.py   # release manifest checks
 ```
 
-### Adding Custom Room Patterns
+`pytest.ini` sets `testpaths = test` and `addopts = -m "not slow"`. Slow tests take
+the pipeline's own run lock via `test/conftest.py::gpu_run_lock`, so a slow test
+cannot collide with a pipeline run on the single GPU. The one skip is a vocabulary
+test whose pre-fix run artifact is not present in this environment
+(`test/test_vocab_tool.py:94`).
 
-Edit `config.py`:
-```python
-@dataclass
-class OCRConfig:
-    room_name_patterns: List[str] = field(
-        default_factory=lambda: [
-            r"YOUR_PATTERN_HERE",
-            # ... other patterns
-        ]
-    )
-```
+Notable guard tests, each pinning a bug that was found the hard way:
 
-### Extending with Custom Exporters
+- `test_adapter_band_regression.py` — pin-consistency assertions run in the fast
+  suite; the three stored-run re-scorings are marked `slow` (~68 s each, no GPU) and
+  check `eval/pins/adapter_real_v1_band.json` at tolerance 0.0005. Catches scoring
+  or filtering drift that nothing else would notice.
+- `test_release.py` — the release's code check compares against the **live**
+  fingerprint, so it fails until a legitimate code change is re-pinned. Also holds the
+  detector checks: missing YOLO weights, missing `ultralytics` and an uncached SAM3
+  checkpoint each fail preflight; a `model load failed` in any run log (or no log at
+  all) fails postflight; and the manifest's forbidden phrase must still be what both
+  detectors log.
+- `test_page_image_coordinate_space.py` — the stored PNG must not be resized after
+  OCR has read it; enforced structurally, by asserting no in-place image resizer is
+  exposed at all (`test_no_in_place_page_image_resizer_is_exposed`).
+- `test_merge_vlm_ocr_scan.py` — OCR rooms merge against VLM rooms only, never
+  against each other. The test asserts four neighbouring 16 px labels all survive;
+  the recall effect of the underlying fix is recorded in `deploy/release.json`
+  (~0.025 on every baseline), not asserted here.
+- `test_sft_holdout.py`, `test_group_split.py`, `test_split_integrity.py` — training
+  data may not contain evaluation documents.
+- `test_yolo_objects_ocr_only_guard.py`, `test_unattached_object_detections.py` —
+  object detections stay tag-only and are persisted completely.
 
-```python
-from preprocessing_annotations.exporters import LabelStudioExporter
+---
 
-class CustomExporter(LabelStudioExporter):
-    def export(self, annotations_dir, images_dir, output_file):
-        # Your custom export logic
-        pass
-```
+## Reproducibility
 
-## Citation
+Three mechanisms, all enforced in code:
 
-If you use this pipeline in your research, please cite:
+1. **Code fingerprint** (`orchestration/code_fingerprint.py`) — a content hash over
+   the pipeline source, recorded in every run's `pipeline_config.json`. Git is not
+   enough: most runs are made from a working tree with uncommitted edits, so a
+   commit hash would call two different trees the same. The gate refuses to compare
+   runs from different fingerprints.
+2. **Run lock** (`orchestration/run_lock.py`) — one pipeline run at a time. VLM and
+   SAM each load multi-GB models; two concurrent runs exhaust host RAM and freeze
+   the machine. Default lock path `/tmp/floorplan_pipeline.lock`, override with
+   `$FLOORPLAN_LOCK`.
+3. **Seeded sampling** — `VLM_SEED` makes a run reproducible, not merely repeatable:
+   re-running seed 1234 reproduced a full scored report bit-identically.
 
-```bibtex
-@software{preprocessing_annotations_2024,
-  title={Preprocessing Annotations: MEP Floor Plan Pipeline},
-  author={Computer Vision Team},
-  year={2026},
-  url={https://github.com/...}
-}
-```
+### Operational rules for long chains
 
-## License
+- **Do not edit `src/` while a chain runs.** Every run records its fingerprint and
+  the chain aborts the moment one differs — but the half-edited runs are still
+  wasted GPU hours.
+- **Do not edit a running shell script.** Bash reads a script by byte offset; an
+  in-place edit truncates the tail of the chain. Stop it by PID, edit, relaunch.
+- **Check for a running GPU job before starting one.** The 8B needs the whole T4;
+  another session's probe beside a run kills it when the pipeline reloads the model.
 
-[Your License Here]
+---
 
-## Support
+## Known limits
 
-For issues, questions, or contributions, please contact the Computer Vision Team.
+Stated here and in `deploy/release.json` under `known_limits`, so a consumer learns
+them from the documentation rather than from an empty field in production.
+
+- **Room extents are not produced.** `gt_rooms_iou_matched` is 0 and `extent_f1` is
+  0.0. The pipeline localizes room *labels*. `--use-vector-room-extent` is a pilot,
+  off by default.
+- **Exporters read the legacy `rooms` structure**, not `roomsRecognized`. Anything
+  that consumes the richer structure must read the annotations directly.
+- **Label recall is ~0.611** on the 13-document GT set with the shipped adapter; the
+  band file holds the exact interval.
+- **`--corroboration-weight` is inert** (default 0.0) and unvalidated at any nonzero
+  value. Do not ship a nonzero default without the confidence-distribution spike.
+- **`--ocr-vlm-fallback` boxes are not in page coordinates.** Off by default.
+- **`--use-sam3-exemplar` is contested on real pages**: a measured F1 gain on all
+  three GT datasets, but it has also lost real doors under its current tile grid.
+  Read the detector docstring before enabling in production.
+- **YOLO and SAM3 can be silently absent from a run — caught by `deploy/release.py`,
+  not by `main.py`.** Both detectors catch their own load failure, log
+  `model load failed`, and let the run finish. Detections are tag-only, so the recall
+  band cannot notice either. `release.py` now fails preflight when a detector the
+  manifest enables cannot load, and postflight when the run's log says one did not;
+  a direct `main.py` run is still unchecked. Three causes:
+  - **Weights are located by directory layout.** `config/config.py:28` takes `parents[4]`
+    as the project root and resolves `yolo_checkpoints/` (`:1423`) beneath it, with no
+    environment override. A checkout anywhere but the layout the chains use — for
+    instance as the `floorPlanVisionAI/preprocessing` submodule — loses them. Not fixed
+    in code (it would move `code_fingerprint`); preflight reports the exact path it
+    looked for.
+  - **`ultralytics` was not in `requirements.txt`** though the YOLO and SAM3 code import
+    it. Now pinned (`8.4.104`). A stack built before that pin still lacks it, and so
+    does a checkout of this repository from before it.
+  - **SAM3's `facebook/sam3` checkpoint must already be in the Hugging Face cache**
+    (`config/config.py:1889`, `local_files_only=True`).
+
+  For a run made without `release.py`: `grep -c "model load failed" <run>/pipeline_*.log`
+  must be 0.
+- **The `floorPlanVisionAI` wrapper is now the serving layer** (`floorplan-service`): a
+  FastAPI service that runs this release through `deploy/release.py` and never imports
+  the pipeline. Its submodule pointer was bumped to current `main` (`8434d9d`) on
+  2026-11-12; that commit predates the detector checks, so the wrapper only gains them
+  when the pointer is bumped again.
+
+---
+
+## Related projects in this workspace
+
+| Path | Role |
+|---|---|
+| `../paligemma2/src/` | 10-step PaliGemma 2 fine-tuning pipeline; `convert_preprocessing_to_paligemma.py` bridges this pipeline's `processed_annotations/` into PaliGemma `<locYYYY>` JSONL |
+| `../floorPlanVisionAIAdaptor/` | Qwen2-VL 4-bit production inference application |
+| `../floorPlanVisionAI/` | `floorplan-service`: an HTTP service that runs this release as background jobs via `deploy/release.py`. `preprocessing/` is a submodule of this repository, pointed at current `main` since 2026-11-12 |
+| `../trained_adapters/` | LoRA adapters, addressed by path and pinned by content digest in the release manifest |
+| `../rebaseline_1275.sh`, `../separate_adapters.sh`, `../adapter_pin_check.sh` | Multi-day GPU chain scripts: baselines, training, gating, pin checks. Launch by absolute path |
+
+## Further documentation
+
+- [`deploy/README.md`](deploy/README.md) — the deployable unit and what it stops
+- [`docs/RUNNING_THE_PROJECT.md`](docs/RUNNING_THE_PROJECT.md) — step-by-step run guide
+- [`docs/mlflow_setup.md`](docs/mlflow_setup.md) — self-hosted tracking, with and without a server
+- [`docs/VLM_COST_ANALYSIS.md`](docs/VLM_COST_ANALYSIS.md), [`docs/QUICK_VLM_DECISION.md`](docs/QUICK_VLM_DECISION.md) — backend selection and cost
+- `../PROJECT_STATE.md` — project-level status log
+
+## Deprecated
+
+- `scripts/finetune_qwen.py` — targets Qwen2.5-VL, guesses box conventions (wrong for
+  every room this pipeline emits) and shuffles pages into splits with no group
+  awareness and no seed. Superseded by `export/qwen_sft_exporter.py` +
+  `scripts/train_qwen3vl_unsloth.py`.
+- `scripts/annotate_pipeline_legacy.py` — pre-package entry point.

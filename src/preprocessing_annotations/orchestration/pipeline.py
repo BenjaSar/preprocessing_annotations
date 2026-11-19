@@ -28,7 +28,7 @@ from ..ingestion.crop_reread import Reread
 from ..vlm.read import UnslothCropTextReader
 from .crop_reread_step import CropRereadStep
 from ..ingestion.vector_walls import VectorWallError, VectorWallReader
-from .room_extent_step import RoomExtentStep
+from .room_extent_step import RoomExtentStep, mirror_extents
 from ..vlm.vlm_annotator import VLMAnnotator
 from ..vlm.semantic_reconciler import SemanticReconciler
 from ..vlm.vlm_backend import VLMFactory, UnslothQwenBackend
@@ -1639,7 +1639,14 @@ class AnnotationPipeline:
     def _attach_room_extents(
         self, step: RoomExtentStep, ann_path: Path, annotation: Dict[str, Any], counts: Counter,
     ) -> None:
-        """Add coordinates.extent to this page's roomsRecognized; tally the outcome."""
+        """Add the extent to this page's rooms, both lists; tally the outcome.
+
+        The extent is written onto `roomsRecognized` and mirrored onto the
+        legacy `rooms` entry for the same room, because the COCO export reads
+        only `rooms`. The label box in both is left exactly as it was: the
+        extent is a second output, and substituting it moves rooms' centres
+        out of their GT room.
+        """
         source = self._source_page_for(ann_path)
         if source is None:
             counts["pages_without_source_pdf"] += 1
@@ -1655,6 +1662,14 @@ class AnnotationPipeline:
             return
         counts["rooms_with_extent"] += attached
         counts["pages_with_extent"] += attached > 0
+        rooms = annotation.get("rooms", [])
+        if mirror_extents(rooms, annotation["roomsRecognized"]) is None:
+            logger.warning(
+                f"    {ann_path.name}: extents not mirrored onto rooms[] -- "
+                f"{len(rooms)} rooms vs {len(annotation['roomsRecognized'])} "
+                f"roomsRecognized; the COCO export carries none for this page"
+            )
+            counts["pages_not_mirrored"] += 1
 
     def _assemble_ocr_candidates(
         self,
